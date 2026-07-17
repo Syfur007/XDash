@@ -1,0 +1,49 @@
+# =============================================================================
+# Experiment Dashboard — settings
+# =============================================================================
+# Everything the dashboard needs to know about the repo it lives in.
+# Edit `repo_root` if you move this folder somewhere else; every other path
+# below is resolved relative to it, so the whole `exp_dashboard/` directory
+# can be copied into (or out of) any repo that follows the same layout.
+
+repo_root: ".."               # path to the repo root, relative to this file
+
+configs_dir: "configs"        # where .yaml / .yml experiment configs live
+logs_dir: "logs"              # where train.py / eval.py write their log files
+runs_dir: "runs"              # TensorBoard event directory
+checkpoints_dir: "checkpoints"
+
+python_executable: "python"   # interpreter used to launch train.py / eval.py
+train_script: "train.py"
+eval_script: "eval.py"
+
+# Extra flags always appended to eval runs (besides --config)
+eval_default_args: ["--ensemble"]
+
+# ---------------------------------------------------------------------------
+# Every experiment is run inside its own tmux session, exactly like you'd run
+# it by hand: a session is created, `cd` into repo_root, this activation
+# command is typed (if set), then the train/eval command is typed. Output is
+# streamed to the dashboard by polling the tmux pane.
+#
+# Examples:
+#   env_activate_cmd: "conda activate thesis"
+#   env_activate_cmd: "source ~/miniconda3/bin/activate thesis"
+#   env_activate_cmd: "source .venv/bin/activate"
+# Leave blank to run with whatever environment the dashboard server itself
+# was started in.
+env_activate_cmd: "conda activate thesis"
+
+tmux_session_prefix: "expdash"
+tmux_pane_width: 500     # wide pane so long log lines don't wrap and break parsing
+tmux_pane_height: 50
+tmux_history_limit: 100000
+
+server_host: "0.0.0.0"
+server_port: 8000
+
+tensorboard_port: 6006
+tensorboard_host: "0.0.0.0"
+
+# How often the frontend polls terminals/status, in milliseconds
+poll_interval_ms: 2000

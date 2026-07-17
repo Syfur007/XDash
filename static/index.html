@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Experiment Console</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- ============================================================ sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark"></div>
+      <div>
+        <div class="brand-text">Experiment Console</div>
+        <div class="brand-sub">TRAIN · TRACK · OBSERVE</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <div class="nav-item active" data-view="configs">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 9v11"/></svg>
+        Configs
+      </div>
+      <div class="nav-item" data-view="terminals">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M8 9l3 3-3 3M13 15h3"/></svg>
+        Terminals
+      </div>
+      <div class="nav-item" data-view="reports">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h9l5 5v13H6z"/><path d="M14 3v5h5M9 13h6M9 17h6M9 9h2"/></svg>
+        Reports
+      </div>
+      <div class="nav-item" data-view="history">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        History
+      </div>
+      <div class="nav-item" data-view="tensorboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M10 19V9M16 19v-6M22 19H2"/></svg>
+        TensorBoard
+      </div>
+    </nav>
+
+    <div class="sidebar-footer" id="sidebar-footer">
+      <div><b>repo</b></div>
+      <div id="footer-repo">…</div>
+      <div style="margin-top:8px;"><b>env activate</b></div>
+      <div id="footer-env">…</div>
+      <div id="footer-tmux-warning" class="hidden" style="margin-top:8px;color:var(--red);">⚠ tmux not found on PATH</div>
+    </div>
+  </aside>
+
+  <!-- ============================================================ topbar -->
+  <header class="topbar">
+    <div class="telemetry">
+      <div class="pulse-dot" id="telemetry-dot"></div>
+      <span class="state-label" id="telemetry-state">IDLE</span>
+      <span class="job-name" id="telemetry-job"></span>
+      <span class="metric-chip hidden" id="telemetry-metric"></span>
+    </div>
+    <div class="topbar-spacer"></div>
+    <div class="status-pills" id="status-pills">
+      <div class="pill running">RUNNING <b id="count-running">0</b></div>
+      <div class="pill restart">NEEDS RESTART <b id="count-restart">0</b></div>
+      <div class="pill completed">DONE <b id="count-completed">0</b></div>
+      <div class="pill failed">FAILED <b id="count-failed">0</b></div>
+    </div>
+  </header>
+
+  <!-- ============================================================ main -->
+  <main class="main">
+
+    <!-- ---------------------------------------------------- Configs view -->
+    <section class="view active" id="view-configs">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Configs</div>
+          <div class="view-sub">Browse, edit, and launch experiment configs from the configs/ directory.</div>
+        </div>
+        <button class="btn btn-ghost" id="btn-refresh-configs">Refresh</button>
+      </div>
+
+      <div class="configs-layout">
+        <div class="panel config-tree">
+          <div class="panel-header"><span>Configs</span><span id="config-count"></span></div>
+          <div class="config-tree-body" id="config-tree-body">
+            <div class="empty-state">Loading…</div>
+          </div>
+        </div>
+
+        <div class="panel editor-pane">
+          <div class="editor-toolbar">
+            <span class="editor-path" id="editor-path">No config selected</span>
+            <span class="editor-status" id="editor-status"></span>
+            <button class="btn btn-sm" id="btn-save-config" disabled>Save changes</button>
+          </div>
+          <div class="editor-body" id="editor-body">
+            <div class="empty-state">Select a config on the left to view and edit it.</div>
+          </div>
+          <div class="run-bar" id="run-bar" style="display:none;">
+            <label>MODE</label>
+            <select id="run-mode">
+              <option value="train">train.py</option>
+              <option value="eval">eval.py</option>
+            </select>
+            <label>EXTRA ARGS</label>
+            <input class="text-input grow" id="run-extra-args" placeholder="--epochs 10 --lr 0.0005" />
+            <button class="btn btn-primary" id="btn-run">Launch in terminal ▸</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- Terminals view -->
+    <section class="view" id="view-terminals">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Terminals</div>
+          <div class="view-sub">Every experiment run is a tmux session. Select one to see its full scrollable output.</div>
+        </div>
+        <button class="btn btn-ghost" id="btn-refresh-terminals">Refresh</button>
+      </div>
+
+      <div class="configs-layout">
+        <div class="panel config-tree">
+          <div class="panel-header"><span>Sessions</span><span id="terminal-count"></span></div>
+          <div class="config-tree-body" id="terminal-list-body">
+            <div class="empty-state">Loading…</div>
+          </div>
+        </div>
+
+        <div class="panel editor-pane">
+          <div class="editor-toolbar" id="terminal-toolbar" style="flex-wrap:wrap;">
+            <div style="flex:1;min-width:220px;">
+              <div class="term-title" id="term-title">No terminal selected</div>
+              <div class="term-subtitle" id="term-subtitle"></div>
+            </div>
+            <div class="job-actions" id="terminal-actions"></div>
+          </div>
+          <div class="editor-body" id="terminal-body">
+            <div class="empty-state">Select a session on the left, or launch a new one from the Configs tab.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- Reports view -->
+    <section class="view" id="view-reports">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Reports</div>
+          <div class="view-sub">Evaluation reports written to the logs/ directory. Select 2+ to compare.</div>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-primary hidden" id="btn-compare-reports">Compare selected (<span id="compare-count">0</span>)</button>
+          <button class="btn btn-ghost" id="btn-refresh-reports">Refresh</button>
+        </div>
+      </div>
+
+      <div class="configs-layout">
+        <div class="panel config-tree">
+          <div class="panel-header"><span>Reports</span><span id="report-count"></span></div>
+          <div class="config-tree-body" id="report-list-body">
+            <div class="empty-state">Loading…</div>
+          </div>
+        </div>
+
+        <div class="panel editor-pane">
+          <div class="editor-body" id="report-body" style="overflow:auto; display:block; padding:20px;">
+            <div class="empty-state">Select a report on the left to view its details.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- History view -->
+    <section class="view" id="view-history">
+      <div class="view-header">
+        <div>
+          <div class="view-title">History</div>
+          <div class="view-sub">Browse every file written under <span id="history-logdir" style="font-family:var(--mono)"></span>.</div>
+        </div>
+        <button class="btn btn-ghost" id="btn-refresh-history">Refresh</button>
+      </div>
+
+      <div class="configs-layout">
+        <div class="panel history-tree-panel">
+          <div class="panel-header"><span>logs/</span></div>
+          <div class="history-tree-body" id="history-tree-body">
+            <div class="empty-state">Loading…</div>
+          </div>
+        </div>
+
+        <div class="panel editor-pane">
+          <div class="editor-toolbar" id="history-toolbar">
+            <span class="editor-path" id="history-file-path">No file selected</span>
+            <span class="editor-status" id="history-file-meta"></span>
+          </div>
+          <div class="editor-body" id="history-file-body" style="overflow:auto;">
+            <div class="empty-state">Select a file on the left to view it.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- TensorBoard view -->
+    <section class="view" id="view-tensorboard">
+      <div class="view-header">
+        <div>
+          <div class="view-title">TensorBoard</div>
+          <div class="view-sub">Live scalars, images, and graphs from <span id="tb-logdir" style="font-family:var(--mono)"></span></div>
+        </div>
+      </div>
+      <div class="panel tb-panel">
+        <div class="tb-status-row">
+          <div class="pulse-dot" id="tb-dot"></div>
+          <div>
+            <div class="tb-status-label" id="tb-status-label">Not running</div>
+            <div class="tb-status-sub" id="tb-status-sub">Starts a tensorboard process on the server and opens it in a new browser tab.</div>
+          </div>
+        </div>
+        <div class="tb-toolbar">
+          <button class="btn btn-primary" id="btn-tb-start">Start TensorBoard</button>
+          <button class="btn btn-danger hidden" id="btn-tb-stop">Stop</button>
+          <a class="btn btn-ghost hidden" id="btn-tb-open" target="_blank" rel="noopener">Open in new tab ↗</a>
+        </div>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="modal-backdrop hidden" id="confirm-backdrop">
+  <div class="modal">
+    <div class="modal-title" id="confirm-title">Are you sure?</div>
+    <div class="modal-body" id="confirm-body"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="confirm-cancel">Cancel</button>
+      <button class="btn btn-danger" id="confirm-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/yaml/yaml.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

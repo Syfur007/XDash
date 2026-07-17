@@ -1,0 +1,4 @@
+data/terminals_state.json
+data/dashboard_logs/
+__pycache__/
+*.pyc
