@@ -26,6 +26,7 @@ from .config import settings
 from . import configs as cfg
 from . import tmux_runner as tmux
 from . import reports
+from . import monitors
 from .log_parser import parse_log_text
 
 _lock = threading.Lock()
@@ -234,7 +235,10 @@ def list_terminals() -> List[Dict[str, Any]]:
     result = [_status_for(r, alive_sessions) for r in records]
     result.sort(key=lambda r: r.get("created_at") or "", reverse=True)
 
-    unmanaged = sorted(alive_sessions - managed_names)
+    unmanaged = sorted(
+        name for name in (alive_sessions - managed_names)
+        if not monitors.is_monitor_session(name)
+    )
     for name in unmanaged:
         result.append({
             "session_name": name,

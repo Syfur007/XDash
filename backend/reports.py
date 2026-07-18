@@ -1,5 +1,6 @@
 """Discover and read evaluation report JSON files (written by eval.py) from
-the logs/ directory, and support comparing several of them at once.
+reports_dir (configurable in dashboard_config.yaml; defaults to logs_dir),
+and support comparing several of them at once.
 
 A file is treated as a report if it parses as JSON and has a "metrics" key —
 we don't rely on a strict filename convention beyond that, since the exact
@@ -20,20 +21,20 @@ LOWER_IS_BETTER = {"hd95", "asd", "mean_ms", "median_ms", "std_ms", "p95_ms", "p
 
 
 def _iter_report_files():
-    if not settings.logs_dir.exists():
+    if not settings.reports_dir.exists():
         return
-    for p in sorted(settings.logs_dir.rglob("*_report.json")):
+    for p in sorted(settings.reports_dir.rglob("*_report.json")):
         if p.is_file():
             yield p
 
 
 def _relpath(p: Path) -> str:
-    return p.relative_to(settings.logs_dir).as_posix()
+    return p.relative_to(settings.reports_dir).as_posix()
 
 
 def _resolve(rel_path: str) -> Path:
-    candidate = (settings.logs_dir / rel_path).resolve()
-    if settings.logs_dir.resolve() not in candidate.parents and candidate != settings.logs_dir.resolve():
+    candidate = (settings.reports_dir / rel_path).resolve()
+    if settings.reports_dir.resolve() not in candidate.parents and candidate != settings.reports_dir.resolve():
         raise ValueError("Path escapes logs directory")
     return candidate
 

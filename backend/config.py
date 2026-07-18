@@ -23,6 +23,8 @@ class Settings:
         self.logs_dir = self.repo_root / raw.get("logs_dir", "logs")
         self.runs_dir = self.repo_root / raw.get("runs_dir", "runs")
         self.checkpoints_dir = self.repo_root / raw.get("checkpoints_dir", "checkpoints")
+        self.plots_dir = self.repo_root / raw.get("plots_dir", "logs")
+        self.reports_dir = self.repo_root / raw.get("reports_dir", raw.get("logs_dir", "logs"))
 
         self.python_executable = raw.get("python_executable", "python")
         self.train_script = raw.get("train_script", "train.py")
@@ -30,13 +32,13 @@ class Settings:
         self.eval_default_args = raw.get("eval_default_args", []) or []
 
         self.env_activate_cmd = (raw.get("env_activate_cmd") or "").strip()
-        self.tmux_session_prefix = raw.get("tmux_session_prefix", "expdash")
+        self.tmux_session_prefix = raw.get("tmux_session_prefix", "xdash")
         self.tmux_pane_width = int(raw.get("tmux_pane_width", 500))
         self.tmux_pane_height = int(raw.get("tmux_pane_height", 50))
         self.tmux_history_limit = int(raw.get("tmux_history_limit", 100000))
 
         self.server_host = raw.get("server_host", "0.0.0.0")
-        self.server_port = int(raw.get("server_port", 8000))
+        self.server_port = int(raw.get("server_port", 6070))
 
         self.tensorboard_port = int(raw.get("tensorboard_port", 6006))
         self.tensorboard_host = raw.get("tensorboard_host", "0.0.0.0")
@@ -52,11 +54,12 @@ class Settings:
         self.state_dir = DASHBOARD_DIR / "data"
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.state_dir / "terminals_state.json"
+        self.monitors_file = self.state_dir / "monitors.json"
         self.dashboard_log_dir = self.state_dir / "dashboard_logs"
         self.dashboard_log_dir.mkdir(parents=True, exist_ok=True)
 
     def ensure_dirs(self):
-        for d in (self.configs_dir, self.logs_dir, self.runs_dir, self.checkpoints_dir):
+        for d in (self.configs_dir, self.logs_dir, self.runs_dir, self.checkpoints_dir, self.plots_dir, self.reports_dir):
             d.mkdir(parents=True, exist_ok=True)
 
 

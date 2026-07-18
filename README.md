@@ -32,7 +32,7 @@ pip install -r requirements.txt
 python server.py
 ```
 
-Open **http://localhost:8000**.
+Open **http://localhost:6070**.
 
 Requires **tmux** on your system (`sudo apt install tmux` / `brew install tmux`)
 — every experiment is run inside a tmux session (see below). If you want live
@@ -51,7 +51,8 @@ Everything the dashboard needs to know about your repo lives in
 | key | meaning |
 |---|---|
 | `repo_root` | path to your repo root, relative to this folder (default: `..`) |
-| `configs_dir` / `logs_dir` / `runs_dir` / `checkpoints_dir` | relative to `repo_root` |
+| `configs_dir` / `logs_dir` / `runs_dir` / `checkpoints_dir` / `plots_dir` | relative to `repo_root` |
+| `reports_dir` | where eval.py writes `*_report.json` files (defaults to `logs_dir` if unset) |
 | `python_executable` | interpreter used to launch `train.py` / `eval.py` |
 | `train_script` / `eval_script` | script filenames |
 | `eval_default_args` | flags always appended on eval runs (e.g. `["--ensemble"]`) |
@@ -110,20 +111,56 @@ it from there. If a report *does* exist, it's shown as **Completed** instead
 (no restart offered, since eval already ran and produced results).
 
 ### Reports
-Any `.json` file under `logs/` that contains a `"metrics"` key is treated as
-an evaluation report — no fixed naming convention required. The Reports tab
-groups them by sub-directory the same way Configs does, and clicking one
-shows every metric as a stat card, a radar chart for the 0–1-scale metrics
-(dice/mIoU/precision/recall/specificity/F2/accuracy), plus model, efficiency,
-environment, and full config details. **Select two or more** (checkboxes) and
-hit **Compare selected** for a side-by-side metrics table (best value per row
-highlighted), an overlaid radar chart, and a config-diff table that only
-lists the keys that actually differ between the runs.
+Any `.json` file under `reports_dir` that contains a `"metrics"` key is
+treated as an evaluation report — no fixed naming convention required. The
+Reports tab groups them by sub-directory the same way Configs does, and
+clicking one shows every metric as a stat card, a radar chart for the
+0–1-scale metrics (dice/mIoU/precision/recall/specificity/F2/accuracy), plus
+model, efficiency, environment, and full config details. **Select two or
+more** (checkboxes) and hit **Compare selected** for a side-by-side metrics
+table, an overlaid radar chart, and a config-diff table that only lists keys
+that actually differ. Each report gets one consistent color used everywhere
+on the comparison (table header swatch + radar line); the best value in each
+metric row is highlighted in a distinct emerald tone that's never one of the
+report accent colors, so it's always unambiguous.
+
+### History
+A read-only, recursive file browser with a source switcher — built into the
+directory panel's own header — for **Logs** (`logs_dir`: training logs, eval
+reports, anything text-ish) or **Images** (`plots_dir`: eval plots,
+prediction overlays). Each source only ever shows files of its own type
+(images never show up under Logs and vice versa; empty folders after
+filtering are hidden too). Selecting a text file previews it inline (JSON is
+pretty-printed); selecting an image renders it directly, with an "open full
+size" link. This is separate from Reports: Reports understands *report
+content* specifically (metrics, config, comparisons); History is a plain
+directory browser for everything else in those folders.
+
+### Machine Stats
+A small, permanent list of system/GPU monitoring commands — `nvidia-smi`,
+`htop`, `nvtop`, `free -h`, `df -h` ship by default — each launched in its
+own tmux session on demand, reusing the exact same capture-pane mechanism as
+Terminals. One-shot commands (`nvidia-smi`, `df -h`) are automatically
+wrapped in `watch -n <interval>` so they keep refreshing; commands that
+already refresh themselves (`htop`, `nvtop`) are run as-is (set their watch
+interval to `0`). Add your own via the form at the bottom of the page (name +
+command + watch interval) — these persist in `data/monitors.json` and can be
+removed; the built-in five can't be, though you can still stop them anytime.
 
 ### TensorBoard
-Starts a single shared `tensorboard --logdir runs/` process on demand and
-embeds it in an iframe. Since it points at the whole `runs/` directory, every
-experiment's event file shows up automatically.
+Starts a single shared `tensorboard --logdir runs/` process on demand — after
+a confirmation prompt, since it spawns a background process on the server —
+and opens it in a new browser tab rather than embedding it, which is more
+reliable across browsers than an iframe. Since it points at the whole
+`runs/` directory, every experiment's event file shows up automatically.
+
+## Mobile
+Below ~860px width the sidebar becomes a slide-in overlay (hamburger button
+in the top bar), and every two-pane layout (Configs, Terminals, Reports,
+History) stacks into a single scrollable column instead of a fixed side-by-
+side split. Anywhere a name might be too long to read in full (config paths,
+terminal/session names, report names, file-tree entries), hovering it shows
+the full value as a tooltip.
 
 ## Notes & limitations
 

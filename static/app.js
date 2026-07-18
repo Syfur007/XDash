@@ -30,6 +30,10 @@ const state = {
   historyTree: [],
   historyExpanded: new Set(),
   selectedHistoryFile: null,
+  historySource: "logs",
+
+  monitors: [],
+  selectedMonitor: null,
 
   pollTimer: null,
 };
@@ -96,8 +100,23 @@ function showConfirm(title, body) {
 // ---------------------------------------------------------------- nav
 function initNav() {
   document.querySelectorAll(".nav-item").forEach((item) => {
-    item.addEventListener("click", () => switchView(item.dataset.view));
+    item.addEventListener("click", () => {
+      switchView(item.dataset.view);
+      closeSidebar();
+    });
   });
+  document.getElementById("btn-hamburger").addEventListener("click", toggleSidebar);
+  document.getElementById("sidebar-backdrop").addEventListener("click", closeSidebar);
+}
+
+function toggleSidebar() {
+  document.querySelector(".sidebar").classList.toggle("open");
+  document.getElementById("sidebar-backdrop").classList.toggle("open");
+}
+
+function closeSidebar() {
+  document.querySelector(".sidebar").classList.remove("open");
+  document.getElementById("sidebar-backdrop").classList.remove("open");
 }
 
 function switchView(view) {
@@ -106,6 +125,7 @@ function switchView(view) {
   if (view === "tensorboard") refreshTensorboardStatus();
   if (view === "reports" && !state.reportGroups.length) loadReports();
   if (view === "history" && !state.historyTree.length) loadHistory();
+  if (view === "monitors") loadMonitors();
 }
 
 // ---------------------------------------------------------------- system info
@@ -113,7 +133,9 @@ async function loadSystem() {
   state.system = await api("/api/system");
   document.getElementById("footer-repo").textContent = state.system.repo_root;
   document.getElementById("tb-logdir").textContent = state.system.runs_dir;
-  document.getElementById("history-logdir").textContent = state.system.logs_dir;
+  document.getElementById("history-logdir").textContent = historySourceDir();
+  document.getElementById("history-dir-label").textContent = historySourceDir();
+  document.getElementById("reports-dir-label").textContent = state.system.reports_dir;
   document.getElementById("footer-env").textContent = state.system.env_activate_cmd || "(none configured)";
   document.getElementById("footer-tmux-warning").classList.toggle("hidden", !!state.system.tmux_available);
 }
@@ -147,7 +169,7 @@ function renderConfigTree() {
     html += `<div class="category"><div class="category-label">${escapeHtml(group.category)}</div>`;
     for (const c of group.configs) {
       const active = c.path === state.selectedConfigPath ? "active" : "";
-      html += `<div class="config-item ${active}" data-path="${escapeHtml(c.path)}">
+      html += `<div class="config-item ${active}" data-path="${escapeHtml(c.path)}" title="${escapeHtml(c.path)}">
         <span class="dot"></span><span>${escapeHtml(c.name)}</span>
       </div>`;
     }
@@ -259,7 +281,7 @@ function renderTerminalList() {
   body.innerHTML = state.terminals.map((t) => {
     const active = t.session_name === state.selectedTerminal ? "active" : "";
     const title = escapeHtml(t.experiment_name || t.session_name);
-    const modeTag = t.mode ? `<span class="mode-tag">${t.mode}</span>` : "";
+    const modeTag = t.mode ? `<span class="mode-tag mode-${t.mode}">${t.mode}</span>` : "";
     const sub = t.managed
       ? `${escapeHtml(t.config_path || "")}${t.restart_count ? ` · restarted ${t.restart_count}×` : ""}`
       : "unmanaged tmux session";
@@ -275,8 +297,8 @@ function renderTerminalList() {
     return `<div class="term-card ${active}" data-session="${escapeHtml(t.session_name)}">
       <div class="term-card-accent ${t.status}"></div>
       <div class="term-card-body">
-        <div class="term-card-title">${title}${modeTag}</div>
-        <div class="term-card-sub">${sub}</div>
+        <div class="term-card-title" title="${title}">${title}${modeTag}</div>
+        <div class="term-card-sub" title="${escapeHtml(sub)}">${sub}</div>
         <div class="term-card-footer">
           <span class="term-card-status ${t.status}">${STATUS_LABEL[t.status] || t.status} · ${timeAgo(t.created_at)}</span>
           ${metricChip}
@@ -336,14 +358,16 @@ function renderTerminalDetail(term) {
     state.renderedTerminalSession = term.session_name;
     body.innerHTML = `<div class="terminal-detail-grid">
         <div class="terminal-meta-line">Command: <b>${escapeHtml(term.command || "(unmanaged session)")}</b></div>
-        ${term.config_path ? `<div class="config-preview ${state.configPreviewCollapsed ? "collapsed" : ""}" id="config-preview">
-          <div class="config-preview-header" id="config-preview-header">
-            <span>Config (read-only) — ${escapeHtml(term.config_path)}</span>
-            <span class="chevron">▾</span>
-          </div>
-          <div class="config-preview-body" id="config-preview-body">Loading…</div>
-        </div>` : ""}
-        <div class="chart-wrap hidden" id="terminal-chart-wrap"><canvas id="terminal-chart"></canvas></div>
+        <div class="terminal-top-row">
+          ${term.config_path ? `<div class="config-preview ${state.configPreviewCollapsed ? "collapsed" : ""}" id="config-preview">
+            <div class="config-preview-header" id="config-preview-header">
+              <span>Config (read-only) — ${escapeHtml(term.config_path)}</span>
+              <span class="chevron">▾</span>
+            </div>
+            <div class="config-preview-body" id="config-preview-body">Loading…</div>
+          </div>` : ""}
+          <div class="chart-wrap hidden" id="terminal-chart-wrap"><canvas id="terminal-chart"></canvas></div>
+        </div>
         <div class="terminal-console-wrap"><div class="log-console" id="terminal-log"></div></div>
       </div>`;
     const header = document.getElementById("config-preview-header");
@@ -532,7 +556,7 @@ function renderReportList() {
     for (const r of group.reports) {
       const active = r.path === state.selectedReportPath ? "active" : "";
       const checked = state.compareSelection.has(r.path) ? "checked" : "";
-      html += `<div class="list-row ${active}" data-path="${escapeHtml(r.path)}">
+      html += `<div class="list-row ${active}" data-path="${escapeHtml(r.path)}" title="${escapeHtml(r.path)}">
         <input type="checkbox" class="compare-check" data-path="${escapeHtml(r.path)}" ${checked} />
         <span class="dot"></span>
         <div class="list-row-main">
@@ -663,7 +687,7 @@ function radarOptions() {
         suggestedMin: 0, suggestedMax: 1,
       },
     },
-    plugins: { legend: { labels: { color: "#8C97B0", font: { family: "JetBrains Mono", size: 10.5 } } } },
+    plugins: { legend: { labels: { color: "#8C97B0", font: { family: "JetBrains Mono", size: 10.5 }, usePointStyle: true, pointStyle: "circle" } } },
   };
 }
 
@@ -684,6 +708,13 @@ function renderCompare(data) {
   const bodyEl = document.getElementById("report-body");
   const reports = data.reports;
   const labels = reports.map((r) => r.experiment || r.path);
+  // Same color-per-report assignment used for both table header swatches and
+  // the radar chart datasets below, so a color always means the same report
+  // everywhere on this page.
+  const reportColors = reports.map((r, i) => CHART_COLORS[i % CHART_COLORS.length]);
+  const headerCells = labels.map((l, i) =>
+    `<th><span class="swatch" style="background:${reportColors[i]}"></span>${escapeHtml(l)}</th>`
+  ).join("");
 
   const metricKeys = [];
   const seen = new Set();
@@ -716,13 +747,14 @@ function renderCompare(data) {
     </div>
 
     <div class="report-section">
-      <h3>Metrics</h3>
+      <h3>Metrics <span style="text-transform:none; font-weight:400;">— the best value in each row is highlighted</span></h3>
       <table class="compare-table">
-        <thead><tr><th>Metric</th>${labels.map((l) => `<th>${escapeHtml(l)}</th>`).join("")}</tr></thead>
+        <thead><tr><th>Metric</th>${headerCells}</tr></thead>
         <tbody>
-          ${metricRows.map((row) => `<tr><td>${escapeHtml(row.key)}</td>${row.values.map((v) =>
-            `<td class="${typeof v === "number" && v === row.best ? "best" : ""}">${fmtNum(v)}</td>`
-          ).join("")}</tr>`).join("")}
+          ${metricRows.map((row) => `<tr><td>${escapeHtml(row.key)}</td>${row.values.map((v) => {
+            const isWinner = typeof v === "number" && v === row.best;
+            return `<td class="${isWinner ? "winner" : ""}">${fmtNum(v)}</td>`;
+          }).join("")}</tr>`).join("")}
         </tbody>
       </table>
     </div>
@@ -732,7 +764,7 @@ function renderCompare(data) {
     <div class="report-section">
       <h3>Config differences (${diffRows.length} of ${allKeys.length} keys differ)</h3>
       ${diffRows.length ? `<table class="compare-table">
-        <thead><tr><th>Key</th>${labels.map((l) => `<th>${escapeHtml(l)}</th>`).join("")}</tr></thead>
+        <thead><tr><th>Key</th>${headerCells}</tr></thead>
         <tbody>${diffRows.map((row) => `<tr><td>${escapeHtml(row.key)}</td>${row.values.map((v) =>
           `<td class="differs">${escapeHtml(Array.isArray(v) ? v.join(", ") : (v ?? "–"))}</td>`
         ).join("")}</tr>`).join("")}</tbody>
@@ -750,9 +782,9 @@ function renderCompare(data) {
         datasets: reports.map((r, i) => ({
           label: r.experiment || r.path,
           data: RADAR_METRICS.map((k) => r.metrics[k] ?? null),
-          borderColor: CHART_COLORS[i % CHART_COLORS.length],
+          borderColor: reportColors[i],
           backgroundColor: "transparent",
-          pointBackgroundColor: CHART_COLORS[i % CHART_COLORS.length],
+          pointBackgroundColor: reportColors[i],
         })),
       },
       options: radarOptions(),
@@ -765,6 +797,7 @@ function renderCompare(data) {
 // ============================================================================
 const ICON_FOLDER = `<svg class="tree-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>`;
 const ICON_FILE = `<svg class="tree-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 3h9l5 5v13H6z"/><path d="M14 3v5h5"/></svg>`;
+const ICON_IMAGE = `<svg class="tree-icon" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>`;
 
 function fmtBytes(n) {
   if (n === undefined || n === null) return "";
@@ -773,10 +806,29 @@ function fmtBytes(n) {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function historySourceDir() {
+  if (!state.system) return "";
+  return state.historySource === "images" ? state.system.plots_dir : state.system.logs_dir;
+}
+
+function switchHistorySource(source) {
+  state.historySource = source;
+  state.historyTree = [];
+  state.historyExpanded = new Set();
+  state.selectedHistoryFile = null;
+  document.getElementById("history-dir-label").textContent = historySourceDir();
+  document.getElementById("history-logdir").textContent = historySourceDir();
+  document.getElementById("history-file-path").textContent = "No file selected";
+  document.getElementById("history-file-meta").textContent = "";
+  document.getElementById("history-file-body").innerHTML = `<div class="empty-state">Select a file on the left to view it.</div>`;
+  loadHistory();
+}
+
 async function loadHistory() {
   const body = document.getElementById("history-tree-body");
+  document.getElementById("history-logdir").textContent = historySourceDir();
   try {
-    const data = await api("/api/history/tree");
+    const data = await api(`/api/history/tree?source=${encodeURIComponent(state.historySource)}`);
     state.historyTree = data.tree;
     renderHistoryTree();
   } catch (e) {
@@ -787,7 +839,7 @@ async function loadHistory() {
 function renderHistoryTree() {
   const body = document.getElementById("history-tree-body");
   if (!state.historyTree.length) {
-    body.innerHTML = `<div class="empty-state">Nothing under logs/ yet.</div>`;
+    body.innerHTML = `<div class="empty-state">Nothing under ${escapeHtml(historySourceDir())} yet.</div>`;
     return;
   }
   body.innerHTML = renderTreeNodes(state.historyTree);
@@ -799,16 +851,17 @@ function renderTreeNodes(nodes) {
     if (n.type === "dir") {
       const open = state.historyExpanded.has(n.path);
       return `<div class="tree-node">
-        <div class="tree-row dir" data-path="${escapeHtml(n.path)}" data-type="dir">
+        <div class="tree-row dir" data-path="${escapeHtml(n.path)}" data-type="dir" title="${escapeHtml(n.path)}">
           <span class="chevron ${open ? "open" : ""}">▸</span>${ICON_FOLDER}<span class="tree-name">${escapeHtml(n.name)}</span>
         </div>
         ${open ? `<div class="tree-children">${renderTreeNodes(n.children)}</div>` : ""}
       </div>`;
     }
     const active = n.path === state.selectedHistoryFile ? "active" : "";
+    const icon = n.is_image ? ICON_IMAGE : ICON_FILE;
     return `<div class="tree-node">
-      <div class="tree-row file ${active}" data-path="${escapeHtml(n.path)}" data-type="file">
-        <span class="chevron"></span>${ICON_FILE}<span class="tree-name">${escapeHtml(n.name)}</span>
+      <div class="tree-row file ${active}" data-path="${escapeHtml(n.path)}" data-type="file" title="${escapeHtml(n.path)}">
+        <span class="chevron"></span>${icon}<span class="tree-name">${escapeHtml(n.name)}</span>
         <span class="tree-size">${fmtBytes(n.size)}</span>
       </div>
     </div>`;
@@ -837,9 +890,20 @@ async function loadHistoryFile(path) {
   document.getElementById("history-file-meta").textContent = "";
   const bodyEl = document.getElementById("history-file-body");
   bodyEl.innerHTML = `<div class="empty-state">Loading…</div>`;
+  const encodedPath = path.split("/").map(encodeURIComponent).join("/");
+  const source = encodeURIComponent(state.historySource);
   try {
-    const data = await api(`/api/history/file/${path.split("/").map(encodeURIComponent).join("/")}`);
+    const data = await api(`/api/history/file/${source}/${encodedPath}`);
     document.getElementById("history-file-meta").textContent = `${fmtBytes(data.size)}${data.truncated ? " (truncated preview)" : ""}`;
+
+    if (data.is_image) {
+      const rawUrl = `/api/history/raw/${source}/${encodedPath}`;
+      bodyEl.innerHTML = `<div class="history-image-view">
+        <img src="${rawUrl}" alt="${escapeHtml(path)}" />
+        <a class="btn btn-sm btn-ghost" href="${rawUrl}" target="_blank" rel="noopener">Open full size ↗</a>
+      </div>`;
+      return;
+    }
     if (data.binary) {
       bodyEl.innerHTML = `<div class="empty-state">This is a binary file and can't be previewed here.</div>`;
       return;
@@ -852,6 +916,130 @@ async function loadHistoryFile(path) {
     bodyEl.innerHTML = `<div class="${cls}">${escapeHtml(content)}</div>`;
   } catch (e) {
     bodyEl.innerHTML = `<div class="empty-state">Couldn't load file: ${e.message}</div>`;
+  }
+}
+
+// ============================================================================
+// MACHINE STATS (MONITORS)
+// ============================================================================
+async function loadMonitors() {
+  let data;
+  try { data = await api("/api/monitors"); } catch (e) { return; }
+  state.monitors = data.monitors;
+  renderMonitorList();
+  if (state.selectedMonitor && state.monitors.some((m) => m.id === state.selectedMonitor)) {
+    loadMonitorOutput(state.selectedMonitor);
+  }
+}
+
+function renderMonitorList() {
+  const body = document.getElementById("monitor-list-body");
+  if (!state.monitors.length) {
+    body.innerHTML = `<div class="empty-state">No monitors configured.</div>`;
+    return;
+  }
+  body.innerHTML = state.monitors.map((m) => {
+    const active = m.id === state.selectedMonitor ? "active" : "";
+    const statusClass = m.alive ? "running" : "stopped";
+    const statusLabel = m.alive ? "Running" : "Stopped";
+    const intervalTag = m.watch_interval ? `<span class="mode-tag">watch ${m.watch_interval}s</span>` : `<span class="mode-tag">self-refreshing</span>`;
+    return `<div class="term-card ${active}" data-id="${escapeHtml(m.id)}">
+      <div class="term-card-accent ${statusClass}"></div>
+      <div class="term-card-body">
+        <div class="term-card-title" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}${intervalTag}</div>
+        <div class="term-card-sub" title="${escapeHtml(m.command)}">${escapeHtml(m.command)}</div>
+        <div class="term-card-footer">
+          <span class="term-card-status ${statusClass}">${statusLabel}</span>
+          <div class="job-actions">
+            ${m.alive
+              ? `<button class="btn btn-sm" data-action="stop" data-id="${m.id}">Stop</button>`
+              : `<button class="btn btn-sm btn-primary" data-action="start" data-id="${m.id}">Start</button>`}
+            ${!m.builtin ? `<button class="btn btn-sm btn-danger" data-action="remove" data-id="${m.id}">Remove</button>` : ""}
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+
+  body.querySelectorAll(".term-card").forEach((el) => {
+    el.addEventListener("click", (e) => {
+      if (e.target.closest("button")) return;
+      state.selectedMonitor = el.dataset.id;
+      renderMonitorList();
+      showMonitorDetail(state.selectedMonitor);
+    });
+  });
+  body.querySelectorAll("button[data-action]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      if (btn.dataset.action === "start") startMonitor(id);
+      else if (btn.dataset.action === "stop") stopMonitor(id);
+      else if (btn.dataset.action === "remove") removeMonitor(id);
+    });
+  });
+}
+
+function showMonitorDetail(id) {
+  const m = state.monitors.find((x) => x.id === id);
+  if (!m) return;
+  document.getElementById("monitor-detail-panel").style.display = "block";
+  document.getElementById("monitor-detail-title").textContent = m.name;
+  document.getElementById("monitor-detail-sub").textContent = m.command;
+  loadMonitorOutput(id);
+}
+
+async function loadMonitorOutput(id) {
+  const el = document.getElementById("monitor-output");
+  if (!el || document.getElementById("monitor-detail-panel").style.display === "none") return;
+  try {
+    const data = await api(`/api/monitors/${encodeURIComponent(id)}/output`);
+    if (!data.alive) { el.innerHTML = `<span class="empty-log">Not running — click Start to launch it.</span>`; return; }
+    const wasAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    el.textContent = data.output || "";
+    if (wasAtBottom) el.scrollTop = el.scrollHeight;
+  } catch (e) {}
+}
+
+async function startMonitor(id) {
+  try { await api(`/api/monitors/${encodeURIComponent(id)}/start`, { method: "POST" }); toast("Monitor started", "ok"); loadMonitors(); }
+  catch (e) { toast("Couldn't start: " + e.message, "err"); }
+}
+
+async function stopMonitor(id) {
+  try { await api(`/api/monitors/${encodeURIComponent(id)}/stop`, { method: "POST" }); toast("Monitor stopped", "ok"); loadMonitors(); }
+  catch (e) { toast("Couldn't stop: " + e.message, "err"); }
+}
+
+async function removeMonitor(id) {
+  const confirmed = await showConfirm("Remove this metric?", "This stops it (if running) and removes it from your list permanently.");
+  if (!confirmed) return;
+  try {
+    await api(`/api/monitors/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (state.selectedMonitor === id) {
+      state.selectedMonitor = null;
+      document.getElementById("monitor-detail-panel").style.display = "none";
+    }
+    toast("Removed", "ok");
+    loadMonitors();
+  } catch (e) {
+    toast("Couldn't remove: " + e.message, "err");
+  }
+}
+
+async function addMonitor() {
+  const name = document.getElementById("monitor-name-input").value.trim();
+  const command = document.getElementById("monitor-command-input").value.trim();
+  const interval = parseInt(document.getElementById("monitor-interval-input").value, 10) || 0;
+  if (!name || !command) { toast("Name and command are both required", "err"); return; }
+  try {
+    await api("/api/monitors", { method: "POST", body: JSON.stringify({ name, command, watch_interval: interval }) });
+    document.getElementById("monitor-name-input").value = "";
+    document.getElementById("monitor-command-input").value = "";
+    toast("Metric added", "ok");
+    loadMonitors();
+  } catch (e) {
+    toast("Couldn't add metric: " + e.message, "err");
   }
 }
 
@@ -923,6 +1111,10 @@ function initButtons() {
   document.getElementById("btn-compare-reports").addEventListener("click", compareReports);
 
   document.getElementById("btn-refresh-history").addEventListener("click", loadHistory);
+  document.getElementById("history-source").addEventListener("change", (e) => switchHistorySource(e.target.value));
+
+  document.getElementById("btn-refresh-monitors").addEventListener("click", loadMonitors);
+  document.getElementById("btn-add-monitor").addEventListener("click", addMonitor);
 
   document.getElementById("btn-tb-start").addEventListener("click", startTensorboard);
   document.getElementById("btn-tb-stop").addEventListener("click", stopTensorboard);
@@ -939,7 +1131,7 @@ async function boot() {
   await loadConfigs();
   await loadTerminals();
   const interval = (state.system && state.system.poll_interval_ms) || 2000;
-  state.pollTimer = setInterval(loadTerminals, interval);
+  state.pollTimer = setInterval(() => { loadTerminals(); loadMonitors(); }, interval);
 }
 
 boot();

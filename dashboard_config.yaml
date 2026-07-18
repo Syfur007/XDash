@@ -12,6 +12,8 @@ configs_dir: "configs"        # where .yaml / .yml experiment configs live
 logs_dir: "logs"              # where train.py / eval.py write their log files
 runs_dir: "runs"              # TensorBoard event directory
 checkpoints_dir: "checkpoints"
+plots_dir: "logs"             # where eval.py writes plots/overlays/images — browsable in the History tab
+# reports_dir: "logs"          # where eval.py writes *_report.json files for the Reports tab — defaults to logs_dir if unset
 
 python_executable: "python"   # interpreter used to launch train.py / eval.py
 train_script: "train.py"
@@ -34,13 +36,13 @@ eval_default_args: ["--ensemble"]
 # was started in.
 env_activate_cmd: "conda activate thesis"
 
-tmux_session_prefix: "expdash"
+tmux_session_prefix: "xdash"
 tmux_pane_width: 500     # wide pane so long log lines don't wrap and break parsing
 tmux_pane_height: 50
 tmux_history_limit: 100000
 
 server_host: "0.0.0.0"
-server_port: 8000
+server_port: 6070
 
 tensorboard_port: 6006
 tensorboard_host: "0.0.0.0"

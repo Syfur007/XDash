@@ -15,13 +15,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, send_file
 
 from backend.config import settings
 from backend import configs as cfg
 from backend import terminals
 from backend import reports
 from backend import history
+from backend import monitors
 from backend import tensorboard_manager as tb
 from backend import tmux_runner as tmux
 
@@ -164,17 +165,84 @@ def api_compare_reports():
 # --------------------------------------------------------------------------- history
 @app.route("/api/history/tree", methods=["GET"])
 def api_history_tree():
-    return jsonify({"tree": history.get_tree()})
-
-
-@app.route("/api/history/file/<path:rel_path>", methods=["GET"])
-def api_history_file(rel_path):
+    source = request.args.get("source", "logs")
     try:
-        return jsonify(history.read_file(rel_path))
+        return jsonify({"tree": history.get_tree(source)})
+    except ValueError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/history/file/<source>/<path:rel_path>", methods=["GET"])
+def api_history_file(source, rel_path):
+    try:
+        return jsonify(history.read_file(source, rel_path))
     except FileNotFoundError:
         return err(f"File not found: {rel_path}", 404)
     except ValueError as e:
         return err(str(e), 400)
+
+
+@app.route("/api/history/raw/<source>/<path:rel_path>", methods=["GET"])
+def api_history_raw(source, rel_path):
+    try:
+        p = history.resolve_raw_path(source, rel_path)
+    except FileNotFoundError:
+        return err(f"File not found: {rel_path}", 404)
+    except ValueError as e:
+        return err(str(e), 400)
+    return send_file(p, mimetype=history.guess_mimetype(p))
+
+
+# --------------------------------------------------------------------------- monitors (machine stats)
+@app.route("/api/monitors", methods=["GET"])
+def api_list_monitors():
+    return jsonify({"monitors": monitors.list_monitors()})
+
+
+@app.route("/api/monitors", methods=["POST"])
+def api_add_monitor():
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        return jsonify(monitors.add_monitor(body.get("name", ""), body.get("command", ""), body.get("watch_interval", 0)))
+    except ValueError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/monitors/<monitor_id>", methods=["DELETE"])
+def api_remove_monitor(monitor_id):
+    try:
+        ok = monitors.remove_monitor(monitor_id)
+    except ValueError as e:
+        return err(str(e), 400)
+    if not ok:
+        return err("Monitor not found", 404)
+    return jsonify({"removed": True})
+
+
+@app.route("/api/monitors/<monitor_id>/start", methods=["POST"])
+def api_start_monitor(monitor_id):
+    try:
+        return jsonify(monitors.start_monitor(monitor_id))
+    except tmux.TmuxError as e:
+        return err(str(e), 400)
+    except ValueError as e:
+        return err(str(e), 404)
+
+
+@app.route("/api/monitors/<monitor_id>/stop", methods=["POST"])
+def api_stop_monitor(monitor_id):
+    try:
+        return jsonify(monitors.stop_monitor(monitor_id))
+    except ValueError as e:
+        return err(str(e), 404)
+
+
+@app.route("/api/monitors/<monitor_id>/output", methods=["GET"])
+def api_monitor_output(monitor_id):
+    try:
+        return jsonify(monitors.get_output(monitor_id))
+    except ValueError as e:
+        return err(str(e), 404)
 
 
 # --------------------------------------------------------------------------- tensorboard
@@ -204,6 +272,8 @@ def api_system():
         "configs_dir": str(settings.configs_dir),
         "logs_dir": str(settings.logs_dir),
         "runs_dir": str(settings.runs_dir),
+        "plots_dir": str(settings.plots_dir),
+        "reports_dir": str(settings.reports_dir),
         "poll_interval_ms": settings.poll_interval_ms,
         "tensorboard_port": settings.tensorboard_port,
         "env_activate_cmd": settings.env_activate_cmd,

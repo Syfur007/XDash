@@ -43,6 +43,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
         History
       </div>
+      <div class="nav-item" data-view="monitors">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12h4l2.5 7L13 5l2.5 7H21"/></svg>
+        Machine Stats
+      </div>
       <div class="nav-item" data-view="tensorboard">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M10 19V9M16 19v-6M22 19H2"/></svg>
         TensorBoard
@@ -57,9 +61,13 @@
       <div id="footer-tmux-warning" class="hidden" style="margin-top:8px;color:var(--red);">⚠ tmux not found on PATH</div>
     </div>
   </aside>
+  <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
 
   <!-- ============================================================ topbar -->
   <header class="topbar">
+    <button class="hamburger-btn" id="btn-hamburger" aria-label="Toggle menu">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+    </button>
     <div class="telemetry">
       <div class="pulse-dot" id="telemetry-dot"></div>
       <span class="state-label" id="telemetry-state">IDLE</span>
@@ -157,7 +165,7 @@
       <div class="view-header">
         <div>
           <div class="view-title">Reports</div>
-          <div class="view-sub">Evaluation reports written to the logs/ directory. Select 2+ to compare.</div>
+          <div class="view-sub">Evaluation reports written to <span id="reports-dir-label" style="font-family:var(--mono)"></span>. Select 2+ to compare.</div>
         </div>
         <div style="display:flex; gap:8px;">
           <button class="btn btn-primary hidden" id="btn-compare-reports">Compare selected (<span id="compare-count">0</span>)</button>
@@ -193,7 +201,13 @@
 
       <div class="configs-layout">
         <div class="panel history-tree-panel">
-          <div class="panel-header"><span>logs/</span></div>
+          <div class="panel-header history-panel-header">
+            <select id="history-source" class="history-source-select">
+              <option value="logs">📄 Logs</option>
+              <option value="images">🖼 Images</option>
+            </select>
+            <span id="history-dir-label" class="history-dir-label"></span>
+          </div>
           <div class="history-tree-body" id="history-tree-body">
             <div class="empty-state">Loading…</div>
           </div>
@@ -207,6 +221,48 @@
           <div class="editor-body" id="history-file-body" style="overflow:auto;">
             <div class="empty-state">Select a file on the left to view it.</div>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- Machine Stats view -->
+    <section class="view" id="view-monitors">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Machine Stats</div>
+          <div class="view-sub">System & GPU monitoring commands, each running in its own tmux session.</div>
+        </div>
+        <button class="btn btn-ghost" id="btn-refresh-monitors">Refresh</button>
+      </div>
+
+      <div class="monitor-list" id="monitor-list-body">
+        <div class="empty-state">Loading…</div>
+      </div>
+
+      <div class="panel" id="monitor-detail-panel" style="display:none; margin-top:16px;">
+        <div class="panel-header">
+          <span id="monitor-detail-title">Output</span>
+          <span id="monitor-detail-sub" style="font-family:var(--mono); font-size:11px; color:var(--text-faint); text-transform:none;"></span>
+        </div>
+        <div class="log-console no-wrap" id="monitor-output" style="height:380px;"></div>
+      </div>
+
+      <div class="panel" style="margin-top:18px;">
+        <div class="panel-header"><span>Add a new metric</span></div>
+        <div class="add-monitor-form">
+          <div class="field">
+            <label>Name</label>
+            <input class="text-input" id="monitor-name-input" placeholder="e.g. GPU processes" />
+          </div>
+          <div class="field grow">
+            <label>Command</label>
+            <input class="text-input grow" id="monitor-command-input" placeholder="e.g. iostat -x 1" />
+          </div>
+          <div class="field">
+            <label>Watch interval (s, 0 = self-refreshing)</label>
+            <input class="text-input" id="monitor-interval-input" type="number" min="0" value="2" style="width:100%;" />
+          </div>
+          <button class="btn btn-primary" id="btn-add-monitor">Add metric</button>
         </div>
       </div>
     </section>
