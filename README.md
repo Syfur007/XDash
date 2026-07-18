@@ -76,6 +76,20 @@ in-browser YAML editor (CodeMirror) with live validation before you can save.
 optionally with extra CLI overrides (e.g. `--epochs 10 --lr 0.0005`), and
 jumps you to the Terminals tab.
 
+### Create Config
+A visual config builder — no YAML editing required. Optionally pick an
+existing config as a **template**: its keys, sections, and current values
+are loaded straight into the form (a nested dict becomes a collapsible
+section; a boolean becomes a toggle switch; numbers, text, and lists get the
+appropriate input). Edit values, add new fields or whole new sections with
+the **+ Add field** control at any level (choose the type: text, number,
+toggle, list, or a nested section), or remove anything with **✕**. A
+**live preview** panel on the right shows the exact YAML that will be
+written, updated as you type. When you're happy with it, pick a destination
+folder (existing sub-directory or a new one) and filename and hit **Save
+config** — it reuses the same save endpoint as the Configs editor, so the
+new file shows up there immediately, ready to launch.
+
 ### Terminals
 There is no queue — launching a config immediately opens a dedicated
 **tmux session**, driven the same way you'd use it by hand: `cd` into the

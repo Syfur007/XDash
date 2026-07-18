@@ -35,6 +35,9 @@ const state = {
   monitors: [],
   selectedMonitor: null,
 
+  builderConfig: {},
+  creatorInitialized: false,
+
   pollTimer: null,
 };
 
@@ -126,6 +129,7 @@ function switchView(view) {
   if (view === "reports" && !state.reportGroups.length) loadReports();
   if (view === "history" && !state.historyTree.length) loadHistory();
   if (view === "monitors") loadMonitors();
+  if (view === "creator") initCreatorView();
 }
 
 // ---------------------------------------------------------------- system info
@@ -920,6 +924,256 @@ async function loadHistoryFile(path) {
 }
 
 // ============================================================================
+// CONFIG CREATOR
+// ============================================================================
+function getAtPath(obj, path) {
+  return path.reduce((o, k) => (o == null ? undefined : o[k]), obj);
+}
+function setAtPath(obj, path, value) {
+  let cur = obj;
+  for (let i = 0; i < path.length - 1; i++) {
+    if (typeof cur[path[i]] !== "object" || cur[path[i]] === null) cur[path[i]] = {};
+    cur = cur[path[i]];
+  }
+  cur[path[path.length - 1]] = value;
+}
+function deleteAtPath(obj, path) {
+  let cur = obj;
+  for (let i = 0; i < path.length - 1; i++) {
+    if (cur[path[i]] == null) return;
+    cur = cur[path[i]];
+  }
+  delete cur[path[path.length - 1]];
+}
+function fieldType(value) {
+  if (typeof value === "boolean") return "bool";
+  if (typeof value === "number") return "number";
+  if (Array.isArray(value)) return "list";
+  if (value !== null && typeof value === "object") return "section";
+  return "string";
+}
+function hashStr(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) { h = (h << 5) - h + s.charCodeAt(i); h |= 0; }
+  return Math.abs(h);
+}
+function cssId(s) { return (s || "root").replace(/[^a-zA-Z0-9]/g, "_"); }
+
+async function initCreatorView() {
+  document.getElementById("creator-filename-input").placeholder = "my_experiment.yaml";
+  if (!state.creatorInitialized) {
+    state.creatorInitialized = true;
+    try {
+      const data = await api("/api/configs");
+      const baseSelect = document.getElementById("creator-base-select");
+      const folderSelect = document.getElementById("creator-folder-select");
+      const seenCategories = new Set(["general"]);
+      for (const group of data.groups) {
+        const optgroup = document.createElement("optgroup");
+        optgroup.label = group.category;
+        for (const c of group.configs) {
+          const opt = document.createElement("option");
+          opt.value = c.path; opt.textContent = c.name;
+          optgroup.appendChild(opt);
+        }
+        baseSelect.appendChild(optgroup);
+        if (group.category !== "general" && !seenCategories.has(group.category)) {
+          seenCategories.add(group.category);
+          const fopt = document.createElement("option");
+          fopt.value = group.category; fopt.textContent = group.category;
+          folderSelect.appendChild(fopt);
+        }
+      }
+      const newOpt = document.createElement("option");
+      newOpt.value = "__new__"; newOpt.textContent = "+ New folder…";
+      folderSelect.appendChild(newOpt);
+    } catch (e) {}
+  }
+  renderCreatorForm();
+  renderCreatorPreview();
+}
+
+async function loadBaseConfig() {
+  const path = document.getElementById("creator-base-select").value;
+  if (!path) { toast("Pick a config first", "err"); return; }
+  try {
+    const data = await api(`/api/config?path=${encodeURIComponent(path)}`);
+    state.builderConfig = (data.parsed && typeof data.parsed === "object") ? data.parsed : {};
+    toast("Loaded as template — edit below", "ok");
+    renderCreatorForm();
+    renderCreatorPreview();
+  } catch (e) {
+    toast("Couldn't load: " + e.message, "err");
+  }
+}
+
+function startBlankConfig() {
+  state.builderConfig = {};
+  document.getElementById("creator-base-select").value = "";
+  renderCreatorForm();
+  renderCreatorPreview();
+}
+
+function renderCreatorPreview() {
+  const el = document.getElementById("creator-preview-body");
+  try {
+    el.textContent = Object.keys(state.builderConfig).length
+      ? jsyaml.dump(state.builderConfig, { indent: 2, lineWidth: -1 })
+      : "# Empty config — add a section below to get started.";
+  } catch (e) {
+    el.textContent = "(couldn't render preview: " + e.message + ")";
+  }
+}
+
+function renderCreatorForm() {
+  const container = document.getElementById("creator-sections");
+  container.innerHTML = renderBuilderScope(state.builderConfig, []);
+  wireCreatorEvents(container);
+}
+
+const FIELD_COLORS = ["amber", "teal", "violet", "blue", "red", "emerald"];
+
+function renderBuilderScope(obj, path) {
+  const keys = Object.keys(obj || {});
+  const pathStr = path.join(".");
+  const depth = path.length;
+  const rows = keys.map((k) => {
+    const value = obj[k];
+    const childPath = [...path, k];
+    const childPathStr = childPath.join(".");
+    const type = fieldType(value);
+    if (type === "section") {
+      return `<div class="builder-section ${depth > 0 ? "nested" : ""}">
+        <div class="builder-section-header">
+          <span class="dot" style="background:var(--${FIELD_COLORS[hashStr(childPathStr) % FIELD_COLORS.length]})"></span>
+          <span title="${escapeHtml(childPathStr)}">${escapeHtml(k)}</span>
+          <button class="btn-icon-remove" data-remove-path="${escapeHtml(childPathStr)}" title="Remove section">✕</button>
+        </div>
+        <div class="builder-section-body">
+          ${renderBuilderScope(value, childPath)}
+        </div>
+      </div>`;
+    }
+    return renderBuilderField(k, value, childPath, type);
+  }).join("");
+
+  return `${rows}
+    <div class="add-field-row" data-scope="${escapeHtml(pathStr)}">
+      <button class="btn btn-sm btn-ghost" data-add-field-toggle="${escapeHtml(pathStr)}">+ Add field</button>
+      <div class="add-field-form hidden" id="add-field-form-${cssId(pathStr)}">
+        <input class="text-input" placeholder="key name" data-new-key-input />
+        <select data-new-type-input>
+          <option value="string">Text</option>
+          <option value="number">Number</option>
+          <option value="bool">Toggle (true/false)</option>
+          <option value="list">List</option>
+          <option value="section">Section (group)</option>
+        </select>
+        <button class="btn btn-sm btn-primary" data-confirm-add="${escapeHtml(pathStr)}">Add</button>
+      </div>
+    </div>`;
+}
+
+function renderBuilderField(key, value, path, type) {
+  const pathStr = path.join(".");
+  let control;
+  if (type === "bool") {
+    control = `<button class="toggle-switch ${value ? "on" : ""}" data-path="${escapeHtml(pathStr)}" data-type="bool"><span class="toggle-knob"></span></button>`;
+  } else if (type === "number") {
+    control = `<input class="text-input builder-input" type="number" step="any" value="${value}" data-path="${escapeHtml(pathStr)}" data-type="number" />`;
+  } else if (type === "list") {
+    control = `<input class="text-input builder-input" type="text" value="${escapeHtml((value || []).join(", "))}" data-path="${escapeHtml(pathStr)}" data-type="list" placeholder="comma, separated, values" />`;
+  } else {
+    control = `<input class="text-input builder-input" type="text" value="${escapeHtml(value ?? "")}" data-path="${escapeHtml(pathStr)}" data-type="string" />`;
+  }
+  return `<div class="builder-field">
+    <span class="builder-field-key" title="${escapeHtml(pathStr)}">${escapeHtml(key)}</span>
+    <div class="builder-field-control">${control}</div>
+    <button class="btn-icon-remove" data-remove-path="${escapeHtml(pathStr)}" title="Remove field">✕</button>
+  </div>`;
+}
+
+function wireCreatorEvents(container) {
+  container.querySelectorAll(".toggle-switch").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const path = btn.dataset.path.split(".");
+      setAtPath(state.builderConfig, path, !getAtPath(state.builderConfig, path));
+      btn.classList.toggle("on");
+      renderCreatorPreview();
+    });
+  });
+  container.querySelectorAll(".builder-input").forEach((input) => {
+    input.addEventListener("input", () => {
+      const path = input.dataset.path.split(".");
+      const type = input.dataset.type;
+      let value;
+      if (type === "number") value = input.value === "" ? 0 : Number(input.value);
+      else if (type === "list") {
+        value = input.value.split(",").map((s) => s.trim()).filter((s) => s.length);
+        if (value.length && value.every((v) => !isNaN(Number(v)))) value = value.map(Number);
+      } else value = input.value;
+      setAtPath(state.builderConfig, path, value);
+      renderCreatorPreview();
+    });
+  });
+  container.querySelectorAll("[data-remove-path]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      deleteAtPath(state.builderConfig, btn.dataset.removePath.split("."));
+      renderCreatorForm();
+      renderCreatorPreview();
+    });
+  });
+  container.querySelectorAll("[data-add-field-toggle]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      document.getElementById("add-field-form-" + cssId(btn.dataset.addFieldToggle)).classList.toggle("hidden");
+    });
+  });
+  container.querySelectorAll("[data-confirm-add]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const scope = btn.dataset.confirmAdd;
+      const wrap = btn.closest(".add-field-form");
+      const name = wrap.querySelector("[data-new-key-input]").value.trim();
+      const chosenType = wrap.querySelector("[data-new-type-input]").value;
+      if (!name) { toast("Enter a key name", "err"); return; }
+      const path = scope ? scope.split(".").concat(name) : [name];
+      const defaults = { bool: false, number: 0, list: [], section: {}, string: "" };
+      setAtPath(state.builderConfig, path, defaults[chosenType]);
+      renderCreatorForm();
+      renderCreatorPreview();
+    });
+  });
+}
+
+async function saveCreatorConfig() {
+  let filename = document.getElementById("creator-filename-input").value.trim();
+  if (!filename) { toast("Enter a filename", "err"); return; }
+  if (!/\.(ya?ml)$/i.test(filename)) filename += ".yaml";
+
+  const folderSelect = document.getElementById("creator-folder-select");
+  let folder = folderSelect.value;
+  if (folder === "__new__") {
+    folder = document.getElementById("creator-new-folder-input").value.trim();
+    if (!folder) { toast("Enter a new folder name", "err"); return; }
+  }
+  const path = folder ? `${folder}/${filename}` : filename;
+
+  let raw;
+  try {
+    raw = jsyaml.dump(state.builderConfig, { indent: 2, lineWidth: -1 });
+  } catch (e) {
+    toast("Couldn't serialize config: " + e.message, "err");
+    return;
+  }
+  try {
+    await api("/api/config", { method: "POST", body: JSON.stringify({ path, raw }) });
+    toast(`Saved to configs/${path}`, "ok");
+    loadConfigs();
+  } catch (e) {
+    toast("Couldn't save: " + e.message, "err");
+  }
+}
+
+// ============================================================================
 // MACHINE STATS (MONITORS)
 // ============================================================================
 async function loadMonitors() {
@@ -1115,6 +1369,13 @@ function initButtons() {
 
   document.getElementById("btn-refresh-monitors").addEventListener("click", loadMonitors);
   document.getElementById("btn-add-monitor").addEventListener("click", addMonitor);
+
+  document.getElementById("btn-load-base").addEventListener("click", loadBaseConfig);
+  document.getElementById("btn-blank-base").addEventListener("click", startBlankConfig);
+  document.getElementById("btn-save-creator-config").addEventListener("click", saveCreatorConfig);
+  document.getElementById("creator-folder-select").addEventListener("change", (e) => {
+    document.getElementById("creator-new-folder-input").classList.toggle("hidden", e.target.value !== "__new__");
+  });
 
   document.getElementById("btn-tb-start").addEventListener("click", startTensorboard);
   document.getElementById("btn-tb-stop").addEventListener("click", stopTensorboard);

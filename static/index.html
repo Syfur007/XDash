@@ -31,6 +31,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 9v11"/></svg>
         Configs
       </div>
+      <div class="nav-item" data-view="creator">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>
+        Create Config
+      </div>
       <div class="nav-item" data-view="terminals">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M8 9l3 3-3 3M13 15h3"/></svg>
         Terminals
@@ -122,6 +126,54 @@
             <label>EXTRA ARGS</label>
             <input class="text-input grow" id="run-extra-args" placeholder="--epochs 10 --lr 0.0005" />
             <button class="btn btn-primary" id="btn-run">Launch in terminal ▸</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- Config Creator view -->
+    <section class="view" id="view-creator">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Create Config</div>
+          <div class="view-sub">Build a new experiment config visually — optionally starting from an existing one as a template.</div>
+        </div>
+      </div>
+
+      <div class="creator-layout">
+        <div class="creator-form-col">
+          <div class="panel">
+            <div class="panel-header"><span>Start from</span></div>
+            <div class="creator-base-row">
+              <select id="creator-base-select"><option value="">— pick a config to use as a template —</option></select>
+              <button class="btn btn-sm btn-primary" id="btn-load-base">Load as template</button>
+              <button class="btn btn-sm btn-ghost" id="btn-blank-base">Start blank</button>
+            </div>
+          </div>
+
+          <div id="creator-sections"></div>
+
+          <div class="panel" style="margin-top:18px;">
+            <div class="panel-header"><span>Save config</span></div>
+            <div class="creator-save-row">
+              <div class="field">
+                <label>Folder</label>
+                <select id="creator-folder-select"><option value="">general</option></select>
+                <input class="text-input hidden" id="creator-new-folder-input" placeholder="new-folder-name" />
+              </div>
+              <div class="field grow">
+                <label>Filename</label>
+                <input class="text-input grow" id="creator-filename-input" placeholder="my_experiment.yaml" />
+              </div>
+              <button class="btn btn-primary" id="btn-save-creator-config">Save config</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="creator-preview-col">
+          <div class="panel creator-preview-panel">
+            <div class="panel-header"><span>Live preview</span></div>
+            <pre class="creator-preview-body" id="creator-preview-body"></pre>
           </div>
         </div>
       </div>
