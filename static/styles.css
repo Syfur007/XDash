@@ -110,6 +110,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .nav-item[data-view="configs"].active{ border-left-color: var(--blue); }
 .nav-item[data-view="creator"].active{ border-left-color: var(--blue); }
+.nav-item[data-view="scheduler"].active{ border-left-color: var(--violet); }
 .nav-item[data-view="terminals"].active{ border-left-color: var(--amber); }
 .nav-item[data-view="reports"].active{ border-left-color: var(--teal); }
 .nav-item[data-view="history"].active{ border-left-color: var(--violet); }
@@ -532,6 +533,50 @@ select, .text-input{
   padding:10px 12px; max-height:186px; overflow:auto; white-space:pre-wrap; word-break:break-word;
 }
 
+/* ---------------------------------------------------------------- scheduler view */
+.concurrency-row{ display:flex; align-items:center; justify-content:space-between; padding:16px; flex-wrap:wrap; gap:12px; }
+.concurrency-label{ font-size:13px; color: var(--text-muted); }
+.stepper{ display:flex; align-items:center; gap:0; border:1px solid var(--border); border-radius:999px; overflow:hidden; background: var(--surface-3); }
+.stepper-btn{
+  width:34px; height:34px; border:none; background:transparent; color: var(--text-muted);
+  font-size:18px; font-weight:700; cursor:pointer; display:flex; align-items:center; justify-content:center;
+  transition: background .12s ease, color .12s ease;
+}
+.stepper-btn:hover{ background: var(--surface-2); color: var(--amber); }
+.stepper-btn:disabled{ opacity:0.35; cursor:not-allowed; }
+.stepper-value{
+  min-width:40px; text-align:center; font-family: var(--mono); font-size:16px; font-weight:700; color: var(--text);
+  padding:0 4px;
+}
+
+.scheduler-add-form{ display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; padding:14px 16px; }
+.scheduler-add-form .field{ display:flex; flex-direction:column; gap:5px; }
+.scheduler-add-form .field.grow{ flex:1; min-width:220px; }
+.scheduler-add-form label{ font-family: var(--mono); font-size:10.5px; color: var(--text-muted); text-transform:uppercase; letter-spacing:0.3px; }
+.scheduler-add-form select{ min-width:160px; }
+.scheduler-add-form .text-input.grow{ width:100%; }
+
+.scheduler-section{ margin-top:22px; }
+.scheduler-section-title{
+  display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; color: var(--text-muted);
+  text-transform:uppercase; letter-spacing:0.4px; margin:0 0 8px;
+}
+.count-badge{
+  font-family: var(--mono); font-size:11px; font-weight:700; color: var(--text);
+  background: var(--surface-3); border:1px solid var(--border); border-radius:999px; padding:1px 9px;
+}
+.scheduler-list{ display:flex; flex-direction:column; gap:0; }
+.scheduler-list .term-card{ cursor:default; }
+.scheduler-list .term-card:hover{ border-color: var(--border-soft); }
+.reorder-btns{ display:flex; flex-direction:column; gap:1px; margin-right:2px; }
+.reorder-btns button{
+  width:20px; height:16px; border:none; background: var(--surface-3); color: var(--text-faint);
+  cursor:pointer; font-size:10px; line-height:1; border-radius:3px; display:flex; align-items:center; justify-content:center;
+}
+.reorder-btns button:hover{ background: var(--surface-2); color: var(--text); }
+.reorder-btns button:disabled{ opacity:0.3; cursor:not-allowed; }
+.chain-tag{ color: var(--violet); border-color: rgba(167,139,250,0.35); background: rgba(167,139,250,0.1); }
+
 /* ---------------------------------------------------------------- config creator view */
 .creator-layout{ display:grid; grid-template-columns: 1.3fr 1fr; gap:18px; height:calc(100vh - 150px); }
 .creator-form-col{ overflow:auto; padding-right:4px; }
@@ -696,6 +741,8 @@ select, .text-input{
 .hamburger-btn:hover{ background: var(--surface-2); color: var(--text); }
 .hamburger-btn svg{ width:20px; height:20px; }
 
+.mobile-only-btn{ display:none; }
+
 .sidebar-backdrop{
   display:none; position:fixed; inset:0; background: rgba(5,8,16,0.6);
   z-index:39; opacity:0; pointer-events:none; transition: opacity .2s ease;
@@ -705,6 +752,8 @@ select, .text-input{
 @media (max-width: 860px){
   .hamburger-btn{ display:inline-flex; align-items:center; justify-content:center; }
   .sidebar-backdrop.open{ display:block; }
+  .mobile-only-btn{ display:inline-flex; }
+  .log-console.collapsed{ max-height:140px; }
 
   .app-shell{
     grid-template-columns: 1fr;

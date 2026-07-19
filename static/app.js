@@ -20,6 +20,7 @@ const state = {
   renderedTerminalSession: null,
   configPreviewCache: {},
   configPreviewCollapsed: false,
+  terminalLogCollapsed: false,
 
   reportGroups: [],
   selectedReportPath: null,
@@ -35,9 +36,14 @@ const state = {
   monitors: [],
   monitorExpanded: new Set(),
   monitorPrevAlive: {},
+  monitorListIds: [],
 
   builderConfig: {},
   creatorInitialized: false,
+
+  schedulerItems: [],
+  schedulerMaxConcurrent: 1,
+  schedulerConfigsLoaded: false,
 
   pollTimer: null,
 };
@@ -131,6 +137,7 @@ function switchView(view) {
   if (view === "history" && !state.historyTree.length) loadHistory();
   if (view === "monitors") loadMonitors();
   if (view === "creator") initCreatorView();
+  if (view === "scheduler") loadScheduler();
 }
 
 // ---------------------------------------------------------------- system info
@@ -345,6 +352,7 @@ function renderTerminalDetail(term) {
   if (term.status === "running") actionHtml += `<button class="btn btn-sm" id="btn-stop-term">Stop</button>`;
   if (term.restart_available) actionHtml += `<button class="btn btn-sm btn-primary" id="btn-restart-term">Restart</button>`;
   actionHtml += `<button class="btn btn-sm btn-danger" id="btn-kill-term">${term.alive ? "Kill session" : "Dismiss"}</button>`;
+  actionHtml += `<button class="btn btn-sm btn-ghost mobile-only-btn" id="btn-collapse-log">${state.terminalLogCollapsed ? "Expand output" : "Collapse output"}</button>`;
   actions.innerHTML = actionHtml;
 
   const stopBtn = document.getElementById("btn-stop-term");
@@ -352,6 +360,7 @@ function renderTerminalDetail(term) {
   const restartBtn = document.getElementById("btn-restart-term");
   if (restartBtn) restartBtn.addEventListener("click", () => restartTerminal(term.session_name));
   document.getElementById("btn-kill-term").addEventListener("click", () => killTerminal(term.session_name, term.alive));
+  document.getElementById("btn-collapse-log").addEventListener("click", toggleTerminalLogCollapse);
 
   const body = document.getElementById("terminal-body");
   const hasChart = term.metrics_series && term.metrics_series.length > 0;
@@ -373,7 +382,7 @@ function renderTerminalDetail(term) {
           </div>` : ""}
           <div class="chart-wrap hidden" id="terminal-chart-wrap"><canvas id="terminal-chart"></canvas></div>
         </div>
-        <div class="terminal-console-wrap"><div class="log-console" id="terminal-log"></div></div>
+        <div class="terminal-console-wrap"><div class="log-console ${state.terminalLogCollapsed ? "collapsed" : ""}" id="terminal-log"></div></div>
       </div>`;
     const header = document.getElementById("config-preview-header");
     if (header) header.addEventListener("click", () => {
@@ -403,6 +412,17 @@ function renderTerminalDetail(term) {
   }
 
   if (hasChart) renderTerminalChart(term.metrics_series);
+}
+
+function toggleTerminalLogCollapse() {
+  state.terminalLogCollapsed = !state.terminalLogCollapsed;
+  const el = document.getElementById("terminal-log");
+  const btn = document.getElementById("btn-collapse-log");
+  if (el) {
+    el.classList.toggle("collapsed", state.terminalLogCollapsed);
+    if (state.terminalLogCollapsed) el.scrollTop = el.scrollHeight; // collapsed view shows the tail
+  }
+  if (btn) btn.textContent = state.terminalLogCollapsed ? "Expand output" : "Collapse output";
 }
 
 async function loadConfigPreview(configPath) {
@@ -925,6 +945,180 @@ async function loadHistoryFile(path) {
 }
 
 // ============================================================================
+// SCHEDULER
+// ============================================================================
+const SCHED_STATUS_LABEL = {
+  pending: "Scheduled", running: "Running", cancelling: "Stopping…",
+  completed: "Completed", failed: "Failed", cancelled: "Cancelled", skipped: "Skipped",
+};
+const SCHED_STATUS_CLASS = {
+  pending: "unmanaged", running: "running", cancelling: "running",
+  completed: "completed", failed: "failed", cancelled: "stopped", skipped: "stopped",
+};
+
+async function loadScheduler() {
+  let data;
+  try { data = await api("/api/scheduler"); } catch (e) { return; }
+  state.schedulerItems = data.items;
+  state.schedulerMaxConcurrent = data.max_concurrent;
+  if (!state.schedulerConfigsLoaded) await populateSchedulerConfigSelect();
+  renderScheduler();
+}
+
+async function populateSchedulerConfigSelect() {
+  state.schedulerConfigsLoaded = true;
+  try {
+    const data = await api("/api/configs");
+    const select = document.getElementById("scheduler-config-select");
+    for (const group of data.groups) {
+      const optgroup = document.createElement("optgroup");
+      optgroup.label = group.category;
+      for (const c of group.configs) {
+        const opt = document.createElement("option");
+        opt.value = c.path; opt.textContent = c.name;
+        optgroup.appendChild(opt);
+      }
+      select.appendChild(optgroup);
+    }
+  } catch (e) {}
+}
+
+function renderScheduler() {
+  document.getElementById("concurrency-value").textContent = state.schedulerMaxConcurrent;
+  document.getElementById("btn-concurrency-minus").disabled = state.schedulerMaxConcurrent <= 1;
+
+  const running = state.schedulerItems.filter((i) => i.status === "running" || i.status === "cancelling");
+  const pending = state.schedulerItems.filter((i) => i.status === "pending");
+  const past = state.schedulerItems.filter((i) => !["running", "cancelling", "pending"].includes(i.status))
+    .sort((a, b) => (b.ended_at || "").localeCompare(a.ended_at || ""));
+
+  document.getElementById("count-running-sched").textContent = running.length;
+  document.getElementById("count-pending-sched").textContent = pending.length;
+  document.getElementById("count-past-sched").textContent = past.length;
+
+  renderSchedulerBucket("scheduler-running-list", running, "Nothing running.");
+  renderSchedulerBucket("scheduler-pending-list", pending, "Nothing queued.", true);
+  renderSchedulerBucket("scheduler-past-list", past, "No history yet.");
+}
+
+function renderSchedulerBucket(containerId, items, emptyText, isPendingBucket) {
+  const container = document.getElementById(containerId);
+  if (!items.length) {
+    container.innerHTML = `<div class="empty-state">${emptyText}</div>`;
+    return;
+  }
+  container.innerHTML = items.map((item, idx) => schedulerCardHtml(item, idx, items.length, isPendingBucket)).join("");
+  wireSchedulerCardEvents(container);
+}
+
+function schedulerCardHtml(item, idx, total, isPendingBucket) {
+  const statusClass = SCHED_STATUS_CLASS[item.status] || "unmanaged";
+  const modeTag = `<span class="mode-tag mode-${item.mode === "eval" ? "eval" : "train"}">${item.mode}</span>`;
+  const chainTag = item.depends_on ? `<span class="mode-tag chain-tag">chained</span>` : "";
+  const sub = `${item.config_path}${item.extra_args ? " · " + item.extra_args : ""}`;
+  const m = item.latest_metrics;
+  const metricChip = m ? `<span class="term-card-metric">epoch ${m.epoch}${m.metrics && m.metrics["Val Dice"] !== undefined ? " · dice " + fmtNum(m.metrics["Val Dice"]) : ""}</span>` : "";
+
+  let actions = "";
+  if (isPendingBucket) {
+    actions += `<div class="reorder-btns">
+      <button data-action="move-up" data-id="${item.id}" ${idx === 0 ? "disabled" : ""}>▲</button>
+      <button data-action="move-down" data-id="${item.id}" ${idx === total - 1 ? "disabled" : ""}>▼</button>
+    </div>`;
+  }
+  if (item.status === "pending") {
+    actions += `<button class="btn btn-sm btn-danger" data-action="remove" data-id="${item.id}">Remove</button>`;
+  } else if (item.status === "running") {
+    actions += `<button class="btn btn-sm btn-danger" data-action="cancel" data-id="${item.id}">Cancel</button>`;
+  } else if (item.status !== "cancelling") {
+    actions += `<button class="btn btn-sm btn-ghost" data-action="remove" data-id="${item.id}">Clear</button>`;
+  }
+
+  return `<div class="term-card" data-id="${escapeHtml(item.id)}">
+    <div class="term-card-accent ${statusClass}"></div>
+    <div class="term-card-body">
+      <div class="term-card-title" title="${escapeHtml(item.experiment_name || item.config_path)}">${escapeHtml(item.experiment_name || item.config_path)}${modeTag}${chainTag}</div>
+      <div class="term-card-sub" title="${escapeHtml(sub)}">${escapeHtml(sub)}</div>
+      <div class="term-card-footer">
+        <span class="term-card-status ${statusClass}">${SCHED_STATUS_LABEL[item.status] || item.status}</span>
+        ${metricChip}
+        <div class="job-actions">${actions}</div>
+      </div>
+    </div>
+  </div>`;
+}
+
+function wireSchedulerCardEvents(container) {
+  container.querySelectorAll("button[data-action]").forEach((btn) => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      const action = btn.dataset.action;
+      if (action === "remove") removeSchedulerItem(id);
+      else if (action === "cancel") cancelSchedulerItem(id);
+      else if (action === "move-up") moveSchedulerItem(id, -1);
+      else if (action === "move-down") moveSchedulerItem(id, 1);
+    });
+  });
+}
+
+async function addSchedulerItem() {
+  const config_path = document.getElementById("scheduler-config-select").value;
+  const mode = document.getElementById("scheduler-mode-select").value;
+  const extra_args = document.getElementById("scheduler-extra-args").value.trim();
+  if (!config_path) { toast("Pick a config first", "err"); return; }
+  try {
+    await api("/api/scheduler/items", { method: "POST", body: JSON.stringify({ config_path, mode, extra_args }) });
+    toast("Added to schedule", "ok");
+    document.getElementById("scheduler-extra-args").value = "";
+    loadScheduler();
+  } catch (e) {
+    toast("Couldn't schedule: " + e.message, "err");
+  }
+}
+
+async function removeSchedulerItem(id) {
+  try { await api(`/api/scheduler/items/${encodeURIComponent(id)}`, { method: "DELETE" }); loadScheduler(); }
+  catch (e) { toast("Couldn't remove: " + e.message, "err"); }
+}
+
+async function cancelSchedulerItem(id) {
+  const confirmed = await showConfirm("Cancel this experiment?", "This stops it now. It will stay listed under Past.");
+  if (!confirmed) return;
+  try { await api(`/api/scheduler/items/${encodeURIComponent(id)}/cancel`, { method: "POST" }); toast("Cancelling…", "ok"); loadScheduler(); }
+  catch (e) { toast("Couldn't cancel: " + e.message, "err"); }
+}
+
+async function moveSchedulerItem(id, direction) {
+  const pending = state.schedulerItems.filter((i) => i.status === "pending");
+  const idx = pending.findIndex((i) => i.id === id);
+  const swapWith = idx + direction;
+  if (idx < 0 || swapWith < 0 || swapWith >= pending.length) return;
+  const order = pending.map((i) => i.id);
+  [order[idx], order[swapWith]] = [order[swapWith], order[idx]];
+  try {
+    await api("/api/scheduler/reorder", { method: "POST", body: JSON.stringify({ order }) });
+    loadScheduler();
+  } catch (e) {
+    toast("Couldn't reorder: " + e.message, "err");
+  }
+}
+
+async function updateSchedulerConcurrency(delta) {
+  const next = Math.max(1, state.schedulerMaxConcurrent + delta);
+  if (next === state.schedulerMaxConcurrent) return;
+  try {
+    const res = await api("/api/scheduler/max_concurrent", { method: "POST", body: JSON.stringify({ value: next }) });
+    state.schedulerMaxConcurrent = res.max_concurrent;
+    document.getElementById("concurrency-value").textContent = state.schedulerMaxConcurrent;
+    document.getElementById("btn-concurrency-minus").disabled = state.schedulerMaxConcurrent <= 1;
+    loadScheduler();
+  } catch (e) {
+    toast("Couldn't update concurrency: " + e.message, "err");
+  }
+}
+
+// ============================================================================
 // CONFIG CREATOR
 // ============================================================================
 function getAtPath(obj, path) {
@@ -1183,8 +1377,9 @@ async function loadMonitors() {
   const newMonitors = data.monitors;
 
   // Auto pop the dropdown open the moment a service starts, and auto-close
-  // it the moment it stops. Manual toggles (see wireMonitorEvents) persist
-  // across polls as long as the alive/not-alive state itself hasn't changed.
+  // it the moment it stops. Manual toggles (see the click handler below)
+  // persist across polls as long as the alive/not-alive state itself hasn't
+  // changed.
   for (const m of newMonitors) {
     const prevAlive = state.monitorPrevAlive[m.id];
     if (m.alive && prevAlive !== true) state.monitorExpanded.add(m.id);
@@ -1199,31 +1394,19 @@ async function loadMonitors() {
   }
 }
 
-function renderMonitorList() {
-  const body = document.getElementById("monitor-list-body");
-  if (!state.monitors.length) {
-    body.innerHTML = `<div class="empty-state">No monitors configured.</div>`;
-    return;
-  }
-  body.innerHTML = state.monitors.map((m) => {
-    const expanded = state.monitorExpanded.has(m.id);
-    const statusClass = m.alive ? "running" : "stopped";
-    const statusLabel = m.alive ? "Running" : "Stopped";
-    const intervalTag = m.watch_interval ? `<span class="mode-tag">watch ${m.watch_interval}s</span>` : `<span class="mode-tag">self-refreshing</span>`;
-    return `<div class="monitor-card ${expanded ? "expanded" : ""}" data-id="${escapeHtml(m.id)}">
+function monitorCardHtml(m) {
+  const expanded = state.monitorExpanded.has(m.id);
+  const statusClass = m.alive ? "running" : "stopped";
+  const intervalTag = m.watch_interval ? `<span class="mode-tag">watch ${m.watch_interval}s</span>` : `<span class="mode-tag">self-refreshing</span>`;
+  return `<div class="monitor-card ${expanded ? "expanded" : ""}" data-id="${escapeHtml(m.id)}">
       <div class="monitor-card-row">
         <div class="term-card-accent ${statusClass}"></div>
         <div class="term-card-body">
           <div class="term-card-title" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}${intervalTag}</div>
           <div class="term-card-sub" title="${escapeHtml(m.command)}">${escapeHtml(m.command)}</div>
           <div class="term-card-footer">
-            <span class="term-card-status ${statusClass}">${statusLabel}</span>
-            <div class="job-actions">
-              ${m.alive
-                ? `<button class="btn btn-sm" data-action="stop" data-id="${m.id}">Stop</button>`
-                : `<button class="btn btn-sm btn-primary" data-action="start" data-id="${m.id}">Start</button>`}
-              ${!m.builtin ? `<button class="btn btn-sm btn-danger" data-action="remove" data-id="${m.id}">Remove</button>` : ""}
-            </div>
+            <span class="term-card-status ${statusClass}">${m.alive ? "Running" : "Stopped"}</span>
+            <div class="job-actions">${monitorActionButtonsHtml(m)}</div>
           </div>
         </div>
         <div class="monitor-chevron">▾</div>
@@ -1232,20 +1415,26 @@ function renderMonitorList() {
         <div class="log-console no-wrap" id="monitor-output-${m.id}"></div>
       </div>
     </div>`;
-  }).join("");
+}
 
-  body.querySelectorAll(".monitor-card-row").forEach((row) => {
-    row.addEventListener("click", (e) => {
-      if (e.target.closest("button")) return;
-      const card = row.closest(".monitor-card");
-      const id = card.dataset.id;
-      const nowExpanded = !state.monitorExpanded.has(id);
-      if (nowExpanded) { state.monitorExpanded.add(id); loadMonitorOutput(id); }
-      else state.monitorExpanded.delete(id);
-      card.classList.toggle("expanded", nowExpanded);
-    });
+function monitorActionButtonsHtml(m) {
+  return `${m.alive
+    ? `<button class="btn btn-sm" data-action="stop" data-id="${m.id}">Stop</button>`
+    : `<button class="btn btn-sm btn-primary" data-action="start" data-id="${m.id}">Start</button>`}
+    ${!m.builtin ? `<button class="btn btn-sm btn-danger" data-action="remove" data-id="${m.id}">Remove</button>` : ""}`;
+}
+
+function wireMonitorCard(card) {
+  const row = card.querySelector(".monitor-card-row");
+  row.addEventListener("click", (e) => {
+    if (e.target.closest("button")) return;
+    const id = card.dataset.id;
+    const nowExpanded = !state.monitorExpanded.has(id);
+    if (nowExpanded) { state.monitorExpanded.add(id); loadMonitorOutput(id); }
+    else state.monitorExpanded.delete(id);
+    card.classList.toggle("expanded", nowExpanded);
   });
-  body.querySelectorAll("button[data-action]").forEach((btn) => {
+  card.querySelectorAll("button[data-action]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       const id = btn.dataset.id;
@@ -1254,6 +1443,62 @@ function renderMonitorList() {
       else if (btn.dataset.action === "remove") removeMonitor(id);
     });
   });
+}
+
+function renderMonitorList() {
+  const body = document.getElementById("monitor-list-body");
+  if (!state.monitors.length) {
+    body.innerHTML = `<div class="empty-state">No monitors configured.</div>`;
+    state.monitorListIds = [];
+    return;
+  }
+
+  const currentIds = state.monitors.map((m) => m.id);
+  const structureChanged = currentIds.join(",") !== (state.monitorListIds || []).join(",");
+
+  if (structureChanged) {
+    // Full rebuild only when monitors were actually added/removed — this is
+    // the only path that recreates the output <div>s, so doing it on every
+    // 2s poll (even when nothing structural changed) was what caused the
+    // flicker: the visible output was being wiped and redrawn constantly.
+    body.innerHTML = state.monitors.map(monitorCardHtml).join("");
+    body.querySelectorAll(".monitor-card").forEach(wireMonitorCard);
+    state.monitorListIds = currentIds;
+    return;
+  }
+
+  // Otherwise, update just the bits that can change in place, leaving the
+  // output drawers (and their scroll position / transition state) alone.
+  for (const m of state.monitors) {
+    const card = body.querySelector(`.monitor-card[data-id="${cssEscapeAttr(m.id)}"]`);
+    if (!card) continue;
+    const statusClass = m.alive ? "running" : "stopped";
+    card.classList.toggle("expanded", state.monitorExpanded.has(m.id));
+    const accent = card.querySelector(".term-card-accent");
+    if (accent) accent.className = `term-card-accent ${statusClass}`;
+    const statusEl = card.querySelector(".term-card-status");
+    if (statusEl) { statusEl.className = `term-card-status ${statusClass}`; statusEl.textContent = m.alive ? "Running" : "Stopped"; }
+    const actions = card.querySelector(".job-actions");
+    if (actions) {
+      const newHtml = monitorActionButtonsHtml(m);
+      if (actions.innerHTML !== newHtml) {
+        actions.innerHTML = newHtml;
+        actions.querySelectorAll("button[data-action]").forEach((btn) => {
+          btn.addEventListener("click", (e) => {
+            e.stopPropagation();
+            const id = btn.dataset.id;
+            if (btn.dataset.action === "start") startMonitor(id);
+            else if (btn.dataset.action === "stop") stopMonitor(id);
+            else if (btn.dataset.action === "remove") removeMonitor(id);
+          });
+        });
+      }
+    }
+  }
+}
+
+function cssEscapeAttr(s) {
+  return String(s).replace(/"/g, '\\"');
 }
 
 async function loadMonitorOutput(id) {
@@ -1372,6 +1617,11 @@ function initButtons() {
 
   document.getElementById("btn-refresh-terminals").addEventListener("click", loadTerminals);
 
+  document.getElementById("btn-refresh-scheduler").addEventListener("click", loadScheduler);
+  document.getElementById("btn-schedule-add").addEventListener("click", addSchedulerItem);
+  document.getElementById("btn-concurrency-minus").addEventListener("click", () => updateSchedulerConcurrency(-1));
+  document.getElementById("btn-concurrency-plus").addEventListener("click", () => updateSchedulerConcurrency(1));
+
   document.getElementById("btn-refresh-reports").addEventListener("click", loadReports);
   document.getElementById("btn-compare-reports").addEventListener("click", compareReports);
 
@@ -1403,7 +1653,7 @@ async function boot() {
   await loadConfigs();
   await loadTerminals();
   const interval = (state.system && state.system.poll_interval_ms) || 2000;
-  state.pollTimer = setInterval(() => { loadTerminals(); loadMonitors(); }, interval);
+  state.pollTimer = setInterval(() => { loadTerminals(); loadMonitors(); loadScheduler(); }, interval);
 }
 
 boot();

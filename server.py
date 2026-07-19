@@ -23,12 +23,15 @@ from backend import terminals
 from backend import reports
 from backend import history
 from backend import monitors
+from backend import scheduler
 from backend import tensorboard_manager as tb
 from backend import tmux_runner as tmux
 
 APP_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__, static_folder=str(APP_DIR / "static"), static_url_path="")
+
+scheduler.ensure_worker_started()
 
 
 def err(message, code=400):
@@ -130,6 +133,61 @@ def api_restart_terminal(session_name):
 def api_kill_terminal(session_name):
     terminals.kill(session_name)
     return jsonify({"killed": True})
+
+
+# --------------------------------------------------------------------------- scheduler
+@app.route("/api/scheduler", methods=["GET"])
+def api_scheduler_list():
+    return jsonify(scheduler.list_items())
+
+
+@app.route("/api/scheduler/items", methods=["POST"])
+def api_scheduler_add():
+    body = request.get_json(force=True, silent=True) or {}
+    config_path = body.get("config_path")
+    mode = body.get("mode", "train")
+    extra_args = body.get("extra_args", "")
+    if not config_path:
+        return err("Missing 'config_path'", 400)
+    try:
+        created = scheduler.add_item(config_path, mode, extra_args)
+    except FileNotFoundError:
+        return err(f"Config not found: {config_path}", 404)
+    except ValueError as e:
+        return err(str(e), 400)
+    return jsonify({"items": created})
+
+
+@app.route("/api/scheduler/items/<item_id>", methods=["DELETE"])
+def api_scheduler_remove(item_id):
+    if not scheduler.remove_item(item_id):
+        return err("Scheduler item not found", 404)
+    return jsonify({"removed": True})
+
+
+@app.route("/api/scheduler/items/<item_id>/cancel", methods=["POST"])
+def api_scheduler_cancel(item_id):
+    try:
+        return jsonify(scheduler.cancel_item(item_id))
+    except ValueError as e:
+        return err(str(e), 404)
+
+
+@app.route("/api/scheduler/reorder", methods=["POST"])
+def api_scheduler_reorder():
+    body = request.get_json(force=True, silent=True) or {}
+    scheduler.reorder_pending(body.get("order", []))
+    return jsonify(scheduler.list_items())
+
+
+@app.route("/api/scheduler/max_concurrent", methods=["POST"])
+def api_scheduler_max_concurrent():
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        value = scheduler.set_max_concurrent(body.get("value", 1))
+    except (TypeError, ValueError):
+        return err("value must be a whole number", 400)
+    return jsonify({"max_concurrent": value})
 
 
 # --------------------------------------------------------------------------- reports

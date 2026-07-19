@@ -111,6 +111,33 @@ window onto real tmux sessions:
 - Because these are real tmux sessions, `tmux attach -t <session_name>` from
   a terminal works too, alongside the dashboard.
 
+### Scheduler
+Queue up training/eval runs to launch automatically — the one part of the
+dashboard with an actual background thread, since unattended overnight
+scheduling needs something to notice a slot has freed up even if nobody has
+the dashboard open. Everything else about the dashboard stays true to its
+"nothing happens unless you're looking at it" design; this is a deliberate,
+narrow exception.
+
+- **Add to schedule**: pick a config, a mode (**Train**, **Eval**, or
+  **Train + Eval**), and optional extra args. "Train + Eval" creates two
+  linked entries — eval only launches after its train half *completes
+  successfully*; if training fails or is cancelled, the eval half is marked
+  "skipped" instead of ever running against a broken checkpoint.
+- **Concurrency**: the +/- stepper controls how many scheduled experiments
+  run at once. Raising it immediately allows more scheduled items to start;
+  lowering it never kills anything already running, it just stops new ones
+  from starting until things fall back below the new limit.
+- **Scheduled / Running / Past**: three sections show every item at every
+  stage. Reorder anything still in "Scheduled" with the ▲/▼ buttons — this
+  changes what launches next. Cancel a running item (stops it, keeps it
+  under Past for the record) or remove a scheduled/past item outright. All
+  of this works freely while other scheduled experiments are mid-run.
+- A scheduled item becomes an ordinary tmux session the moment it launches
+  (via the exact same code path as "Launch in terminal"), so it shows up on
+  the Terminals page too — the scheduler is just the layer that decides
+  *when* to press that button, not a separate execution mechanism.
+
 ### Reboot resilience
 A tmux session only survives the *dashboard* restarting — it doesn't survive
 the *machine* rebooting. To handle that: every launch is recorded (config,
@@ -183,11 +210,14 @@ the full value as a tooltip.
 
 ## Notes & limitations
 
-- No background worker or polling thread runs experiments — tmux is the
-  source of truth, and the dashboard just reads it (via `capture-pane`) when
-  the frontend asks. This means restarting the dashboard process loses
-  nothing: there's no in-memory state to reconstruct, only the small
-  metadata file recording which sessions were launched for which config.
+- Almost nothing runs in the background — tmux is the source of truth for
+  experiments, and the dashboard just reads it (via `capture-pane`) when the
+  frontend asks. Restarting the dashboard process loses nothing: there's no
+  in-memory state to reconstruct, only small metadata files recording which
+  sessions were launched for which config. The **Scheduler is the one
+  exception** — it runs a lightweight thread that ticks every few seconds so
+  queued experiments keep progressing even with no browser tab open;
+  everything else follows the read-on-demand pattern.
 - The dashboard does not sandbox or validate the commands it launches beyond
   checking the config path exists — treat it the same as a terminal you'd
   type `python train.py ...` into yourself.

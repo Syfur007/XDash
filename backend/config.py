@@ -55,6 +55,7 @@ class Settings:
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.state_file = self.state_dir / "terminals_state.json"
         self.monitors_file = self.state_dir / "monitors.json"
+        self.scheduler_file = self.state_dir / "scheduler.json"
         self.dashboard_log_dir = self.state_dir / "dashboard_logs"
         self.dashboard_log_dir.mkdir(parents=True, exist_ok=True)
 

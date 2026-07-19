@@ -10,7 +10,7 @@
 
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css">
-<link rel="stylesheet" href="styles.css?v=4">
+<link rel="stylesheet" href="styles.css?v=5">
 </head>
 <body>
 
@@ -38,6 +38,10 @@
       <div class="nav-item" data-view="terminals">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M8 9l3 3-3 3M13 15h3"/></svg>
         Terminals
+      </div>
+      <div class="nav-item" data-view="scheduler">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
+        Scheduler
       </div>
       <div class="nav-item" data-view="reports">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h9l5 5v13H6z"/><path d="M14 3v5h5M9 13h6M9 17h6M9 9h2"/></svg>
@@ -212,6 +216,65 @@
       </div>
     </section>
 
+    <!-- ---------------------------------------------------- Scheduler view -->
+    <section class="view" id="view-scheduler">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Scheduler</div>
+          <div class="view-sub">Queue up training/eval runs — they launch automatically as slots free up, even overnight.</div>
+        </div>
+        <button class="btn btn-ghost" id="btn-refresh-scheduler">Refresh</button>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header"><span>Concurrency</span></div>
+        <div class="concurrency-row">
+          <span class="concurrency-label">Max experiments running at once</span>
+          <div class="stepper">
+            <button class="stepper-btn" id="btn-concurrency-minus">−</button>
+            <span class="stepper-value" id="concurrency-value">1</span>
+            <button class="stepper-btn" id="btn-concurrency-plus">+</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-header"><span>Add to schedule</span></div>
+        <div class="scheduler-add-form">
+          <div class="field grow">
+            <label>Config</label>
+            <select id="scheduler-config-select"><option value="">— pick a config —</option></select>
+          </div>
+          <div class="field">
+            <label>Mode</label>
+            <select id="scheduler-mode-select">
+              <option value="train">Train</option>
+              <option value="eval">Eval</option>
+              <option value="both">Train + Eval</option>
+            </select>
+          </div>
+          <div class="field grow">
+            <label>Extra args</label>
+            <input class="text-input grow" id="scheduler-extra-args" placeholder="--epochs 10 --lr 0.0005" />
+          </div>
+          <button class="btn btn-primary" id="btn-schedule-add">Add to schedule</button>
+        </div>
+      </div>
+
+      <div class="scheduler-section">
+        <h3 class="scheduler-section-title">Running <span class="count-badge" id="count-running-sched">0</span></h3>
+        <div id="scheduler-running-list" class="scheduler-list"><div class="empty-state">Nothing running.</div></div>
+      </div>
+      <div class="scheduler-section">
+        <h3 class="scheduler-section-title">Scheduled <span class="count-badge" id="count-pending-sched">0</span></h3>
+        <div id="scheduler-pending-list" class="scheduler-list"><div class="empty-state">Nothing queued.</div></div>
+      </div>
+      <div class="scheduler-section">
+        <h3 class="scheduler-section-title">Past <span class="count-badge" id="count-past-sched">0</span></h3>
+        <div id="scheduler-past-list" class="scheduler-list"><div class="empty-state">No history yet.</div></div>
+      </div>
+    </section>
+
     <!-- ---------------------------------------------------- Reports view -->
     <section class="view" id="view-reports">
       <div class="view-header">
@@ -355,6 +418,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/yaml/yaml.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
-<script src="app.js?v=4"></script>
+<script src="app.js?v=5"></script>
 </body>
 </html>
