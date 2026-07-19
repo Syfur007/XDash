@@ -161,6 +161,11 @@ interval to `0`). Add your own via the form at the bottom of the page (name +
 command + watch interval) — these persist in `data/monitors.json` and can be
 removed; the built-in five can't be, though you can still stop them anytime.
 
+Each card has its own output dropdown — it pops open automatically the
+moment you start that service and closes automatically when it stops; you
+can also click the card at any time to show or hide it manually in between,
+independent of the auto behavior.
+
 ### TensorBoard
 Starts a single shared `tensorboard --logdir runs/` process on demand — after
 a confirmation prompt, since it spawns a background process on the server —

@@ -33,7 +33,8 @@ const state = {
   historySource: "logs",
 
   monitors: [],
-  selectedMonitor: null,
+  monitorExpanded: new Set(),
+  monitorPrevAlive: {},
 
   builderConfig: {},
   creatorInitialized: false,
@@ -1179,10 +1180,22 @@ async function saveCreatorConfig() {
 async function loadMonitors() {
   let data;
   try { data = await api("/api/monitors"); } catch (e) { return; }
-  state.monitors = data.monitors;
+  const newMonitors = data.monitors;
+
+  // Auto pop the dropdown open the moment a service starts, and auto-close
+  // it the moment it stops. Manual toggles (see wireMonitorEvents) persist
+  // across polls as long as the alive/not-alive state itself hasn't changed.
+  for (const m of newMonitors) {
+    const prevAlive = state.monitorPrevAlive[m.id];
+    if (m.alive && prevAlive !== true) state.monitorExpanded.add(m.id);
+    else if (!m.alive && prevAlive === true) state.monitorExpanded.delete(m.id);
+    state.monitorPrevAlive[m.id] = m.alive;
+  }
+
+  state.monitors = newMonitors;
   renderMonitorList();
-  if (state.selectedMonitor && state.monitors.some((m) => m.id === state.selectedMonitor)) {
-    loadMonitorOutput(state.selectedMonitor);
+  for (const id of state.monitorExpanded) {
+    if (state.monitors.some((m) => m.id === id)) loadMonitorOutput(id);
   }
 }
 
@@ -1193,34 +1206,43 @@ function renderMonitorList() {
     return;
   }
   body.innerHTML = state.monitors.map((m) => {
-    const active = m.id === state.selectedMonitor ? "active" : "";
+    const expanded = state.monitorExpanded.has(m.id);
     const statusClass = m.alive ? "running" : "stopped";
     const statusLabel = m.alive ? "Running" : "Stopped";
     const intervalTag = m.watch_interval ? `<span class="mode-tag">watch ${m.watch_interval}s</span>` : `<span class="mode-tag">self-refreshing</span>`;
-    return `<div class="term-card ${active}" data-id="${escapeHtml(m.id)}">
-      <div class="term-card-accent ${statusClass}"></div>
-      <div class="term-card-body">
-        <div class="term-card-title" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}${intervalTag}</div>
-        <div class="term-card-sub" title="${escapeHtml(m.command)}">${escapeHtml(m.command)}</div>
-        <div class="term-card-footer">
-          <span class="term-card-status ${statusClass}">${statusLabel}</span>
-          <div class="job-actions">
-            ${m.alive
-              ? `<button class="btn btn-sm" data-action="stop" data-id="${m.id}">Stop</button>`
-              : `<button class="btn btn-sm btn-primary" data-action="start" data-id="${m.id}">Start</button>`}
-            ${!m.builtin ? `<button class="btn btn-sm btn-danger" data-action="remove" data-id="${m.id}">Remove</button>` : ""}
+    return `<div class="monitor-card ${expanded ? "expanded" : ""}" data-id="${escapeHtml(m.id)}">
+      <div class="monitor-card-row">
+        <div class="term-card-accent ${statusClass}"></div>
+        <div class="term-card-body">
+          <div class="term-card-title" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}${intervalTag}</div>
+          <div class="term-card-sub" title="${escapeHtml(m.command)}">${escapeHtml(m.command)}</div>
+          <div class="term-card-footer">
+            <span class="term-card-status ${statusClass}">${statusLabel}</span>
+            <div class="job-actions">
+              ${m.alive
+                ? `<button class="btn btn-sm" data-action="stop" data-id="${m.id}">Stop</button>`
+                : `<button class="btn btn-sm btn-primary" data-action="start" data-id="${m.id}">Start</button>`}
+              ${!m.builtin ? `<button class="btn btn-sm btn-danger" data-action="remove" data-id="${m.id}">Remove</button>` : ""}
+            </div>
           </div>
         </div>
+        <div class="monitor-chevron">▾</div>
+      </div>
+      <div class="monitor-output-drawer">
+        <div class="log-console no-wrap" id="monitor-output-${m.id}"></div>
       </div>
     </div>`;
   }).join("");
 
-  body.querySelectorAll(".term-card").forEach((el) => {
-    el.addEventListener("click", (e) => {
+  body.querySelectorAll(".monitor-card-row").forEach((row) => {
+    row.addEventListener("click", (e) => {
       if (e.target.closest("button")) return;
-      state.selectedMonitor = el.dataset.id;
-      renderMonitorList();
-      showMonitorDetail(state.selectedMonitor);
+      const card = row.closest(".monitor-card");
+      const id = card.dataset.id;
+      const nowExpanded = !state.monitorExpanded.has(id);
+      if (nowExpanded) { state.monitorExpanded.add(id); loadMonitorOutput(id); }
+      else state.monitorExpanded.delete(id);
+      card.classList.toggle("expanded", nowExpanded);
     });
   });
   body.querySelectorAll("button[data-action]").forEach((btn) => {
@@ -1234,18 +1256,9 @@ function renderMonitorList() {
   });
 }
 
-function showMonitorDetail(id) {
-  const m = state.monitors.find((x) => x.id === id);
-  if (!m) return;
-  document.getElementById("monitor-detail-panel").style.display = "block";
-  document.getElementById("monitor-detail-title").textContent = m.name;
-  document.getElementById("monitor-detail-sub").textContent = m.command;
-  loadMonitorOutput(id);
-}
-
 async function loadMonitorOutput(id) {
-  const el = document.getElementById("monitor-output");
-  if (!el || document.getElementById("monitor-detail-panel").style.display === "none") return;
+  const el = document.getElementById(`monitor-output-${id}`);
+  if (!el) return;
   try {
     const data = await api(`/api/monitors/${encodeURIComponent(id)}/output`);
     if (!data.alive) { el.innerHTML = `<span class="empty-log">Not running — click Start to launch it.</span>`; return; }
@@ -1270,10 +1283,8 @@ async function removeMonitor(id) {
   if (!confirmed) return;
   try {
     await api(`/api/monitors/${encodeURIComponent(id)}`, { method: "DELETE" });
-    if (state.selectedMonitor === id) {
-      state.selectedMonitor = null;
-      document.getElementById("monitor-detail-panel").style.display = "none";
-    }
+    state.monitorExpanded.delete(id);
+    delete state.monitorPrevAlive[id];
     toast("Removed", "ok");
     loadMonitors();
   } catch (e) {
