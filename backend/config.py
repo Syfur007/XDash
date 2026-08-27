@@ -37,13 +37,26 @@ class Settings:
         self.tmux_pane_height = int(raw.get("tmux_pane_height", 50))
         self.tmux_history_limit = int(raw.get("tmux_history_limit", 100000))
 
-        self.server_host = raw.get("server_host", "0.0.0.0")
+        self.server_host = raw.get("server_host", "127.0.0.1")
         self.server_port = int(raw.get("server_port", 6070))
 
         self.tensorboard_port = int(raw.get("tensorboard_port", 6006))
-        self.tensorboard_host = raw.get("tensorboard_host", "0.0.0.0")
+        self.tensorboard_host = raw.get("tensorboard_host", "127.0.0.1")
+
+        # Optional shared-secret required (via the X-Api-Token header) for
+        # every state-changing request. Empty = no auth — fine when bound to
+        # 127.0.0.1 for a single trusted user, but required reading before
+        # binding server_host any wider (see the startup warning in server.py).
+        self.api_token = (raw.get("api_token") or "").strip()
 
         self.poll_interval_ms = int(raw.get("poll_interval_ms", 2000))
+
+        # Upper bounds for the scheduler — without these, max_concurrent is
+        # only floored at 1 (no ceiling) and the item queue has no size
+        # limit at all, so a caller (malicious or just a stuck retry loop)
+        # can spawn unbounded tmux sessions / training processes.
+        self.scheduler_max_concurrent_limit = int(raw.get("scheduler_max_concurrent_limit", 8))
+        self.scheduler_max_queue_size = int(raw.get("scheduler_max_queue_size", 200))
 
         # Runtime state lives inside exp_dashboard/data so it never touches
         # the host repo. state_file is just a session_name -> {config, mode,

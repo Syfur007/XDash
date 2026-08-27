@@ -132,8 +132,18 @@ def restart(session_name: str) -> Dict[str, Any]:
 
 
 # ------------------------------------------------------------------ control
+def _is_managed(session_name: str) -> bool:
+    """True if this session was launched by the dashboard (recorded in its
+    own state file). Terminals page also lists 'unmanaged' tmux sessions
+    (anything else running on the host) read-only — kill/stop must never
+    act on one of those, even though list_terminals() can see it."""
+    return any(r["session_name"] == session_name for r in _load())
+
+
 def stop(session_name: str) -> bool:
     """Interrupt the running command (Ctrl-C) but keep the session/shell alive."""
+    if not _is_managed(session_name):
+        raise ValueError("This session was not launched by the dashboard and cannot be stopped from here.")
     if session_name not in tmux.list_sessions():
         return False
     tmux.send_ctrl_c(session_name)
@@ -146,6 +156,8 @@ def kill(session_name: str) -> bool:
     """Kill the tmux session entirely and forget about it. Best-effort saves
     a final snapshot of its output first, so the last thing it printed isn't
     just lost."""
+    if not _is_managed(session_name):
+        raise ValueError("This session was not launched by the dashboard and cannot be killed from here.")
     if session_name in tmux.list_sessions():
         text = tmux.capture_pane(session_name)
         if text:

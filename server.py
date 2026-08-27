@@ -13,7 +13,10 @@ follows the same layout and removed again without leaving a trace.
 """
 from __future__ import annotations
 
+import hmac
+import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 from flask import Flask, request, jsonify, send_from_directory, send_file
 
@@ -38,6 +41,49 @@ def err(message, code=400):
     return jsonify({"detail": message}), code
 
 
+def _origin_matches_host(origin: str, host_header: str) -> bool:
+    """True if an Origin header's host:port matches the request's own Host.
+
+    Same-origin browser requests either omit Origin (simple GET/navigation)
+    or send one matching the page's own host. A mismatch means some other
+    site's page is making this request against the dashboard.
+    """
+    try:
+        return urlparse(origin).netloc == host_header
+    except Exception:
+        return False
+
+
+@app.before_request
+def _guard_mutating_requests():
+    """Defense against unauthenticated / cross-origin control of the dashboard.
+
+    Several endpoints here (Terminals, Monitors, Scheduler) can run arbitrary
+    shell commands on this machine, and there is no session/login system —
+    so every state-changing request gets two checks:
+
+    1. If api_token is configured, it must be supplied via X-Api-Token.
+    2. A cross-origin Origin header is rejected outright, so a malicious page
+       loaded in the same browser as the dashboard can't silently drive it
+       (the browser's CORS policy already blocks most of this since no
+       Access-Control-Allow-Origin is ever sent, but this covers requests
+       that don't require a CORS preflight).
+    """
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return None
+
+    if settings.api_token:
+        supplied = request.headers.get("X-Api-Token", "")
+        if not hmac.compare_digest(supplied, settings.api_token):
+            return err("Missing or invalid X-Api-Token header", 401)
+
+    origin = request.headers.get("Origin")
+    if origin is not None and not _origin_matches_host(origin, request.headers.get("Host", "")):
+        return err("Cross-origin request blocked", 403)
+
+    return None
+
+
 # --------------------------------------------------------------------------- configs
 @app.route("/api/configs", methods=["GET"])
 def api_list_configs():
@@ -57,7 +103,7 @@ def api_get_config():
 
 @app.route("/api/config", methods=["POST"])
 def api_save_config():
-    body = request.get_json(force=True, silent=True) or {}
+    body = request.get_json(silent=True) or {}
     path = body.get("path")
     raw = body.get("raw", "")
     if not path:
@@ -86,7 +132,7 @@ def api_get_terminal(session_name):
 
 @app.route("/api/terminals", methods=["POST"])
 def api_launch_terminal():
-    body = request.get_json(force=True, silent=True) or {}
+    body = request.get_json(silent=True) or {}
     config_path = body.get("config_path")
     mode = body.get("mode", "train")
     extra_args = body.get("extra_args", "")
@@ -112,8 +158,11 @@ def api_launch_terminal():
 
 @app.route("/api/terminals/<session_name>/stop", methods=["POST"])
 def api_stop_terminal(session_name):
-    if not terminals.stop(session_name):
-        return err("Terminal is not running", 400)
+    try:
+        if not terminals.stop(session_name):
+            return err("Terminal is not running", 400)
+    except ValueError as e:
+        return err(str(e), 403)
     return jsonify({"stopped": True})
 
 
@@ -131,7 +180,10 @@ def api_restart_terminal(session_name):
 
 @app.route("/api/terminals/<session_name>", methods=["DELETE"])
 def api_kill_terminal(session_name):
-    terminals.kill(session_name)
+    try:
+        terminals.kill(session_name)
+    except ValueError as e:
+        return err(str(e), 403)
     return jsonify({"killed": True})
 
 
@@ -143,7 +195,7 @@ def api_scheduler_list():
 
 @app.route("/api/scheduler/items", methods=["POST"])
 def api_scheduler_add():
-    body = request.get_json(force=True, silent=True) or {}
+    body = request.get_json(silent=True) or {}
     config_path = body.get("config_path")
     mode = body.get("mode", "train")
     extra_args = body.get("extra_args", "")
@@ -175,14 +227,14 @@ def api_scheduler_cancel(item_id):
 
 @app.route("/api/scheduler/reorder", methods=["POST"])
 def api_scheduler_reorder():
-    body = request.get_json(force=True, silent=True) or {}
+    body = request.get_json(silent=True) or {}
     scheduler.reorder_pending(body.get("order", []))
     return jsonify(scheduler.list_items())
 
 
 @app.route("/api/scheduler/max_concurrent", methods=["POST"])
 def api_scheduler_max_concurrent():
-    body = request.get_json(force=True, silent=True) or {}
+    body = request.get_json(silent=True) or {}
     try:
         value = scheduler.set_max_concurrent(body.get("value", 1))
     except (TypeError, ValueError):
@@ -208,7 +260,7 @@ def api_get_report(rel_path):
 
 @app.route("/api/reports/compare", methods=["POST"])
 def api_compare_reports():
-    body = request.get_json(force=True, silent=True) or {}
+    body = request.get_json(silent=True) or {}
     paths = body.get("paths", [])
     if not isinstance(paths, list) or len(paths) < 2:
         return err("Provide at least 2 report paths to compare", 400)
@@ -259,7 +311,7 @@ def api_list_monitors():
 
 @app.route("/api/monitors", methods=["POST"])
 def api_add_monitor():
-    body = request.get_json(force=True, silent=True) or {}
+    body = request.get_json(silent=True) or {}
     try:
         return jsonify(monitors.add_monitor(body.get("name", ""), body.get("command", ""), body.get("watch_interval", 0)))
     except ValueError as e:
@@ -345,5 +397,20 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+def _warn_if_exposed():
+    if settings.server_host not in ("127.0.0.1", "localhost", "::1") and not settings.api_token:
+        print(
+            f"\n WARNING: server_host is '{settings.server_host}' (not loopback-only) and "
+            "api_token is unset.\n"
+            "  Every API below is reachable from the network with no authentication at all, "
+            "and several of them\n"
+            "  (Terminals, Monitors, Scheduler) can run arbitrary shell commands on this "
+            "machine.\n"
+            "  Set api_token in dashboard_config.yaml before exposing this beyond localhost.\n",
+            file=sys.stderr,
+        )
+
+
 if __name__ == "__main__":
+    _warn_if_exposed()
     app.run(host=settings.server_host, port=settings.server_port, threaded=True)

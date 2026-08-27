@@ -41,11 +41,29 @@ tmux_pane_width: 500     # wide pane so long log lines don't wrap and break pars
 tmux_pane_height: 50
 tmux_history_limit: 100000
 
-server_host: "0.0.0.0"
+# Loopback-only by default: every API here is unauthenticated unless
+# api_token (below) is set, and several endpoints (Terminals, Monitors,
+# Scheduler) can run arbitrary shell commands on this machine. Only widen
+# server_host/tensorboard_host beyond 127.0.0.1 if this host is on a
+# network you trust completely, and set api_token first.
+server_host: "127.0.0.1"
 server_port: 6070
 
 tensorboard_port: 6006
-tensorboard_host: "0.0.0.0"
+tensorboard_host: "127.0.0.1"
+
+# Shared secret required via the X-Api-Token header for every state-changing
+# request (launching/killing terminals, editing configs, adding monitors,
+# etc). Leave blank to disable — acceptable only while server_host stays at
+# 127.0.0.1. Set this to a long random value before binding any wider.
+api_token: ""
 
 # How often the frontend polls terminals/status, in milliseconds
 poll_interval_ms: 2000
+
+# Scheduler ceilings — max_concurrent (set from the Scheduler tab) is capped
+# at scheduler_max_concurrent_limit, and the item queue refuses new items
+# past scheduler_max_queue_size, so a caller can't spawn unbounded tmux
+# sessions / training processes.
+scheduler_max_concurrent_limit: 8
+scheduler_max_queue_size: 200

@@ -77,6 +77,12 @@ def add_item(config_path: str, mode: str, extra_args: str = "") -> List[Dict[str
 
     with _lock:
         data = _load()
+        n_new = 2 if mode == "both" else 1
+        if len(data["items"]) + n_new > settings.scheduler_max_queue_size:
+            raise ValueError(
+                f"Scheduler queue is at its limit ({settings.scheduler_max_queue_size} items). "
+                "Remove some completed/cancelled items before adding more."
+            )
         if mode == "both":
             train_item = _new_item(config_path, "train", extra_args)
             eval_item = _new_item(config_path, "eval", extra_args, depends_on=train_item["id"])
@@ -92,7 +98,7 @@ def add_item(config_path: str, mode: str, extra_args: str = "") -> List[Dict[str
 
 
 def set_max_concurrent(value: int) -> int:
-    value = max(1, int(value))
+    value = max(1, min(int(value), settings.scheduler_max_concurrent_limit))
     with _lock:
         data = _load()
         data["max_concurrent"] = value
