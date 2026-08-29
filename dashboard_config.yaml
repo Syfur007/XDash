@@ -15,9 +15,22 @@ checkpoints_dir: "checkpoints"
 plots_dir: "logs"             # where eval.py writes plots/overlays/images — browsable in the History tab
 # reports_dir: "logs"          # where eval.py writes *_report.json files for the Reports tab — defaults to logs_dir if unset
 
+# Where the orchestration layer writes run manifests/ledger, if the host repo has
+# adopted that layout (artifacts/runs/<run_id>/manifest.json, artifacts/ledger/*.csv)
+# — powers the Runs and Ledger views. Safe to leave at the default even if this
+# directory doesn't exist yet: those views just show "no runs recorded yet".
+artifacts_dir: "artifacts"
+
 python_executable: "python"   # interpreter used to launch train.py / eval.py
 train_script: "train.py"
 eval_script: "eval.py"
+
+# Interpreter used for "bridge" calls into the host repo's own code — schema-aware
+# config validation, model-registry introspection, and similar features that need
+# the host repo's actual dependencies (pydantic, torch, ...) importable, which the
+# dashboard's own minimal requirements.txt deliberately does not install. Leave
+# blank to reuse python_executable above (the common case: one env runs everything).
+bridge_python_executable: ""
 
 # Extra flags always appended to eval runs (besides --config)
 eval_default_args: ["--ensemble"]

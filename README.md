@@ -1,33 +1,48 @@
 # Experiment Console
 
-A small, self-contained web dashboard for browsing YAML experiment configs,
-editing them, launching training/eval runs as tmux sessions, watching them
-live, restarting ones a reboot interrupted, viewing evaluation reports, and
-viewing TensorBoard — all from one page.
+A small web dashboard for browsing YAML experiment configs, editing them,
+launching training/eval runs as tmux sessions, watching them live,
+restarting ones a reboot interrupted, tracking every run the orchestration
+layer knows about, browsing registered datasets and previewing their
+channel modes, viewing evaluation reports, and viewing TensorBoard — all
+from one page.
 
 It is designed to be **dropped into any repo as a single subdirectory** and
 removed again without leaving a trace. It doesn't assume anything about your
 model code; it only shells out to `train.py` / `eval.py` the same way you
-would from a terminal.
+would from a terminal. Features that need more than that (schema-aware
+config validation, the model registry, dataset channel construction — see
+"Framework integration" below) go through a separate, on-demand subprocess
+call into the *host repo's* own Python environment, never a new dependency
+in this folder's own `requirements.txt`.
 
 ```
 your-repo/
 ├── configs/
-│   ├── base_config.yaml
+│   ├── base.yaml
+│   ├── dataset/            <- fragments the Data tab reads directly
+│   │   └── clinicdb.yaml
 │   └── mkunet/
 │       └── mkunet_s_clinicdb_b16_lr001.yaml
-├── logs/                 <- eval.py's report JSON files are found here
+├── logs/                   <- eval.py's report JSON files are found here
 ├── runs/
 ├── checkpoints/
+├── artifacts/               <- optional: orchestration layer's manifests/ledger
+│   ├── runs/<run_id>/manifest.json
+│   └── ledger/{runs,compute,test_evals,stats}.csv
 ├── train.py
 ├── eval.py
-└── exp_dashboard/        <- this folder. Copy in, or delete, freely.
+└── dashboard/               <- this folder. Copy in, or delete, freely.
 ```
+
+The `artifacts/` layout is entirely optional — the Runs tab and the Compute
+summary just show nothing there if a repo hasn't adopted it. Everything else
+works exactly the same either way.
 
 ## Setup
 
 ```bash
-cd exp_dashboard
+cd dashboard
 pip install -r requirements.txt
 python server.py
 ```
@@ -52,8 +67,10 @@ Everything the dashboard needs to know about your repo lives in
 |---|---|
 | `repo_root` | path to your repo root, relative to this folder (default: `..`) |
 | `configs_dir` / `logs_dir` / `runs_dir` / `checkpoints_dir` / `plots_dir` | relative to `repo_root` |
-| `reports_dir` | where eval.py writes `*_report.json` files (defaults to `logs_dir` if unset) |
+| `reports_dir` | where eval.py writes report JSON files (defaults to `logs_dir` if unset) |
+| `artifacts_dir` | where the orchestration layer writes manifests/ledger, if the host repo has that layout (default: `artifacts`) — powers the Runs and Compute-summary views |
 | `python_executable` | interpreter used to launch `train.py` / `eval.py` |
+| `bridge_python_executable` | interpreter used for on-demand calls into the host repo's own code (schema export, model registry, channel construction) — see "Framework integration" below. Blank = reuse `python_executable` |
 | `train_script` / `eval_script` | script filenames |
 | `eval_default_args` | flags always appended on eval runs (e.g. `["--ensemble"]`) |
 | `env_activate_cmd` | command typed into the tmux pane before launching, e.g. `"conda activate thesis"` |
@@ -76,6 +93,14 @@ in-browser YAML editor (CodeMirror) with live validation before you can save.
 optionally with extra CLI overrides (e.g. `--epochs 10 --lr 0.0005`), and
 jumps you to the Terminals tab.
 
+**Show resolved** (next to Save) calls into the host repo's own config
+loader (via the bridge — see below) and shows the fully `compose:`-merged,
+schema-validated config exactly as the training script would actually see
+it — not just this one file's own lines. If the config doesn't validate,
+you get the real field-level errors (e.g. `dataset.root — Field required`)
+instead of finding out only when a training run crashes. Falls back to a
+clear "not available" message if the host repo has no schema module.
+
 ### Create Config
 A visual config builder — no YAML editing required. Optionally pick an
 existing config as a **template**: its keys, sections, and current values
@@ -89,6 +114,15 @@ written, updated as you type. When you're happy with it, pick a destination
 folder (existing sub-directory or a new one) and filename and hit **Save
 config** — it reuses the same save endpoint as the Configs editor, so the
 new file shows up there immediately, ready to launch.
+
+When the bridge can reach the host repo's schema, any field with a fixed set
+of allowed values (`training.optimizer`, `dataset.channel_mode`, ...) renders
+as a real dropdown instead of a free-text box a typo could slip through. The
+`model:` section is deliberately left as free-form fields — each registered
+architecture takes different constructor kwargs, so there's no one schema to
+validate against — but it gets a **Profile params ▸** button instead, which
+builds the model exactly as configured (via the real model registry) and
+reports its actual trainable parameter count.
 
 ### Terminals
 There is no queue — launching a config immediately opens a dedicated
@@ -142,7 +176,7 @@ narrow exception.
 A tmux session only survives the *dashboard* restarting — it doesn't survive
 the *machine* rebooting. To handle that: every launch is recorded (config,
 mode, extra args, experiment name) in
-`exp_dashboard/data/terminals_state.json`, independent of whether the tmux
+`dashboard/data/terminals_state.json`, independent of whether the tmux
 session is currently alive. If a recorded session is gone and **no
 evaluation report exists yet for that experiment**, the Terminals tab shows
 it as **Interrupted** with a **Restart** button — one click launches a fresh
@@ -151,19 +185,54 @@ checkpoint/resume logic in `train.py` (e.g. `checkpoint.resume: true`) takes
 it from there. If a report *does* exist, it's shown as **Completed** instead
 (no restart offered, since eval already ran and produced results).
 
+### Runs
+Runs recorded by the orchestration layer (`artifacts/runs/<run_id>/manifest.json`
++ `artifacts/ledger/runs.csv`), grouped by **config hash** — two runs sharing
+a hash differ only by seed/fold, not by what's actually being tested. Each
+group renders as a seed × fold grid, one colored cell per run
+(amber=running, emerald=done, red=failed, slate=pending); click a cell for
+that run's full detail: git commit **and a dirty-tree warning** if the run
+started from an uncommitted tree, hardware, env hash, timing, realized
+GPU-hours, and any non-determinism the training script recorded rather than
+silently assumed away. **Copy resolved config (YAML)** copies that run's
+exact resolved config to the clipboard. A **Compute-hours** strip above the
+grid totals `artifacts/ledger/compute.csv` — a running GPU-hour tally
+against your project budget, at a glance instead of spreadsheet math. Shows
+nothing if the host repo has no `artifacts/` layout yet.
+
+### Data
+Every dataset registered under `configs/dataset/*.yaml`, as configured
+(root, modality, channel mode, dedup/external flags). Pick a dataset, a
+channel mode (m1–m5), and a real sample image path, and **Preview
+channels ▸** renders every channel the host repo's channel-construction
+module would actually build — RGB, XY position, YCbCr, R/θ — as a small
+tile grid, via the bridge (below). Below that, the **test-set evaluation
+audit trail** straight off `artifacts/ledger/test_evals.csv`: every
+one-time token ever issued to touch the guarded test set, with when and
+against which config — a real audit log, not a convention someone has to
+remember to honor.
+
 ### Reports
 Any `.json` file under `reports_dir` that contains a `"metrics"` key is
-treated as an evaluation report — no fixed naming convention required. The
-Reports tab groups them by sub-directory the same way Configs does, and
-clicking one shows every metric as a stat card, a radar chart for the
-0–1-scale metrics (dice/mIoU/precision/recall/specificity/F2/accuracy), plus
-model, efficiency, environment, and full config details. **Select two or
-more** (checkboxes) and hit **Compare selected** for a side-by-side metrics
-table, an overlaid radar chart, and a config-diff table that only lists keys
-that actually differ. Each report gets one consistent color used everywhere
-on the comparison (table header swatch + radar line); the best value in each
-metric row is highlighted in a distinct emerald tone that's never one of the
-report accent colors, so it's always unambiguous.
+treated as an evaluation report — no fixed naming convention required (this
+correctly includes a bare `report.json` with no experiment-name prefix, not
+just `<name>_report.json`). The Reports tab groups them by sub-directory the
+same way Configs does, and clicking one shows every metric as a stat card, a
+radar chart for the 0–1-scale metrics (dice/mIoU/precision/recall/
+specificity/F2/accuracy/1−ECE), plus model, efficiency, environment, and
+full config details. Metrics from the canonical `metrics/` module get extra
+context instead of appearing as unexplained numbers: HD95/ASD/NSD show how
+many images were excluded from the average (empty-mask cases) right next to
+the value; Dice shows its 5th/25th-percentile band underneath; and
+`fpr_on_normals`/`specificity_lesion_free` render as an explained **N/A**
+(hover for why) rather than a bare dash when a dataset has no lesion-free
+images. **Select two or more** (checkboxes) and hit **Compare selected** for
+a side-by-side metrics table, an overlaid radar chart, and a config-diff
+table that only lists keys that actually differ. Each report gets one
+consistent color used everywhere on the comparison (table header swatch +
+radar line); the best value in each metric row is highlighted in a distinct
+emerald tone that's never one of the report accent colors, so it's always
+unambiguous.
 
 ### History
 A read-only, recursive file browser with a source switcher — built into the
@@ -200,13 +269,41 @@ and opens it in a new browser tab rather than embedding it, which is more
 reliable across browsers than an iframe. Since it points at the whole
 `runs/` directory, every experiment's event file shows up automatically.
 
+## Framework integration (the bridge)
+
+A few features need more than reading files — schema-aware config
+validation, the model registry, dataset channel construction. Rather than
+adding those (potentially heavy: pydantic, torch, ...) to this folder's own
+`requirements.txt`, the dashboard shells out to `bridge_python_executable`
+(defaults to `python_executable`) running one small, single-purpose script
+under `backend/bridge_scripts/` per feature. This keeps this whole folder's
+own dependency footprint exactly what it's always been (Flask + PyYAML +
+tensorboard), while still using the host repo's real code — never
+re-implementing config validation or model construction on this side.
+
+Every feature that goes through the bridge degrades cleanly if the host
+repo doesn't have the module it needs (an older repo, or one that hasn't
+adopted this layer yet): you get a clear "not available in this repo"
+message, not a broken page. `GET /api/bridge/status` reports which of the
+host repo's optional modules (`orchestration`, `models`, `metrics`,
+`datasets`, `pandas`) currently import cleanly.
+
+## Command palette
+**Ctrl/⌘ K** opens a fuzzy jump-to-anything search — configs, runs,
+reports, or any tab by name. Opening it is what triggers loading runs/
+reports data if you haven't visited those tabs yet (consistent with the
+rest of the dashboard's "nothing happens unless you're looking at it"
+design — see Notes & limitations).
+
 ## Mobile
 Below ~860px width the sidebar becomes a slide-in overlay (hamburger button
-in the top bar), and every two-pane layout (Configs, Terminals, Reports,
-History) stacks into a single scrollable column instead of a fixed side-by-
-side split. Anywhere a name might be too long to read in full (config paths,
-terminal/session names, report names, file-tree entries), hovering it shows
-the full value as a tooltip.
+in the top bar), and every two-pane layout (Configs, Terminals, Runs,
+Reports, History) stacks into a single scrollable column instead of a fixed
+side-by-side split. Data and Scheduler are already single-column panel
+stacks at any width, so they need no special handling. Anywhere a name
+might be too long to read in full (config paths, terminal/session names,
+report names, file-tree entries), hovering it shows the full value as a
+tooltip.
 
 ## Notes & limitations
 
@@ -226,3 +323,10 @@ the full value as a tooltip.
   training loop's log line show up without touching this codebase. The same
   applies to reports — any key under `"metrics"` in the JSON shows up as a
   stat card automatically.
+- Bridge calls are short-lived subprocesses (`bridge_python_executable
+  <script> <args>`, never through a shell), each doing exactly one thing —
+  export a schema, resolve a config, profile a model, build a channel
+  preview — and none of it holds state between calls. The same
+  origin/token guard that covers every other state-changing route
+  (`server.py`'s `before_request` hook) covers the bridge-backed ones too;
+  nothing about the bridge changes the dashboard's security model.

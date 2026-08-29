@@ -370,6 +370,52 @@ select, .text-input{
 .terminal-meta-line{ font-family: var(--mono); font-size:11.5px; color: var(--text-muted); }
 .terminal-meta-line b{ color: var(--text); }
 
+/* ---------------------------------------------------------------- runs view */
+/* The compute-summary-strip above .configs-layout on this one view adds
+   height the shared calc(100vh - 150px) doesn't budget for — a scoped
+   override, not a change to the shared rule every other view relies on. */
+.runs-layout{ height: calc(100vh - 210px); }
+.compute-summary-strip{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
+.compute-summary-strip:empty{ margin-bottom:0; }
+.compute-summary-chip{
+  background: var(--surface-2); border:1px solid var(--border-soft); border-radius: var(--radius);
+  padding:8px 14px; font-family: var(--mono); font-size:12px; color: var(--text-muted);
+}
+.compute-summary-chip b{ color: var(--amber); font-size:15px; margin-right:5px; }
+
+.seedfold-grid{ border-collapse:collapse; margin:6px 0 2px; }
+.seedfold-grid th{
+  font-family: var(--mono); font-size:10px; font-weight:500; color: var(--text-faint);
+  text-align:center; padding:2px 4px;
+}
+.seedfold-grid td.seedfold-cell{
+  width:18px; height:18px; border-radius:4px; cursor:pointer;
+  border:1px solid var(--border-soft);
+}
+.seedfold-grid td.seedfold-cell:hover{ outline:2px solid var(--text); outline-offset:1px; }
+.seedfold-grid td.seedfold-cell.empty{ cursor:default; border:1px dashed var(--border-soft); background:transparent; }
+.seedfold-cell.amber{ background: var(--amber); }
+.seedfold-cell.emerald{ background: var(--emerald); }
+.seedfold-cell.red{ background: var(--red); }
+.seedfold-cell.slate{ background: var(--slate); }
+
+.run-detail-section-title{
+  margin:18px 0 6px; color: var(--text-faint); font-size:12px; font-family: var(--mono);
+  text-transform:uppercase; letter-spacing:0.4px;
+}
+
+/* ---------------------------------------------------------------- resolved-config preview */
+.resolved-config-pre{
+  font-family: var(--mono); font-size:12.5px; line-height:1.6;
+  white-space:pre-wrap; word-break:break-word; color: var(--text); margin:0;
+}
+.resolved-config-error{
+  font-family: var(--mono); font-size:12px; color: var(--text);
+  border:1px solid rgba(229,72,77,0.35); background: rgba(229,72,77,0.08);
+  border-radius:6px; padding:8px 10px; margin-bottom:8px;
+}
+.resolved-config-error b{ color: var(--red); }
+
 /* ---------------------------------------------------------------- reports view */
 .report-badges{ display:flex; gap:6px; flex-wrap:wrap; margin:6px 0 16px; }
 .badge{
@@ -379,6 +425,9 @@ select, .text-input{
 .badge.amber{ color: var(--amber); border-color: rgba(245,166,35,0.35); background: rgba(245,166,35,0.08); }
 .badge.teal{ color: var(--teal); border-color: rgba(79,209,197,0.35); background: rgba(79,209,197,0.08); }
 .badge.violet{ color: var(--violet); border-color: rgba(167,139,250,0.35); background: rgba(167,139,250,0.08); }
+.badge.emerald{ color: var(--emerald); border-color: rgba(52,211,153,0.35); background: rgba(52,211,153,0.08); }
+.badge.red{ color: var(--red); border-color: rgba(229,72,77,0.35); background: rgba(229,72,77,0.08); }
+.badge.slate{ color: var(--slate); border-color: rgba(91,101,132,0.35); background: rgba(91,101,132,0.08); }
 
 .report-header{ margin-bottom: 4px; }
 .report-header h2{ margin:0 0 4px; font-size:19px; font-weight:700; }
@@ -403,6 +452,8 @@ select, .text-input{
 .metric-card:nth-of-type(6n+6){ border-top-color: var(--emerald); }
 .metric-card .label{ font-family: var(--mono); font-size:10.5px; color: var(--text-faint); text-transform:uppercase; letter-spacing:0.4px; }
 .metric-card .value{ font-family: var(--mono); font-size:21px; font-weight:700; color: var(--text); margin-top:4px; }
+.metric-card .value.na{ color: var(--text-faint); font-size:15px; cursor:help; }
+.metric-card-note{ font-family: var(--mono); font-size:10.5px; color: var(--text-faint); margin-top:5px; }
 
 .report-section{ margin-bottom: 22px; }
 .report-section h3{
@@ -431,6 +482,36 @@ select, .text-input{
 .compare-table td.differs{ color: var(--amber); }
 .compare-table tr td:first-child{ color: var(--text); font-family: var(--sans); text-align:left; }
 .compare-table tr th:first-child{ text-align:left; }
+
+/* ---------------------------------------------------------------- command palette */
+.palette-box{
+  background: var(--surface-2); border:1px solid var(--border); border-radius: var(--radius-lg);
+  width:560px; max-width:92vw; max-height:70vh; box-shadow: var(--shadow-panel);
+  display:flex; flex-direction:column; overflow:hidden;
+}
+.palette-input{
+  border:none; border-bottom:1px solid var(--border-soft); background:transparent; color: var(--text);
+  font-family: var(--sans); font-size:15px; padding:16px 18px; outline:none;
+}
+.palette-results{ overflow-y:auto; flex:1; padding:6px; }
+.palette-result-item{
+  display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius: var(--radius);
+  cursor:pointer;
+}
+.palette-result-item.active, .palette-result-item:hover{ background: var(--surface-3); }
+.palette-kind{
+  font-family: var(--mono); font-size:9.5px; text-transform:uppercase; color: var(--text-faint);
+  border:1px solid var(--border-soft); border-radius:4px; padding:2px 6px; flex-shrink:0; width:52px; text-align:center;
+}
+.palette-label{ color: var(--text); font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.palette-sub{
+  color: var(--text-faint); font-family: var(--mono); font-size:11px; margin-left:auto;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:40%; flex-shrink:0;
+}
+.palette-footer{
+  border-top:1px solid var(--border-soft); padding:8px 14px; font-family: var(--mono); font-size:10.5px;
+  color: var(--text-faint);
+}
 
 /* ---------------------------------------------------------------- confirmation modal */
 .modal-backdrop{
@@ -689,6 +770,33 @@ select, .text-input{
 .add-monitor-form .text-input{ width:200px; }
 .add-monitor-form .field.grow .text-input{ width:100%; }
 
+/* ---------------------------------------------------------------- data (datasets) view */
+.dataset-card-list{ display:flex; flex-wrap:wrap; gap:12px; padding:14px 16px; }
+.dataset-card{
+  background: var(--surface-2); border:1px solid var(--border-soft); border-radius: var(--radius-lg);
+  padding:12px 14px; width:220px; cursor:pointer; transition: border-color .1s ease, transform .1s ease;
+}
+.dataset-card:hover{ border-color: var(--teal); transform: translateY(-1px); }
+.dataset-card.active{ border-color: var(--amber); background: var(--surface-3); }
+.dataset-card-name{ font-weight:600; font-size:14px; color: var(--text); }
+.dataset-card-root{ font-family: var(--mono); font-size:11px; color: var(--text-muted); margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dataset-card-badges{ display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
+
+.channel-preview-form{ display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; margin:10px 0 16px; }
+.channel-preview-form .field{ display:flex; flex-direction:column; gap:5px; }
+.channel-preview-form .field.grow{ flex:1; min-width:240px; }
+.channel-preview-form label{ font-family: var(--mono); font-size:10.5px; color: var(--text-muted); text-transform:uppercase; letter-spacing:0.3px; }
+.channel-preview-form .text-input.grow{ width:100%; }
+
+.channel-preview-meta{ font-family: var(--mono); font-size:11.5px; color: var(--text-muted); margin-bottom:10px; }
+.channel-tile-grid{ display:flex; flex-wrap:wrap; gap:10px; }
+.channel-tile{
+  background: var(--surface-2); border:1px solid var(--border-soft); border-radius: var(--radius);
+  padding:6px; width:120px; text-align:center;
+}
+.channel-tile img{ width:100%; height:100px; object-fit:cover; border-radius:3px; background:#000; }
+.channel-tile-label{ font-family: var(--mono); font-size:10px; color: var(--text-faint); margin-top:5px; }
+
 /* ---------------------------------------------------------------- history view */
 .history-panel-header{ padding: 8px 10px 8px 8px; }
 .history-source-select{
@@ -786,6 +894,7 @@ select, .text-input{
     grid-template-columns: 1fr;
     height:auto;
   }
+  .runs-layout{ height:auto; }
   .config-tree, .history-tree-panel{ max-height:280px; }
   .editor-pane{ min-height:480px; }
   .creator-layout{ grid-template-columns: 1fr; height:auto; }

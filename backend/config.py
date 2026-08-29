@@ -31,6 +31,23 @@ class Settings:
         self.eval_script = raw.get("eval_script", "eval.py")
         self.eval_default_args = raw.get("eval_default_args", []) or []
 
+        # Where the orchestration layer writes manifests/ledger
+        # (artifacts/runs/<run_id>/manifest.json, artifacts/ledger/*.csv) — powers
+        # the Runs/Ledger views (IMPLEMENTATION_PLAN.md Phase 1). Reading these is
+        # plain stdlib json/csv; a host repo without this layout at all just means
+        # the readers see empty directories, not an error.
+        self.artifacts_dir = (self.repo_root / raw.get("artifacts_dir", "artifacts")).resolve()
+        self.ledger_dir = self.artifacts_dir / "ledger"
+        self.runs_artifacts_dir = self.artifacts_dir / "runs"
+
+        # Interpreter used for "bridge" calls into the host repo's own code
+        # (schema export, model-registry introspection — see backend/bridge.py).
+        # Needs the host repo's actual dependencies (pydantic, torch, ...)
+        # importable, unlike python_executable above which only needs to run
+        # train.py/eval.py. Defaults to python_executable so the common case
+        # (one env running everything) needs zero extra config.
+        self.bridge_python_executable = (raw.get("bridge_python_executable") or "").strip() or self.python_executable
+
         self.env_activate_cmd = (raw.get("env_activate_cmd") or "").strip()
         self.tmux_session_prefix = raw.get("tmux_session_prefix", "xdash")
         self.tmux_pane_width = int(raw.get("tmux_pane_width", 500))

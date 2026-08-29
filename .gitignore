@@ -1,4 +1,6 @@
 data/terminals_state.json
+data/monitors.json
+data/scheduler.json
 data/dashboard_logs/
 __pycache__/
 *.pyc

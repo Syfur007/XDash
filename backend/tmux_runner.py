@@ -27,7 +27,17 @@ def tmux_available() -> bool:
 
 
 def _run(args: List[str]) -> subprocess.CompletedProcess:
-    return subprocess.run(["tmux"] + args, capture_output=True, text=True)
+    try:
+        return subprocess.run(["tmux"] + args, capture_output=True, text=True)
+    except FileNotFoundError:
+        # tmux isn't installed at all. Every caller in this module already
+        # treats a non-zero returncode as "no session"/"nothing to report"
+        # and handles it gracefully (has_session -> False, list_sessions ->
+        # [], capture_pane* -> None) — surfacing a missing binary the same
+        # way means every read-only status route (list_terminals,
+        # list_monitors) degrades cleanly on a machine that hasn't
+        # installed tmux yet, instead of a raw 500 on first page load.
+        return subprocess.CompletedProcess(args=["tmux"] + args, returncode=127, stdout="", stderr="tmux not found")
 
 
 def has_session(session: str) -> bool:

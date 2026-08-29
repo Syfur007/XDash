@@ -1,3 +1,8 @@
+# Deliberately minimal — this is the dashboard's own env, kept separate from the
+# host repo's (possibly much heavier) ML stack. Do NOT add pydantic/torch/pandas/
+# pyarrow here: anything needing the host repo's real code and dependencies goes
+# through backend/bridge.py, which shells out to the host repo's own interpreter
+# instead (see IMPLEMENTATION_PLAN.md Phase 1 / design principle 3).
 Flask==2.2.5
 Werkzeug==2.2.3
 PyYAML>=5.4

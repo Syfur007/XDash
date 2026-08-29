@@ -7,6 +7,56 @@ const LOWER_IS_BETTER = new Set(["hd95", "asd", "mean_ms", "median_ms", "std_ms"
 const RADAR_METRICS = ["dice", "miou", "precision", "recall", "specificity", "f2", "accuracy"];
 const CHART_COLORS = ["#F5A623", "#4FD1C5", "#E5484D", "#8C97B0", "#7C9CF5", "#C77DFF"];
 
+// -------------------------------------------------------- canonical-metrics context
+// The metrics/ package (see CHANGELOG.md Phase 2) reports a few fields that are
+// meaningless read in isolation as their own stat card: an *_excluded_n count
+// only means something next to the metric it qualifies, dice_p5/dice_p25 are a
+// percentile band around dice, and fpr_on_normals/specificity_lesion_free are
+// legitimately `null` (not zero, not missing) for a dataset with no lesion-free
+// images. This section folds each of those into its parent metric's card
+// instead of listing them as unexplained cards of their own.
+const EXCLUDED_N_KEY = { hd95: "hd95_excluded_n", asd: "asd_excluded_n", nsd: "nsd_excluded_n" };
+const PERCENTILE_OF = { dice: ["dice_p5", "dice_p25"] };
+const LESION_FREE_ONLY_METRICS = new Set(["fpr_on_normals", "specificity_lesion_free"]);
+const FOLDED_METRIC_KEYS = new Set([...Object.values(EXCLUDED_N_KEY), ...Object.values(PERCENTILE_OF).flat()]);
+
+function metricCardHtml(k, v, metrics) {
+  const excludedKey = EXCLUDED_N_KEY[k];
+  const excludedN = excludedKey ? metrics[excludedKey] : undefined;
+  const excludedNote = typeof excludedN === "number" && excludedN > 0
+    ? `<div class="metric-card-note">${excludedN} image${excludedN === 1 ? "" : "s"} excluded — empty mask</div>`
+    : "";
+
+  const percentileKeys = PERCENTILE_OF[k];
+  const percentileNote = percentileKeys
+    ? `<div class="metric-card-note">p5 ${fmtNum(metrics[percentileKeys[0]])} · p25 ${fmtNum(metrics[percentileKeys[1]])}</div>`
+    : "";
+
+  const isNA = LESION_FREE_ONLY_METRICS.has(k) && (v === null || v === undefined);
+  const valueHtml = isNA
+    ? `<div class="value na" title="No lesion-free images in this dataset — this figure isn't computable here, not zero">N/A</div>`
+    : `<div class="value">${fmtNum(v)}</div>`;
+
+  return `<div class="metric-card"><div class="label">${escapeHtml(k)}</div>${valueHtml}${excludedNote}${percentileNote}</div>`;
+}
+
+// ece is 0-1 scaled like the RADAR_METRICS above but lower-is-better; plotted
+// as (1 - ece) so "further from center = better" stays one consistent rule
+// across every axis on the radar, not an exception a reader has to remember.
+const ECE_AXIS = "__ece_inverted__";
+function radarAxisKeys(metricsList) {
+  const keys = RADAR_METRICS.filter((k) => metricsList.some((m) => typeof m[k] === "number"));
+  if (metricsList.some((m) => typeof m.ece === "number")) keys.push(ECE_AXIS);
+  return keys;
+}
+function radarAxisLabel(key) {
+  return key === ECE_AXIS ? "1 − ECE" : key;
+}
+function radarAxisValue(metrics, key) {
+  if (key === ECE_AXIS) return typeof metrics.ece === "number" ? 1 - metrics.ece : null;
+  return typeof metrics[key] === "number" ? metrics[key] : null;
+}
+
 const state = {
   system: null,
   configs: [],
@@ -21,6 +71,8 @@ const state = {
   configPreviewCache: {},
   configPreviewCollapsed: false,
   terminalLogCollapsed: false,
+  resolvedConfigVisible: false,
+  configSchema: null, // null = not fetched yet, false = fetched and unavailable, object = the real schema
 
   reportGroups: [],
   selectedReportPath: null,
@@ -133,9 +185,11 @@ function switchView(view) {
   document.querySelectorAll(".nav-item").forEach((el) => el.classList.toggle("active", el.dataset.view === view));
   document.querySelectorAll(".view").forEach((el) => el.classList.toggle("active", el.id === `view-${view}`));
   if (view === "tensorboard") refreshTensorboardStatus();
+  if (view === "runs" && !state.runGroups.length) loadRuns();
   if (view === "reports" && !state.reportGroups.length) loadReports();
   if (view === "history" && !state.historyTree.length) loadHistory();
   if (view === "monitors") loadMonitors();
+  if (view === "data") loadDataView();
   if (view === "creator") initCreatorView();
   if (view === "scheduler") loadScheduler();
 }
@@ -199,6 +253,14 @@ async function selectConfig(path) {
   document.getElementById("editor-path").textContent = path;
   document.getElementById("run-bar").style.display = "flex";
   document.getElementById("btn-save-config").disabled = false;
+  document.getElementById("btn-toggle-resolved").disabled = false;
+  // Switching configs always drops back to the raw view — a stale resolved
+  // preview left over from the previously selected file would be actively
+  // misleading, not just outdated.
+  state.resolvedConfigVisible = false;
+  document.getElementById("btn-toggle-resolved").textContent = "Show resolved";
+  document.getElementById("resolved-config-body").classList.add("hidden");
+  document.getElementById("editor-body").classList.remove("hidden");
 
   const editorBody = document.getElementById("editor-body");
   editorBody.innerHTML = `<textarea id="config-textarea"></textarea>`;
@@ -240,6 +302,56 @@ async function saveConfig() {
     toast("Config saved", "ok");
   } catch (e) {
     toast("Save failed: " + e.message, "err");
+  }
+}
+
+async function toggleResolvedConfig() {
+  state.resolvedConfigVisible = !state.resolvedConfigVisible;
+  const editorBody = document.getElementById("editor-body");
+  const resolvedBody = document.getElementById("resolved-config-body");
+  const btn = document.getElementById("btn-toggle-resolved");
+  if (state.resolvedConfigVisible) {
+    editorBody.classList.add("hidden");
+    resolvedBody.classList.remove("hidden");
+    btn.textContent = "Show raw";
+    await loadResolvedConfig();
+  } else {
+    editorBody.classList.remove("hidden");
+    resolvedBody.classList.add("hidden");
+    btn.textContent = "Show resolved";
+  }
+}
+
+async function loadResolvedConfig() {
+  const resolvedBody = document.getElementById("resolved-config-body");
+  if (!state.selectedConfigPath) return;
+  resolvedBody.innerHTML = `<div class="empty-state">Resolving…</div>`;
+  try {
+    const data = await api(`/api/config/resolved?path=${encodeURIComponent(state.selectedConfigPath)}`);
+    if (data.valid) {
+      let yamlText;
+      try {
+        yamlText = jsyaml.dump(data.resolved, { indent: 2, lineWidth: -1 });
+      } catch (e) {
+        yamlText = JSON.stringify(data.resolved, null, 2);
+      }
+      resolvedBody.innerHTML = `<pre class="resolved-config-pre">${escapeHtml(yamlText)}</pre>`;
+    } else {
+      const errs = (data.errors || [])
+        .map((e) => {
+          const loc = Array.isArray(e.loc) && e.loc.length ? e.loc.join(".") : "(top level)";
+          return `<div class="resolved-config-error"><b>${escapeHtml(loc)}</b> — ${escapeHtml(e.msg)} <span style="color:var(--text-faint)">(${escapeHtml(e.type)})</span></div>`;
+        })
+        .join("");
+      resolvedBody.innerHTML =
+        `<div class="empty-state" style="text-align:left; padding:0 0 12px;">This config does not validate against the current schema:</div>` + errs;
+    }
+  } catch (e) {
+    // A BridgeUnavailable (host repo has no orchestration package, or
+    // bridge_python_executable is misconfigured) lands here too — shown as
+    // plain text rather than a raw stack trace, per the "degrade honestly"
+    // principle (IMPLEMENTATION_PLAN.md).
+    resolvedBody.innerHTML = `<div class="empty-state">${escapeHtml(e.message)}</div>`;
   }
 }
 
@@ -661,7 +773,7 @@ function renderReportDetail(data) {
   if (data.is_multiclass) badges.push(`<span class="badge">multiclass</span>`);
   if (model.name) badges.push(`<span class="badge teal">${escapeHtml(model.name)}</span>`);
 
-  const hasRadar = RADAR_METRICS.some((k) => typeof metrics[k] === "number");
+  const hasRadar = RADAR_METRICS.some((k) => typeof metrics[k] === "number") || typeof metrics.ece === "number";
 
   bodyEl.innerHTML = `
     <div class="report-header">
@@ -671,7 +783,7 @@ function renderReportDetail(data) {
     </div>
 
     <div class="metric-grid">
-      ${Object.entries(metrics).map(([k, v]) => `<div class="metric-card"><div class="label">${escapeHtml(k)}</div><div class="value">${fmtNum(v)}</div></div>`).join("")}
+      ${Object.entries(metrics).filter(([k]) => !FOLDED_METRIC_KEYS.has(k)).map(([k, v]) => metricCardHtml(k, v, metrics)).join("")}
     </div>
 
     ${hasRadar ? `<div class="report-section"><h3>Metrics overview</h3><div class="chart-wrap" style="height:280px;"><canvas id="report-radar"></canvas></div></div>` : ""}
@@ -686,13 +798,14 @@ function renderReportDetail(data) {
   if (hasRadar) {
     if (state.reportRadarChart) state.reportRadarChart.destroy();
     const canvas = document.getElementById("report-radar");
+    const axisKeys = radarAxisKeys([metrics]);
     state.reportRadarChart = new Chart(canvas.getContext("2d"), {
       type: "radar",
       data: {
-        labels: RADAR_METRICS.filter((k) => typeof metrics[k] === "number"),
+        labels: axisKeys.map(radarAxisLabel),
         datasets: [{
           label: data.experiment || "report",
-          data: RADAR_METRICS.filter((k) => typeof metrics[k] === "number").map((k) => metrics[k]),
+          data: axisKeys.map((k) => radarAxisValue(metrics, k)),
           borderColor: CHART_COLORS[0], backgroundColor: "rgba(245,166,35,0.15)", pointBackgroundColor: CHART_COLORS[0],
         }],
       },
@@ -743,7 +856,7 @@ function renderCompare(data) {
 
   const metricKeys = [];
   const seen = new Set();
-  for (const r of reports) for (const k in r.metrics) if (!seen.has(k)) { seen.add(k); metricKeys.push(k); }
+  for (const r of reports) for (const k in r.metrics) if (!seen.has(k) && !FOLDED_METRIC_KEYS.has(k)) { seen.add(k); metricKeys.push(k); }
 
   const metricRows = metricKeys.map((k) => {
     const values = reports.map((r) => r.metrics[k]);
@@ -763,7 +876,7 @@ function renderCompare(data) {
     return { key: k, values, differs: distinct.size > 1 };
   }).filter((row) => row.differs);
 
-  const hasRadar = reports.every((r) => RADAR_METRICS.some((k) => typeof r.metrics[k] === "number"));
+  const hasRadar = reports.every((r) => RADAR_METRICS.some((k) => typeof r.metrics[k] === "number") || typeof r.metrics.ece === "number");
 
   bodyEl.innerHTML = `
     <div class="report-header">
@@ -800,13 +913,14 @@ function renderCompare(data) {
   if (hasRadar) {
     if (state.compareRadarChart) state.compareRadarChart.destroy();
     const canvas = document.getElementById("compare-radar");
+    const axisKeys = radarAxisKeys(reports.map((r) => r.metrics));
     state.compareRadarChart = new Chart(canvas.getContext("2d"), {
       type: "radar",
       data: {
-        labels: RADAR_METRICS,
+        labels: axisKeys.map(radarAxisLabel),
         datasets: reports.map((r, i) => ({
           label: r.experiment || r.path,
-          data: RADAR_METRICS.map((k) => r.metrics[k] ?? null),
+          data: axisKeys.map((k) => radarAxisValue(r.metrics, k)),
           borderColor: reportColors[i],
           backgroundColor: "transparent",
           pointBackgroundColor: reportColors[i],
@@ -1154,6 +1268,43 @@ function hashStr(s) {
 }
 function cssId(s) { return (s || "root").replace(/[^a-zA-Z0-9]/g, "_"); }
 
+// -------------------------------------------------------- schema-aware fields
+// Walks the pydantic-derived JSON Schema (GET /api/config/schema, via the
+// bridge — see backend/bridge_scripts/export_schema.py) to find the leaf
+// field at a dotted path, so the builder can render a real dropdown for a
+// Literal-typed field (e.g. training.optimizer, dataset.channel_mode)
+// instead of a free-text box a typo could silently slip through. Absent or
+// unreachable schema (bridge unavailable, or a path the schema doesn't
+// know about — e.g. anything under the permissive `model:` section, which
+// orchestration/schema.py deliberately leaves unvalidated — see its own
+// docstring) just means no dropdown; the existing free-text/number/toggle
+// inference is the fallback, unchanged.
+function resolveSchemaRef(schema, ref) {
+  const key = ref.split("/").pop();
+  return (schema.$defs || {})[key];
+}
+function schemaFieldAt(schema, path) {
+  if (!schema || !schema.properties) return null;
+  let node = schema;
+  for (let i = 0; i < path.length; i++) {
+    if (!node || !node.properties || !node.properties[path[i]]) return null;
+    let field = node.properties[path[i]];
+    if (field.$ref) field = resolveSchemaRef(schema, field.$ref);
+    if (i === path.length - 1) return field;
+    node = field;
+  }
+  return null;
+}
+async function getConfigSchema() {
+  if (state.configSchema !== null) return state.configSchema;
+  try {
+    state.configSchema = await api("/api/config/schema");
+  } catch (e) {
+    state.configSchema = false; // tried, unavailable — don't refetch every render
+  }
+  return state.configSchema;
+}
+
 async function initCreatorView() {
   document.getElementById("creator-filename-input").placeholder = "my_experiment.yaml";
   if (!state.creatorInitialized) {
@@ -1184,6 +1335,7 @@ async function initCreatorView() {
       folderSelect.appendChild(newOpt);
     } catch (e) {}
   }
+  await getConfigSchema();
   renderCreatorForm();
   renderCreatorPreview();
 }
@@ -1222,13 +1374,14 @@ function renderCreatorPreview() {
 
 function renderCreatorForm() {
   const container = document.getElementById("creator-sections");
-  container.innerHTML = renderBuilderScope(state.builderConfig, []);
+  const schema = (state.configSchema && state.configSchema.properties) ? state.configSchema : null;
+  container.innerHTML = renderBuilderScope(state.builderConfig, [], schema);
   wireCreatorEvents(container);
 }
 
 const FIELD_COLORS = ["amber", "teal", "violet", "blue", "red", "emerald"];
 
-function renderBuilderScope(obj, path) {
+function renderBuilderScope(obj, path, schema) {
   const keys = Object.keys(obj || {});
   const pathStr = path.join(".");
   const depth = path.length;
@@ -1238,18 +1391,27 @@ function renderBuilderScope(obj, path) {
     const childPathStr = childPath.join(".");
     const type = fieldType(value);
     if (type === "section") {
+      // model: is deliberately schema-permissive (see orchestration/
+      // schema.py's ModelConfig docstring) — its fields are whatever a
+      // registered model family's constructor takes, forwarded verbatim.
+      // Offer a live param-count check against the actual registry
+      // instead of a schema-driven form for this one section.
+      const profileBtn = childPathStr === "model"
+        ? `<button class="btn btn-sm btn-ghost" data-profile-model style="margin-left:auto;">Profile params ▸</button>`
+        : "";
       return `<div class="builder-section ${depth > 0 ? "nested" : ""}">
         <div class="builder-section-header">
           <span class="dot" style="background:var(--${FIELD_COLORS[hashStr(childPathStr) % FIELD_COLORS.length]})"></span>
           <span title="${escapeHtml(childPathStr)}">${escapeHtml(k)}</span>
+          ${profileBtn}
           <button class="btn-icon-remove" data-remove-path="${escapeHtml(childPathStr)}" title="Remove section">✕</button>
         </div>
         <div class="builder-section-body">
-          ${renderBuilderScope(value, childPath)}
+          ${renderBuilderScope(value, childPath, schema)}
         </div>
       </div>`;
     }
-    return renderBuilderField(k, value, childPath, type);
+    return renderBuilderField(k, value, childPath, type, schema);
   }).join("");
 
   return `${rows}
@@ -1269,10 +1431,18 @@ function renderBuilderScope(obj, path) {
     </div>`;
 }
 
-function renderBuilderField(key, value, path, type) {
+function renderBuilderField(key, value, path, type, schema) {
   const pathStr = path.join(".");
+  const schemaField = schema ? schemaFieldAt(schema, path) : null;
+  const isEnumString = type === "string" && schemaField && Array.isArray(schemaField.enum) && schemaField.enum.length > 0;
+
   let control;
-  if (type === "bool") {
+  if (isEnumString) {
+    const options = schemaField.enum
+      .map((opt) => `<option value="${escapeHtml(opt)}"${opt === value ? " selected" : ""}>${escapeHtml(opt)}</option>`)
+      .join("");
+    control = `<select class="text-input builder-select" data-path="${escapeHtml(pathStr)}" data-type="string">${options}</select>`;
+  } else if (type === "bool") {
     control = `<button class="toggle-switch ${value ? "on" : ""}" data-path="${escapeHtml(pathStr)}" data-type="bool"><span class="toggle-knob"></span></button>`;
   } else if (type === "number") {
     control = `<input class="text-input builder-input" type="number" step="any" value="${value}" data-path="${escapeHtml(pathStr)}" data-type="number" />`;
@@ -1297,6 +1467,32 @@ function wireCreatorEvents(container) {
       renderCreatorPreview();
     });
   });
+  container.querySelectorAll(".builder-select").forEach((select) => {
+    select.addEventListener("change", () => {
+      const path = select.dataset.path.split(".");
+      setAtPath(state.builderConfig, path, select.value);
+      renderCreatorPreview();
+    });
+  });
+  const profileBtn = container.querySelector("[data-profile-model]");
+  if (profileBtn) {
+    profileBtn.addEventListener("click", async () => {
+      const kwargs = getAtPath(state.builderConfig, ["model"]) || {};
+      if (!kwargs.name) { toast("Set the model's 'name' field first", "err"); return; }
+      const originalLabel = profileBtn.textContent;
+      profileBtn.disabled = true;
+      profileBtn.textContent = "Profiling…";
+      try {
+        const result = await api("/api/models/profile", { method: "POST", body: JSON.stringify({ kwargs }) });
+        toast(`${kwargs.name}: ${result.params_trainable.toLocaleString()} trainable params`, "ok");
+      } catch (e) {
+        toast("Couldn't profile model: " + e.message, "err");
+      } finally {
+        profileBtn.disabled = false;
+        profileBtn.textContent = originalLabel;
+      }
+    });
+  }
   container.querySelectorAll(".builder-input").forEach((input) => {
     input.addEventListener("input", () => {
       const path = input.dataset.path.split(".");
@@ -1613,6 +1809,7 @@ async function stopTensorboard() {
 function initButtons() {
   document.getElementById("btn-refresh-configs").addEventListener("click", loadConfigs);
   document.getElementById("btn-save-config").addEventListener("click", saveConfig);
+  document.getElementById("btn-toggle-resolved").addEventListener("click", toggleResolvedConfig);
   document.getElementById("btn-run").addEventListener("click", runConfig);
 
   document.getElementById("btn-refresh-terminals").addEventListener("click", loadTerminals);

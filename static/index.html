@@ -35,6 +35,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>
         Create Config
       </div>
+      <div class="nav-item" data-view="runs">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="13" width="7" height="7" rx="1"/><rect x="14" y="13" width="7" height="7" rx="1"/></svg>
+        Runs
+      </div>
       <div class="nav-item" data-view="terminals">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M8 9l3 3-3 3M13 15h3"/></svg>
         Terminals
@@ -50,6 +54,10 @@
       <div class="nav-item" data-view="history">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
         History
+      </div>
+      <div class="nav-item" data-view="data">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+        Data
       </div>
       <div class="nav-item" data-view="monitors">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12h4l2.5 7L13 5l2.5 7H21"/></svg>
@@ -67,6 +75,7 @@
       <div style="margin-top:8px;"><b>env activate</b></div>
       <div id="footer-env">…</div>
       <div id="footer-tmux-warning" class="hidden" style="margin-top:8px;color:var(--red);">⚠ tmux not found on PATH</div>
+      <div style="margin-top:10px;color:var(--text-faint);">Ctrl/⌘ K to search</div>
     </div>
   </aside>
   <div class="sidebar-backdrop" id="sidebar-backdrop"></div>
@@ -116,11 +125,13 @@
           <div class="editor-toolbar">
             <span class="editor-path" id="editor-path">No config selected</span>
             <span class="editor-status" id="editor-status"></span>
+            <button class="btn btn-sm btn-ghost" id="btn-toggle-resolved" disabled title="Show the fully compose-merged, schema-validated config — what utils.config.load_config() actually returns, not just this file's own lines">Show resolved</button>
             <button class="btn btn-sm" id="btn-save-config" disabled>Save changes</button>
           </div>
           <div class="editor-body" id="editor-body">
             <div class="empty-state">Select a config on the left to view and edit it.</div>
           </div>
+          <div class="editor-body hidden" id="resolved-config-body" style="overflow:auto; display:block; padding:16px;"></div>
           <div class="run-bar" id="run-bar" style="display:none;">
             <label>MODE</label>
             <select id="run-mode">
@@ -178,6 +189,41 @@
           <div class="panel creator-preview-panel">
             <div class="panel-header"><span>Live preview</span></div>
             <pre class="creator-preview-body" id="creator-preview-body"></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- Runs view -->
+    <section class="view" id="view-runs">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Runs</div>
+          <div class="view-sub">Runs recorded by the orchestration layer under <span style="font-family:var(--mono)">artifacts/</span>, grouped by config hash — each group's grid is one cell per seed/fold combination.</div>
+        </div>
+        <button class="btn btn-ghost" id="btn-refresh-runs">Refresh</button>
+      </div>
+
+      <div class="compute-summary-strip" id="compute-summary-strip"></div>
+
+      <div class="configs-layout runs-layout">
+        <div class="panel config-tree">
+          <div class="panel-header"><span>Config groups</span><span id="run-group-count"></span></div>
+          <div class="config-tree-body" id="run-group-list-body">
+            <div class="empty-state">Loading…</div>
+          </div>
+        </div>
+
+        <div class="panel editor-pane">
+          <div class="editor-toolbar" id="run-detail-toolbar" style="flex-wrap:wrap;">
+            <div style="flex:1;min-width:220px;">
+              <div class="term-title" id="run-detail-title">No run selected</div>
+              <div class="term-subtitle" id="run-detail-subtitle"></div>
+            </div>
+            <div class="job-actions" id="run-detail-actions"></div>
+          </div>
+          <div class="editor-body" id="run-detail-body" style="overflow:auto; display:block; padding:20px;">
+            <div class="empty-state">Select a cell in a config group's grid on the left to see that run's manifest details.</div>
           </div>
         </div>
       </div>
@@ -340,6 +386,65 @@
       </div>
     </section>
 
+    <!-- ---------------------------------------------------- Data view -->
+    <section class="view" id="view-data">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Data</div>
+          <div class="view-sub">Registered datasets (from <span style="font-family:var(--mono)">configs/dataset/*.yaml</span>), a channel-mode montage preview, and the guarded test-set evaluation audit trail.</div>
+        </div>
+        <button class="btn btn-ghost" id="btn-refresh-data">Refresh</button>
+      </div>
+
+      <div class="panel" style="margin-bottom:18px;">
+        <div class="panel-header"><span>Datasets</span><span id="dataset-count"></span></div>
+        <div class="dataset-card-list" id="dataset-card-list">
+          <div class="empty-state">Loading…</div>
+        </div>
+      </div>
+
+      <div class="panel hidden" id="dataset-detail-panel" style="margin-bottom:18px;">
+        <div class="panel-header"><span id="dataset-detail-title">Dataset</span></div>
+        <div style="padding:16px;">
+          <table class="kv-table" id="dataset-detail-kv"></table>
+
+          <h4 class="run-detail-section-title">Channel-mode montage preview</h4>
+          <div class="channel-preview-form">
+            <div class="field">
+              <label>Mode</label>
+              <select id="channel-preview-mode">
+                <option value="m1">m1 — RGB (3)</option>
+                <option value="m2">m2 — RGB+XY (5)</option>
+                <option value="m3">m3 — RGB+YCbCr (6)</option>
+                <option value="m4">m4 — RGB+XY+Rθ (7)</option>
+                <option value="m5">m5 — all (10/11)</option>
+              </select>
+            </div>
+            <div class="field">
+              <label>Modality</label>
+              <select id="channel-preview-modality">
+                <option value="colour">colour</option>
+                <option value="grayscale">grayscale</option>
+              </select>
+            </div>
+            <div class="field grow">
+              <label>Sample image (repo-relative path)</label>
+              <input class="text-input grow" id="channel-preview-image-path" placeholder="data/polyp/ClinicDB/train/images/1.png" />
+            </div>
+            <button class="btn btn-sm btn-primary" id="btn-channel-preview">Preview channels ▸</button>
+          </div>
+          <div id="channel-preview-result"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header"><span>Test-set evaluation audit trail</span><span id="test-evals-count"></span></div>
+        <div style="padding:0 16px 16px; overflow:auto;">
+          <table class="compare-table" id="test-evals-table" style="width:100%;"></table>
+        </div>
+      </div>
+    </section>
+
     <!-- ---------------------------------------------------- Machine Stats view -->
     <section class="view" id="view-monitors">
       <div class="view-header">
@@ -414,10 +519,23 @@
   </div>
 </div>
 
+<div class="modal-backdrop hidden" id="command-palette-backdrop">
+  <div class="palette-box">
+    <input class="palette-input" id="command-palette-input" placeholder="Jump to a config, run, report, or tab…" autocomplete="off" spellcheck="false" />
+    <div class="palette-results" id="command-palette-results"></div>
+    <div class="palette-footer">↑↓ navigate · ↵ select · esc close</div>
+  </div>
+</div>
+
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/yaml/yaml.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
 <script src="app.js?v=5"></script>
+<script src="js/components/badge.js?v=1"></script>
+<script src="js/components/heatmap-grid.js?v=1"></script>
+<script src="js/views/runs.js?v=1"></script>
+<script src="js/views/data.js?v=1"></script>
+<script src="js/palette.js?v=1"></script>
 </body>
 </html>

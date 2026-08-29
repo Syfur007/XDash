@@ -4,7 +4,14 @@ and support comparing several of them at once.
 
 A file is treated as a report if it parses as JSON and has a "metrics" key —
 we don't rely on a strict filename convention beyond that, since the exact
-suffix (`_report.json`, `_ensemble_report.json`, ...) can vary.
+name (`report.json`, `<experiment>_report.json`, `ensemble_report.json`,
+`<experiment>_ensemble_report.json`, ...) varies with whether eval.py's
+caller passes a filename_prefix (see utils/report.py's EvaluationReporter.
+save() — its own default with no prefix is the bare "report.json"/
+"ensemble_report.json", which a `*_report.json` glob would silently never
+match). Filtering is entirely by content (the "metrics" key check below),
+not by filename shape, so this stays true regardless of what eval.py's
+naming does in the future.
 """
 from __future__ import annotations
 
@@ -23,7 +30,7 @@ LOWER_IS_BETTER = {"hd95", "asd", "mean_ms", "median_ms", "std_ms", "p95_ms", "p
 def _iter_report_files():
     if not settings.reports_dir.exists():
         return
-    for p in sorted(settings.reports_dir.rglob("*_report.json")):
+    for p in sorted(settings.reports_dir.rglob("*.json")):
         if p.is_file():
             yield p
 

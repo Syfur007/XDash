@@ -14,6 +14,7 @@ follows the same layout and removed again without leaving a trace.
 from __future__ import annotations
 
 import hmac
+import json
 import sys
 from pathlib import Path
 from urllib.parse import urlparse
@@ -29,6 +30,9 @@ from backend import monitors
 from backend import scheduler
 from backend import tensorboard_manager as tb
 from backend import tmux_runner as tmux
+from backend import ledger
+from backend import bridge
+from backend import datasets_info
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -114,6 +118,129 @@ def api_save_config():
         return err(str(e), 400)
     except Exception as e:
         return err(f"Invalid YAML: {e}", 400)
+
+
+# --------------------------------------------------------------------------- runs / ledger
+# Read-only views onto the orchestration layer's on-disk state (see
+# backend/ledger.py). Every route here degrades to an empty result — never
+# an error — when the host repo hasn't adopted the artifacts/ layout yet.
+@app.route("/api/runs", methods=["GET"])
+def api_list_runs():
+    return jsonify({"groups": ledger.runs_grouped_by_config_hash()})
+
+
+@app.route("/api/runs/<run_id>", methods=["GET"])
+def api_get_run(run_id):
+    run = ledger.get_run(run_id)
+    if run is None:
+        return err(f"No manifest found for run '{run_id}'", 404)
+    return jsonify(run)
+
+
+@app.route("/api/ledger/<table>", methods=["GET"])
+def api_ledger_table(table):
+    try:
+        return jsonify({"rows": ledger.list_ledger_rows(table)})
+    except ValueError as e:
+        return err(str(e), 400)
+
+
+# --------------------------------------------------------------------------- bridge
+# Read-only (and profile-only) views into the host repo's own code/env,
+# via backend/bridge.py's subprocess mechanism. A BridgeError means "the
+# host repo doesn't have this" (422, expected/showable); a
+# BridgeUnavailable means "the bridge mechanism itself is broken" (503,
+# a configuration problem worth surfacing distinctly).
+@app.route("/api/bridge/status", methods=["GET"])
+def api_bridge_status():
+    return jsonify(bridge.bridge_status())
+
+
+@app.route("/api/config/schema", methods=["GET"])
+def api_config_schema():
+    try:
+        return jsonify(bridge.run_bridge_script("export_schema.py"))
+    except bridge.BridgeError as e:
+        return err(str(e), 422)
+    except bridge.BridgeUnavailable as e:
+        return err(str(e), 503)
+
+
+@app.route("/api/config/resolved", methods=["GET"])
+def api_config_resolved():
+    path = request.args.get("path", "")
+    if not path:
+        return err("Missing 'path'", 400)
+    try:
+        repo_rel = cfg.repo_relative_path(path)
+    except ValueError as e:
+        return err(str(e), 400)
+    try:
+        # use_cache=False: a config a user is actively editing must always
+        # be re-resolved, never served a stale cached validation result.
+        return jsonify(bridge.run_bridge_script("resolve_config.py", [repo_rel], use_cache=False))
+    except bridge.BridgeError as e:
+        return err(str(e), 422)
+    except bridge.BridgeUnavailable as e:
+        return err(str(e), 503)
+
+
+@app.route("/api/models/registry", methods=["GET"])
+def api_models_registry():
+    try:
+        return jsonify(bridge.run_bridge_script("list_models.py"))
+    except bridge.BridgeError as e:
+        return err(str(e), 422)
+    except bridge.BridgeUnavailable as e:
+        return err(str(e), 503)
+
+
+@app.route("/api/models/profile", methods=["POST"])
+def api_models_profile():
+    body = request.get_json(silent=True) or {}
+    kwargs = body.get("kwargs")
+    if not isinstance(kwargs, dict) or "name" not in kwargs:
+        return err("Body must be {'kwargs': {'name': ..., ...}}", 400)
+    try:
+        return jsonify(bridge.run_bridge_script("profile_model.py", [json.dumps(kwargs)], use_cache=False))
+    except bridge.BridgeError as e:
+        return err(str(e), 422)
+    except bridge.BridgeUnavailable as e:
+        return err(str(e), 503)
+
+
+# --------------------------------------------------------------------------- datasets (Data Studio)
+@app.route("/api/datasets", methods=["GET"])
+def api_list_datasets():
+    return jsonify({"datasets": datasets_info.list_dataset_fragments()})
+
+
+@app.route("/api/datasets/channel-preview", methods=["POST"])
+def api_dataset_channel_preview():
+    body = request.get_json(silent=True) or {}
+    image_path = body.get("image_path")
+    mode = body.get("mode", "m1")
+    modality = body.get("modality", "colour")
+    if not image_path:
+        return err("Missing 'image_path'", 400)
+    try:
+        resolved = (settings.repo_root / image_path).resolve()
+    except (OSError, ValueError) as e:
+        return err(f"Invalid image_path: {e}", 400)
+    if settings.repo_root.resolve() not in resolved.parents and resolved != settings.repo_root.resolve():
+        return err("image_path escapes the repo root", 400)
+    try:
+        result = bridge.run_bridge_script(
+            "channel_preview.py",
+            [json.dumps({"image_path": str(resolved), "mode": mode, "modality": modality})],
+            timeout=30,
+            use_cache=False,
+        )
+        return jsonify(result)
+    except bridge.BridgeError as e:
+        return err(str(e), 422)
+    except bridge.BridgeUnavailable as e:
+        return err(str(e), 503)
 
 
 # --------------------------------------------------------------------------- terminals
@@ -384,6 +511,7 @@ def api_system():
         "runs_dir": str(settings.runs_dir),
         "plots_dir": str(settings.plots_dir),
         "reports_dir": str(settings.reports_dir),
+        "artifacts_dir": str(settings.artifacts_dir),
         "poll_interval_ms": settings.poll_interval_ms,
         "tensorboard_port": settings.tensorboard_port,
         "env_activate_cmd": settings.env_activate_cmd,
