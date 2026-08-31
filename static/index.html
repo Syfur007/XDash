@@ -47,6 +47,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
         Scheduler
       </div>
+      <div class="nav-item" data-view="kaggle">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4v16M4 12l8-8M4 12l8 8M12 4l8 16"/></svg>
+        Kaggle
+      </div>
       <div class="nav-item" data-view="reports">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h9l5 5v13H6z"/><path d="M14 3v5h5M9 13h6M9 17h6M9 9h2"/></svg>
         Reports
@@ -321,6 +325,77 @@
       </div>
     </section>
 
+    <!-- ---------------------------------------------------- Kaggle view -->
+    <section class="view" id="view-kaggle">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Kaggle</div>
+          <div class="view-sub">Push, poll, and pull training notebooks running as Kaggle kernels across multiple accounts.</div>
+        </div>
+        <div class="job-actions">
+          <button class="btn btn-ghost" id="btn-kaggle-push-all">Push all</button>
+          <button class="btn btn-ghost" id="btn-kaggle-refresh-all">Refresh all</button>
+          <button class="btn btn-ghost" id="btn-kaggle-download-all">Download all finished</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header"><span>Accounts</span><span id="kaggle-account-count"></span></div>
+        <div class="config-tree-body" id="kaggle-accounts-body">
+          <div class="empty-state">Loading…</div>
+        </div>
+        <div class="scheduler-add-form" style="padding:12px;">
+          <div class="field grow">
+            <label>Account name</label>
+            <input class="text-input grow" id="kaggle-new-account-name" placeholder="e.g. teammate-a" />
+          </div>
+          <div class="field grow">
+            <label>Kaggle username</label>
+            <input class="text-input grow" id="kaggle-new-account-username" placeholder="e.g. teammateA" autocomplete="off" />
+          </div>
+          <div class="field grow">
+            <label>API key (kaggle.com → Settings → API → Create New Token)</label>
+            <input class="text-input grow" id="kaggle-new-account-key" type="password" placeholder="paste the key from kaggle.json" autocomplete="off" />
+          </div>
+          <button class="btn btn-primary" id="btn-kaggle-add-account">Add account</button>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-header"><span>Workers</span><span id="kaggle-worker-count"></span></div>
+        <div class="config-tree-body" id="kaggle-workers-body">
+          <div class="empty-state">Loading…</div>
+        </div>
+        <div class="scheduler-add-form" style="padding:12px; flex-wrap:wrap;">
+          <div class="field">
+            <label>Account</label>
+            <select id="kaggle-new-worker-account"><option value="">— pick an account —</option></select>
+          </div>
+          <div class="field">
+            <label>Worker id</label>
+            <input class="text-input" id="kaggle-new-worker-id" placeholder="w1" />
+          </div>
+          <div class="field grow">
+            <label>Notebook path (repo-relative)</label>
+            <input class="text-input grow" id="kaggle-new-worker-notebook" placeholder="path/to/worker.ipynb" />
+          </div>
+          <div class="field grow">
+            <label>Kernel slug</label>
+            <input class="text-input grow" id="kaggle-new-worker-slug" placeholder="my-worker-1" />
+          </div>
+          <div class="field grow">
+            <label>Results dir (repo-relative)</label>
+            <input class="text-input grow" id="kaggle-new-worker-results" placeholder="results/worker1" />
+          </div>
+          <div class="field">
+            <label>Budget (hours)</label>
+            <input class="text-input" id="kaggle-new-worker-budget" placeholder="9.5" />
+          </div>
+          <button class="btn btn-primary" id="btn-kaggle-add-worker">Add worker</button>
+        </div>
+      </div>
+    </section>
+
     <!-- ---------------------------------------------------- Reports view -->
     <section class="view" id="view-reports">
       <div class="view-header">
@@ -536,6 +611,7 @@
 <script src="js/components/heatmap-grid.js?v=1"></script>
 <script src="js/views/runs.js?v=1"></script>
 <script src="js/views/data.js?v=1"></script>
+<script src="js/views/kaggle.js?v=1"></script>
 <script src="js/palette.js?v=1"></script>
 </body>
 </html>

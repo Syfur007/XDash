@@ -80,3 +80,12 @@ poll_interval_ms: 2000
 # sessions / training processes.
 scheduler_max_concurrent_limit: 8
 scheduler_max_queue_size: 200
+
+# Path/name of the `kaggle` CLI used by the Kaggle tab to push/pull/status
+# notebooks across multiple accounts. Leave as "kaggle" if it's on the PATH
+# the dashboard server itself runs under; otherwise point it at an absolute
+# path (e.g. a conda env's bin/kaggle) the way env_activate_cmd above does
+# for training runs.
+kaggle_executable: "kaggle"
+kaggle_push_concurrency: 3        # max concurrent push/status/download calls across accounts
+kaggle_default_budget_hours: 9.5  # session-length guardrail fallback when a worker has none set

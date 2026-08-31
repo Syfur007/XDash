@@ -192,6 +192,7 @@ function switchView(view) {
   if (view === "data") loadDataView();
   if (view === "creator") initCreatorView();
   if (view === "scheduler") loadScheduler();
+  if (view === "kaggle") loadKaggle();
 }
 
 // ---------------------------------------------------------------- system info

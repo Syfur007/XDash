@@ -75,6 +75,10 @@ class Settings:
         self.scheduler_max_concurrent_limit = int(raw.get("scheduler_max_concurrent_limit", 8))
         self.scheduler_max_queue_size = int(raw.get("scheduler_max_queue_size", 200))
 
+        self.kaggle_executable = raw.get("kaggle_executable", "kaggle")
+        self.kaggle_push_concurrency = max(1, int(raw.get("kaggle_push_concurrency", 3)))
+        self.kaggle_default_budget_hours = float(raw.get("kaggle_default_budget_hours", 9.5))
+
         # Runtime state lives inside exp_dashboard/data so it never touches
         # the host repo. state_file is just a session_name -> {config, mode,
         # ...} map; tmux itself is the source of truth for everything else
@@ -88,6 +92,14 @@ class Settings:
         self.scheduler_file = self.state_dir / "scheduler.json"
         self.dashboard_log_dir = self.state_dir / "dashboard_logs"
         self.dashboard_log_dir.mkdir(parents=True, exist_ok=True)
+
+        # kaggle_accounts_file is the account/worker registry; kaggle_creds_dir
+        # holds one real kaggle.json per account (kaggle_creds_dir/<account>/
+        # kaggle.json). Both are gitignored — see backend/kaggle.py.
+        self.kaggle_accounts_file = self.state_dir / "kaggle_accounts.json"
+        self.kaggle_state_file = self.state_dir / "kaggle_state.json"
+        self.kaggle_creds_dir = self.state_dir / "kaggle_accounts"
+        self.kaggle_creds_dir.mkdir(parents=True, exist_ok=True)
 
     def ensure_dirs(self):
         for d in (self.configs_dir, self.logs_dir, self.runs_dir, self.checkpoints_dir, self.plots_dir, self.reports_dir):

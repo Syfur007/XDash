@@ -2,5 +2,8 @@ data/terminals_state.json
 data/monitors.json
 data/scheduler.json
 data/dashboard_logs/
+data/kaggle_state.json
+data/kaggle_accounts.json
+data/kaggle_accounts/
 __pycache__/
 *.pyc

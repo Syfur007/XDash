@@ -22,6 +22,18 @@ const STATUS_BADGE_CLASS = {
   completed: "emerald",
   stopped: "slate",
   failed: "red",
+  // Kaggle kernel statuses (backend/kaggle.py) — "complete" is Kaggle's own
+  // spelling, kept distinct from the local-run "completed"/"done" above.
+  queued: "slate",
+  preparing: "amber",
+  complete: "emerald",
+  error: "red",
+  cancelAcknowledged: "slate",
+  cancelRequested: "slate",
+  pushed: "teal",
+  push_failed: "red",
+  downloaded: "violet",
+  unknown: "slate",
 };
 
 function statusBadgeClass(status) {

@@ -33,6 +33,7 @@ from backend import tmux_runner as tmux
 from backend import ledger
 from backend import bridge
 from backend import datasets_info
+from backend import kaggle as kaggle_ops
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -367,6 +368,98 @@ def api_scheduler_max_concurrent():
     except (TypeError, ValueError):
         return err("value must be a whole number", 400)
     return jsonify({"max_concurrent": value})
+
+
+# --------------------------------------------------------------------------- kaggle
+@app.route("/api/kaggle/accounts", methods=["GET"])
+def api_kaggle_list_accounts():
+    return jsonify({"accounts": kaggle_ops.list_accounts()})
+
+
+@app.route("/api/kaggle/accounts", methods=["POST"])
+def api_kaggle_add_account():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(kaggle_ops.add_account(body.get("name", ""), body.get("kaggle_json", "")))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/kaggle/accounts/<name>", methods=["DELETE"])
+def api_kaggle_remove_account(name):
+    if not kaggle_ops.remove_account(name):
+        return err("Account not found", 404)
+    return jsonify({"removed": True})
+
+
+@app.route("/api/kaggle/accounts/<name>/validate", methods=["POST"])
+def api_kaggle_validate_account(name):
+    try:
+        return jsonify(kaggle_ops.validate_account(name))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/kaggle/accounts/<name>/workers", methods=["POST"])
+def api_kaggle_add_worker(name):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(kaggle_ops.add_worker(
+            name,
+            body.get("worker_id", ""),
+            body.get("notebook_path", ""),
+            body.get("kernel_slug", ""),
+            body.get("results_dir", ""),
+            body.get("budget_hours"),
+        ))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/kaggle/accounts/<name>/workers/<worker_id>", methods=["DELETE"])
+def api_kaggle_remove_worker(name, worker_id):
+    if not kaggle_ops.remove_worker(name, worker_id):
+        return err("Worker not found", 404)
+    return jsonify({"removed": True})
+
+
+@app.route("/api/kaggle/workers/<worker_id>/push", methods=["POST"])
+def api_kaggle_push(worker_id):
+    try:
+        return jsonify(kaggle_ops.push(worker_id))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/kaggle/workers/<worker_id>/status", methods=["POST"])
+def api_kaggle_refresh_status(worker_id):
+    try:
+        return jsonify(kaggle_ops.refresh_status(worker_id))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/kaggle/workers/<worker_id>/download", methods=["POST"])
+def api_kaggle_download(worker_id):
+    try:
+        return jsonify(kaggle_ops.download(worker_id))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/kaggle/push_all", methods=["POST"])
+def api_kaggle_push_all():
+    return jsonify({"results": kaggle_ops.push_all()})
+
+
+@app.route("/api/kaggle/refresh_all", methods=["POST"])
+def api_kaggle_refresh_all():
+    return jsonify({"results": kaggle_ops.refresh_all()})
+
+
+@app.route("/api/kaggle/download_all", methods=["POST"])
+def api_kaggle_download_all():
+    return jsonify({"results": kaggle_ops.download_all()})
 
 
 # --------------------------------------------------------------------------- reports

@@ -120,6 +120,21 @@ const RUN_MANIFEST_KNOWN_KEYS = new Set([
   "nondeterministic_ops", "error", "ledger",
 ]);
 
+// torch's non-deterministic-op warning fires once per call to the op, not
+// once per process (TORCH_WARN vs TORCH_WARN_ONCE) — an op used every
+// training step can leave a run's nondeterministic_ops array with thousands
+// of copies of the same string. training/determinism.py now dedupes on
+// capture for new runs, but manifests already written before that fix (or
+// by any other tool) can still carry the bloat, so collapse identical
+// entries here too rather than flooding the panel with one red line each.
+function renderNondeterministicOps(ops) {
+  const counts = new Map();
+  ops.forEach((op) => counts.set(op, (counts.get(op) || 0) + 1));
+  return Array.from(counts.entries())
+    .map(([op, count]) => escapeHtml(op) + (count > 1 ? ` <span style="color:var(--text-faint);">(×${count})</span>` : ""))
+    .join("<br>");
+}
+
 function renderRunDetail(run) {
   const git = run.git || {};
   const hw = run.hardware || {};
@@ -162,7 +177,7 @@ function renderRunDetail(run) {
   if (run.nondeterministic_ops && run.nondeterministic_ops.length) {
     html += `<div class="empty-state" style="color:var(--red); text-align:left; padding:10px 12px; border:1px solid rgba(229,72,77,0.35); border-radius:6px; margin:14px 0;">
       <b>Non-deterministic ops recorded</b> — this run is not guaranteed bit-reproducible:<br>
-      ${run.nondeterministic_ops.map((n) => escapeHtml(n)).join("<br>")}
+      ${renderNondeterministicOps(run.nondeterministic_ops)}
     </div>`;
   }
 
