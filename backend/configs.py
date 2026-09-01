@@ -39,6 +39,10 @@ def list_configs() -> List[Dict[str, Any]]:
                 "name": p.name,
                 "path": rel,
                 "category": category,
+                # Lets the client cross-reference a config against terminals'
+                # and reports' own experiment_name field to show "have I run
+                # this already?" — see renderConfigTree's coverage dot.
+                "experiment_name": get_experiment_name(rel),
             })
 
     return [

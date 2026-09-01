@@ -12,13 +12,13 @@
   --border-soft:   #1B2740;
   --text:          #E7ECF5;
   --text-muted:    #8C97B0;
-  --text-faint:    #5C6785;
+  --text-faint:    #8492B5;
 
   --amber:         #F5A623;
   --amber-dim:     #7A5A22;
   --teal:          #4FD1C5;
   --teal-dim:      #295C56;
-  --red:           #E5484D;
+  --red:           #EA5B60;
   --red-dim:       #5C2528;
   --slate:         #5B6584;
   --emerald:       #34D399;
@@ -159,6 +159,15 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   70%{ box-shadow: 0 0 0 8px rgba(245,166,35,0); }
   100%{ box-shadow: 0 0 0 0 rgba(245,166,35,0); }
 }
+.pulse-dot.stale{
+  background: var(--amber);
+  animation: stale-fade 1.8s ease-in-out infinite;
+}
+@keyframes stale-fade{
+  0%, 100%{ background: var(--amber); }
+  50%{ background: var(--slate); }
+}
+.telemetry .reconnecting-label{ color: var(--amber); }
 .telemetry .state-label{ color: var(--text-muted); }
 .telemetry .job-name{ color: var(--text); font-weight:600; }
 .telemetry .metric-chip{
@@ -257,7 +266,12 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .config-item:hover{ background: var(--surface-2); color: var(--text); }
 .config-item.active{ background: var(--surface-3); color: var(--text); border:1px solid var(--border); }
 .config-item .dot{ width:5px; height:5px; border-radius:50%; background: var(--text-faint); flex-shrink:0; }
+.config-item .dot.completed{ background: var(--teal); }
+.config-item .dot.running{ background: var(--amber); }
 .config-item.active .dot{ background: var(--amber); }
+
+.panel-filter{ padding: 8px 10px 0; }
+.panel-filter .text-input{ width:100%; font-size:12.5px; padding:6px 9px; }
 
 .editor-pane{ display:flex; flex-direction:column; overflow:hidden; width:100%; min-width:0; box-sizing:border-box; }
 .editor-toolbar{
@@ -541,14 +555,18 @@ select, .text-input{
 ::-webkit-scrollbar-thumb:hover{ background: var(--text-faint); }
 
 /* ---------------------------------------------------------------- toast */
+.toast-stack{
+  position: fixed; bottom: 22px; right: 22px; z-index: 50;
+  display:flex; flex-direction:column-reverse; align-items:flex-end; gap:8px;
+  pointer-events:none; max-width: min(360px, calc(100vw - 44px));
+}
 .toast{
-  position: fixed; bottom: 22px; right: 22px;
   background: var(--surface-3); border:1px solid var(--border);
   padding: 11px 16px; border-radius: var(--radius);
   font-size:12.5px; box-shadow: var(--shadow-panel);
   opacity:0; transform: translateY(8px);
   transition: opacity .18s ease, transform .18s ease;
-  pointer-events:none; z-index: 50;
+  pointer-events:auto; max-width:100%; overflow-wrap:break-word;
 }
 .toast.show{ opacity:1; transform: translateY(0); }
 .toast.err{ border-color: var(--red-dim); color: var(--red); }

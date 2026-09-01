@@ -131,6 +131,10 @@ function initPalette() {
   const backdrop = document.getElementById("command-palette-backdrop");
   const input = document.getElementById("command-palette-input");
 
+  // Ctrl/⌘K has no equivalent without a physical keyboard, so the mobile
+  // topbar gets a tap target for the same entry point.
+  document.getElementById("btn-open-palette").addEventListener("click", openPalette);
+
   document.addEventListener("keydown", (e) => {
     const isMac = navigator.platform.toUpperCase().includes("MAC");
     const modKey = isMac ? e.metaKey : e.ctrlKey;

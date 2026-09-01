@@ -157,7 +157,11 @@ def list_items() -> Dict[str, Any]:
             term = terminals.get_terminal(item["session_name"])
             if term:
                 item["latest_metrics"] = term.get("latest_metrics")
-    return {"items": items, "max_concurrent": data.get("max_concurrent", 1)}
+    return {
+        "items": items,
+        "max_concurrent": data.get("max_concurrent", 1),
+        "max_concurrent_limit": settings.scheduler_max_concurrent_limit,
+    }
 
 
 # ----------------------------------------------------------------- scheduling

@@ -3,8 +3,9 @@
 // No build step, no framework: plain fetch + DOM + CodeMirror + Chart.js.
 // ============================================================================
 
-const LOWER_IS_BETTER = new Set(["hd95", "asd", "mean_ms", "median_ms", "std_ms", "p95_ms", "eval_duration_s"]);
+const LOWER_IS_BETTER = new Set(["hd95", "asd", "mean_ms", "median_ms", "std_ms", "p95_ms", "eval_duration_s", "ece"]);
 const RADAR_METRICS = ["dice", "miou", "precision", "recall", "specificity", "f2", "accuracy"];
+const HIGHER_IS_BETTER = new Set(RADAR_METRICS);
 const CHART_COLORS = ["#F5A623", "#4FD1C5", "#E5484D", "#8C97B0", "#7C9CF5", "#C77DFF"];
 
 // -------------------------------------------------------- canonical-metrics context
@@ -59,12 +60,18 @@ function radarAxisValue(metrics, key) {
 
 const state = {
   system: null,
+  pollFailStreak: { terminals: 0, monitors: 0, scheduler: 0 },
+  pollStale: false,
   configs: [],
+  configFilter: "",
   selectedConfigPath: null,
   editor: null,
   editorDirty: false,
+  configRequestId: 0,
 
   terminals: [],
+  terminalListIds: [],
+  terminalFilter: "",
   selectedTerminal: null,
   terminalChart: null,
   renderedTerminalSession: null,
@@ -75,6 +82,7 @@ const state = {
   configSchema: null, // null = not fetched yet, false = fetched and unavailable, object = the real schema
 
   reportGroups: [],
+  reportFilter: "",
   selectedReportPath: null,
   compareSelection: new Set(),
   reportRadarChart: null,
@@ -94,7 +102,9 @@ const state = {
   creatorInitialized: false,
 
   schedulerItems: [],
+  schedulerBucketIds: {},
   schedulerMaxConcurrent: 1,
+  schedulerMaxConcurrentLimit: null,
   schedulerConfigsLoaded: false,
 
   pollTimer: null,
@@ -111,13 +121,39 @@ async function api(path, opts = {}) {
   return res.status === 204 ? null : res.json();
 }
 
-let toastTimer = null;
+// Each call gets its own stacked element instead of sharing one — a single
+// shared toast meant a later "saved" success could silently overwrite an
+// earlier, still-unread error before the reader ever saw it. Errors get a
+// longer duration (a real backend exception string doesn't fit in the same
+// 3.2s as "Config saved"), and hovering pauses the whole stack's timers.
 function toast(msg, kind = "") {
-  const el = document.getElementById("toast");
+  const stack = document.getElementById("toast-stack");
+  const el = document.createElement("div");
+  el.className = "toast " + kind;
   el.textContent = msg;
-  el.className = "toast show " + kind;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("show"), 3200);
+  el.dataset.duration = kind === "err" ? 6000 : 3200;
+  stack.appendChild(el);
+  requestAnimationFrame(() => el.classList.add("show"));
+  scheduleToastDismiss(el);
+}
+
+function scheduleToastDismiss(el) {
+  el.dataset.dismissAt = Date.now() + Number(el.dataset.duration);
+  clearTimeout(el._toastTimer);
+  el._toastTimer = setTimeout(() => {
+    el.classList.remove("show");
+    el.addEventListener("transitionend", () => el.remove(), { once: true });
+  }, Number(el.dataset.duration));
+}
+
+function initToastHoverPause() {
+  const stack = document.getElementById("toast-stack");
+  stack.addEventListener("mouseenter", () => {
+    stack.querySelectorAll(".toast").forEach((el) => clearTimeout(el._toastTimer));
+  });
+  stack.addEventListener("mouseleave", () => {
+    stack.querySelectorAll(".toast").forEach((el) => scheduleToastDismiss(el));
+  });
 }
 
 function fmtNum(n) {
@@ -150,12 +186,18 @@ function showConfirm(title, body) {
       backdrop.classList.add("hidden");
       okBtn.removeEventListener("click", onOk);
       cancelBtn.removeEventListener("click", onCancel);
+      document.removeEventListener("keydown", onKeydown);
       resolve(result);
     }
     function onOk() { cleanup(true); }
     function onCancel() { cleanup(false); }
+    function onKeydown(e) {
+      if (e.key === "Escape") { e.preventDefault(); cleanup(false); }
+      else if (e.key === "Enter") { e.preventDefault(); cleanup(true); }
+    }
     okBtn.addEventListener("click", onOk);
     cancelBtn.addEventListener("click", onCancel);
+    document.addEventListener("keydown", onKeydown);
   });
 }
 
@@ -221,9 +263,28 @@ async function loadConfigs() {
   }
 }
 
+// Cross-references a config's experiment_name (server-resolved from its own
+// logging.experiment_name, or the filename stem) against terminals/reports
+// already loaded into state — answers "have I run this before?" without a
+// new endpoint. Returns null when there's no history at all, in which case
+// the config item keeps its plain undyed dot.
+function configCoverage(experimentName) {
+  if (!experimentName) return null;
+  const terms = state.terminals.filter((t) => t.experiment_name === experimentName);
+  const hasReport = (state.reportGroups || []).some((g) => g.reports.some((r) => r.experiment === experimentName));
+  if (!terms.length && !hasReport) return null;
+  const running = terms.some((t) => t.status === "running");
+  const bits = [];
+  if (running) bits.push("running now");
+  if (terms.length) bits.push(`launched ${terms.length}×`);
+  if (hasReport) bits.push("has a report");
+  return { cls: running ? "running" : "completed", title: bits.join(" · ") };
+}
+
 function renderConfigTree() {
   const body = document.getElementById("config-tree-body");
   const countEl = document.getElementById("config-count");
+  const filter = (state.configFilter || "").trim().toLowerCase();
   let total = 0;
   if (!state.configs.length) {
     body.innerHTML = `<div class="empty-state">No .yaml configs found under configs/</div>`;
@@ -231,24 +292,39 @@ function renderConfigTree() {
     return;
   }
   let html = "";
+  let shown = 0;
   for (const group of state.configs) {
     total += group.configs.length;
+    const matches = filter
+      ? group.configs.filter((c) => c.name.toLowerCase().includes(filter) || c.path.toLowerCase().includes(filter))
+      : group.configs;
+    if (!matches.length) continue;
+    shown += matches.length;
     html += `<div class="category"><div class="category-label">${escapeHtml(group.category)}</div>`;
-    for (const c of group.configs) {
+    for (const c of matches) {
       const active = c.path === state.selectedConfigPath ? "active" : "";
+      const cov = configCoverage(c.experiment_name);
+      const dotClass = cov ? `dot ${cov.cls}` : "dot";
+      const dotTitle = cov ? ` title="${escapeHtml(cov.title)}"` : "";
       html += `<div class="config-item ${active}" data-path="${escapeHtml(c.path)}" title="${escapeHtml(c.path)}">
-        <span class="dot"></span><span>${escapeHtml(c.name)}</span>
+        <span class="${dotClass}"${dotTitle}></span><span>${escapeHtml(c.name)}</span>
       </div>`;
     }
     html += `</div>`;
   }
-  body.innerHTML = html;
-  countEl.textContent = `${total} file${total === 1 ? "" : "s"}`;
+  body.innerHTML = html || `<div class="empty-state">No configs match "${escapeHtml(state.configFilter)}"</div>`;
+  countEl.textContent = filter ? `${shown} / ${total}` : `${total} file${total === 1 ? "" : "s"}`;
   body.querySelectorAll(".config-item").forEach((el) => el.addEventListener("click", () => selectConfig(el.dataset.path)));
 }
 
 async function selectConfig(path) {
-  if (state.editorDirty && !confirm("Discard unsaved changes to the current config?")) return;
+  if (state.editorDirty && !(await showConfirm("Discard changes?", "Discard unsaved changes to the current config?"))) return;
+  // A request token guards against out-of-order resolution: if the user
+  // clicks another config before this fetch returns, that click bumps
+  // configRequestId and this stale response is dropped instead of
+  // clobbering the newer editor instance (and, via saveConfig, the newer
+  // file on disk).
+  const requestId = ++state.configRequestId;
   state.selectedConfigPath = path;
   renderConfigTree();
   document.getElementById("editor-path").textContent = path;
@@ -268,6 +344,7 @@ async function selectConfig(path) {
 
   try {
     const data = await api(`/api/config?path=${encodeURIComponent(path)}`);
+    if (state.configRequestId !== requestId) return;
     state.editor = CodeMirror.fromTextArea(document.getElementById("config-textarea"), {
       mode: "yaml", theme: "dracula", lineNumbers: true, tabSize: 2, indentUnit: 2, viewportMargin: Infinity,
     });
@@ -276,6 +353,7 @@ async function selectConfig(path) {
     setEditorStatus(true, "");
     state.editor.on("change", () => { state.editorDirty = true; validateEditorYaml(); });
   } catch (e) {
+    if (state.configRequestId !== requestId) return;
     editorBody.innerHTML = `<div class="empty-state">Failed to load config: ${e.message}</div>`;
   }
 }
@@ -325,10 +403,15 @@ async function toggleResolvedConfig() {
 
 async function loadResolvedConfig() {
   const resolvedBody = document.getElementById("resolved-config-body");
-  if (!state.selectedConfigPath) return;
+  const requestedPath = state.selectedConfigPath;
+  if (!requestedPath) return;
   resolvedBody.innerHTML = `<div class="empty-state">Resolving…</div>`;
   try {
-    const data = await api(`/api/config/resolved?path=${encodeURIComponent(state.selectedConfigPath)}`);
+    const data = await api(`/api/config/resolved?path=${encodeURIComponent(requestedPath)}`);
+    // Bail if the config changed, or "Show resolved" was toggled off, while
+    // this fetch was in flight — otherwise a late response can repaint the
+    // resolved view back on with stale content.
+    if (state.selectedConfigPath !== requestedPath || !state.resolvedConfigVisible) return;
     if (data.valid) {
       let yamlText;
       try {
@@ -348,6 +431,7 @@ async function loadResolvedConfig() {
         `<div class="empty-state" style="text-align:left; padding:0 0 12px;">This config does not validate against the current schema:</div>` + errs;
     }
   } catch (e) {
+    if (state.selectedConfigPath !== requestedPath || !state.resolvedConfigVisible) return;
     // A BridgeUnavailable (host repo has no orchestration package, or
     // bridge_python_executable is misconfigured) lands here too — shown as
     // plain text rather than a raw stack trace, per the "degrade honestly"
@@ -358,7 +442,7 @@ async function loadResolvedConfig() {
 
 async function runConfig() {
   if (!state.selectedConfigPath) return;
-  if (state.editorDirty && !confirm("You have unsaved edits. Launch the last saved version anyway?")) return;
+  if (state.editorDirty && !(await showConfirm("Launch anyway?", "You have unsaved edits. Launch the last saved version anyway?"))) return;
   const mode = document.getElementById("run-mode").value;
   const extra_args = document.getElementById("run-extra-args").value.trim();
   try {
@@ -385,7 +469,8 @@ const STATUS_LABEL = {
 
 async function loadTerminals() {
   let data;
-  try { data = await api("/api/terminals"); } catch (e) { return; }
+  try { data = await api("/api/terminals"); } catch (e) { notePollResult("terminals", false); return; }
+  notePollResult("terminals", true);
   state.terminals = data.terminals;
   renderTerminalList();
   updateTelemetry();
@@ -394,50 +479,115 @@ async function loadTerminals() {
   }
 }
 
+function terminalCardHtml(t) {
+  const active = t.session_name === state.selectedTerminal ? "active" : "";
+  const title = escapeHtml(t.experiment_name || t.session_name);
+  const modeTag = t.mode ? `<span class="mode-tag mode-${t.mode}">${t.mode}</span>` : "";
+  const sub = t.managed
+    ? `${escapeHtml(t.config_path || "")}${t.restart_count ? ` · restarted ${t.restart_count}×` : ""}`
+    : "unmanaged tmux session";
+
+  let metricChip = "";
+  const m = t.latest_metrics;
+  if (m) {
+    const dice = m.metrics["Val Dice"] ?? m.metrics["Dice"];
+    const label = dice !== undefined ? `dice ${fmtNum(dice)}` : Object.keys(m.metrics)[0];
+    metricChip = `<span class="term-card-metric">epoch ${m.epoch}${label ? " · " + escapeHtml(label) : ""}</span>`;
+  }
+
+  return `<div class="term-card ${active}" data-session="${escapeHtml(t.session_name)}">
+    <div class="term-card-accent ${t.status}"></div>
+    <div class="term-card-body">
+      <div class="term-card-title" title="${title}">${title}${modeTag}</div>
+      <div class="term-card-sub" title="${escapeHtml(sub)}">${sub}</div>
+      <div class="term-card-footer">
+        <span class="term-card-status ${t.status}">${STATUS_LABEL[t.status] || t.status} · ${timeAgo(t.created_at)}</span>
+        ${metricChip}
+      </div>
+    </div>
+  </div>`;
+}
+
+function wireTerminalCard(el) {
+  el.addEventListener("click", () => {
+    state.selectedTerminal = el.dataset.session;
+    renderTerminalList();
+    loadTerminalDetail(state.selectedTerminal);
+  });
+}
+
 function renderTerminalList() {
   const body = document.getElementById("terminal-list-body");
   const countEl = document.getElementById("terminal-count");
   if (!state.terminals.length) {
     body.innerHTML = `<div class="empty-state">No terminals yet — launch one from the Configs tab.</div>`;
     countEl.textContent = "";
+    state.terminalListIds = [];
     return;
   }
-  countEl.textContent = `${state.terminals.length}`;
-  body.innerHTML = state.terminals.map((t) => {
-    const active = t.session_name === state.selectedTerminal ? "active" : "";
-    const title = escapeHtml(t.experiment_name || t.session_name);
-    const modeTag = t.mode ? `<span class="mode-tag mode-${t.mode}">${t.mode}</span>` : "";
-    const sub = t.managed
-      ? `${escapeHtml(t.config_path || "")}${t.restart_count ? ` · restarted ${t.restart_count}×` : ""}`
-      : "unmanaged tmux session";
 
-    let metricChip = "";
-    const m = t.latest_metrics;
-    if (m) {
-      const dice = m.metrics["Val Dice"] ?? m.metrics["Dice"];
-      const label = dice !== undefined ? `dice ${fmtNum(dice)}` : Object.keys(m.metrics)[0];
-      metricChip = `<span class="term-card-metric">epoch ${m.epoch}${label ? " · " + escapeHtml(label) : ""}</span>`;
+  const filter = (state.terminalFilter || "").trim().toLowerCase();
+  const visible = filter
+    ? state.terminals.filter((t) =>
+        (t.experiment_name || "").toLowerCase().includes(filter) ||
+        (t.session_name || "").toLowerCase().includes(filter) ||
+        (t.config_path || "").toLowerCase().includes(filter))
+    : state.terminals;
+  countEl.textContent = filter ? `${visible.length} / ${state.terminals.length}` : `${state.terminals.length}`;
+
+  if (!visible.length) {
+    body.innerHTML = `<div class="empty-state">No sessions match "${escapeHtml(state.terminalFilter)}"</div>`;
+    state.terminalListIds = [];
+    return;
+  }
+
+  const currentIds = visible.map((t) => t.session_name);
+  const structureChanged = currentIds.join(",") !== (state.terminalListIds || []).join(",");
+
+  if (structureChanged) {
+    // Same reasoning as renderMonitorList: only tear down and recreate the
+    // cards when the visible set actually changed (sessions added/removed,
+    // or the filter itself changed), not on every 2s poll — a full rebuild
+    // mid-scroll was resetting the list underneath whoever was watching it.
+    body.innerHTML = visible.map(terminalCardHtml).join("");
+    body.querySelectorAll(".term-card").forEach(wireTerminalCard);
+    state.terminalListIds = currentIds;
+    return;
+  }
+
+  for (const t of visible) {
+    const card = body.querySelector(`.term-card[data-session="${cssEscapeAttr(t.session_name)}"]`);
+    if (!card) continue;
+    card.classList.toggle("active", t.session_name === state.selectedTerminal);
+    const accent = card.querySelector(".term-card-accent");
+    if (accent) accent.className = `term-card-accent ${t.status}`;
+    const statusEl = card.querySelector(".term-card-status");
+    if (statusEl) statusEl.textContent = `${STATUS_LABEL[t.status] || t.status} · ${timeAgo(t.created_at)}`;
+    const sub = card.querySelector(".term-card-sub");
+    if (sub) {
+      const subText = t.managed
+        ? `${t.config_path || ""}${t.restart_count ? ` · restarted ${t.restart_count}×` : ""}`
+        : "unmanaged tmux session";
+      if (sub.textContent !== subText) { sub.textContent = subText; sub.title = subText; }
     }
-
-    return `<div class="term-card ${active}" data-session="${escapeHtml(t.session_name)}">
-      <div class="term-card-accent ${t.status}"></div>
-      <div class="term-card-body">
-        <div class="term-card-title" title="${title}">${title}${modeTag}</div>
-        <div class="term-card-sub" title="${escapeHtml(sub)}">${sub}</div>
-        <div class="term-card-footer">
-          <span class="term-card-status ${t.status}">${STATUS_LABEL[t.status] || t.status} · ${timeAgo(t.created_at)}</span>
-          ${metricChip}
-        </div>
-      </div>
-    </div>`;
-  }).join("");
-  body.querySelectorAll(".term-card").forEach((el) => {
-    el.addEventListener("click", () => {
-      state.selectedTerminal = el.dataset.session;
-      renderTerminalList();
-      loadTerminalDetail(state.selectedTerminal);
-    });
-  });
+    const footer = card.querySelector(".term-card-footer");
+    if (footer) {
+      const existingChip = footer.querySelector(".term-card-metric");
+      const m = t.latest_metrics;
+      let metricChip = "";
+      if (m) {
+        const dice = m.metrics["Val Dice"] ?? m.metrics["Dice"];
+        const label = dice !== undefined ? `dice ${fmtNum(dice)}` : Object.keys(m.metrics)[0];
+        metricChip = `epoch ${m.epoch}${label ? " · " + label : ""}`;
+      }
+      if (metricChip && (!existingChip || existingChip.textContent !== metricChip)) {
+        if (existingChip) existingChip.textContent = metricChip;
+        else footer.insertAdjacentHTML("beforeend", `<span class="term-card-metric">${escapeHtml(metricChip)}</span>`);
+      } else if (!metricChip && existingChip) {
+        existingChip.remove();
+      }
+    }
+  }
 }
 
 const LOG_LINE_RE = /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*\|\s*([A-Z]+)\s*\|\s*[^-]+-\s*(.*)$/;
@@ -624,6 +774,22 @@ async function killTerminal(sessionName, alive) {
 }
 
 // ---------------------------------------------------------------- telemetry / topbar
+// The background poll loop (boot()'s setInterval) previously failed silently
+// on a bad connection — the topbar telemetry, status pills, and terminal
+// list would just stop updating with nothing on screen to say why. This
+// tracks a consecutive-failure streak per polled endpoint and flips a
+// visible "stale" indicator after a few misses in a row, clearing it the
+// moment that endpoint succeeds again.
+function notePollResult(key, ok) {
+  state.pollFailStreak[key] = ok ? 0 : (state.pollFailStreak[key] || 0) + 1;
+  const anyStale = Object.values(state.pollFailStreak).some((n) => n >= 3);
+  if (anyStale !== state.pollStale) {
+    state.pollStale = anyStale;
+    document.getElementById("telemetry-dot").classList.toggle("stale", anyStale);
+    document.getElementById("telemetry-reconnecting").classList.toggle("hidden", !anyStale);
+  }
+}
+
 function updateTelemetry() {
   const counts = { running: 0, interrupted: 0, completed: 0, failed: 0 };
   let runningTerm = null;
@@ -680,6 +846,7 @@ async function loadReports() {
 function renderReportList() {
   const body = document.getElementById("report-list-body");
   const countEl = document.getElementById("report-count");
+  const filter = (state.reportFilter || "").trim().toLowerCase();
   let total = 0;
   if (!state.reportGroups.length) {
     body.innerHTML = `<div class="empty-state">No evaluation reports found under logs/</div>`;
@@ -688,14 +855,27 @@ function renderReportList() {
     return;
   }
   let html = "";
+  let shown = 0;
   for (const group of state.reportGroups) {
     total += group.reports.length;
+    const matches = filter
+      ? group.reports.filter((r) =>
+          (r.experiment || r.name || "").toLowerCase().includes(filter) ||
+          (r.model_name || "").toLowerCase().includes(filter) ||
+          (r.path || "").toLowerCase().includes(filter))
+      : group.reports;
+    if (!matches.length) continue;
+    shown += matches.length;
     html += `<div class="category"><div class="category-label">${escapeHtml(group.category)}</div>`;
-    for (const r of group.reports) {
+    for (const r of matches) {
       const active = r.path === state.selectedReportPath ? "active" : "";
       const checked = state.compareSelection.has(r.path) ? "checked" : "";
+      // A comparison chart has exactly CHART_COLORS.length distinct colors to
+      // hand out — beyond that, two reports would render identically and the
+      // "each report has one consistent color" promise breaks silently.
+      const atCap = !checked && state.compareSelection.size >= CHART_COLORS.length;
       html += `<div class="list-row ${active}" data-path="${escapeHtml(r.path)}" title="${escapeHtml(r.path)}">
-        <input type="checkbox" class="compare-check" data-path="${escapeHtml(r.path)}" ${checked} />
+        <input type="checkbox" class="compare-check" data-path="${escapeHtml(r.path)}" ${checked} ${atCap ? "disabled" : ""} />
         <span class="dot"></span>
         <div class="list-row-main">
           <div class="list-row-title">${escapeHtml(r.experiment || r.name)}${r.is_ensemble ? '<span class="mode-tag">ensemble</span>' : ""}</div>
@@ -706,8 +886,8 @@ function renderReportList() {
     }
     html += `</div>`;
   }
-  body.innerHTML = html;
-  countEl.textContent = `${total}`;
+  body.innerHTML = html || `<div class="empty-state">No reports match "${escapeHtml(state.reportFilter)}"</div>`;
+  countEl.textContent = filter ? `${shown} / ${total}` : `${total}`;
 
   body.querySelectorAll(".list-row").forEach((el) => {
     el.addEventListener("click", (e) => {
@@ -720,9 +900,14 @@ function renderReportList() {
   body.querySelectorAll(".compare-check").forEach((el) => {
     el.addEventListener("click", (e) => {
       e.stopPropagation();
+      if (el.checked && state.compareSelection.size >= CHART_COLORS.length) {
+        el.checked = false;
+        toast(`Comparison colors run out past ${CHART_COLORS.length} reports — unselect one first`, "err");
+        return;
+      }
       if (el.checked) state.compareSelection.add(el.dataset.path);
       else state.compareSelection.delete(el.dataset.path);
-      updateCompareButton();
+      renderReportList();
     });
   });
   updateCompareButton();
@@ -730,8 +915,9 @@ function renderReportList() {
 
 function updateCompareButton() {
   const btn = document.getElementById("btn-compare-reports");
-  document.getElementById("compare-count").textContent = state.compareSelection.size;
-  btn.classList.toggle("hidden", state.compareSelection.size < 2);
+  const n = state.compareSelection.size;
+  document.getElementById("compare-count").textContent = n >= CHART_COLORS.length ? `${n}/${CHART_COLORS.length} max` : n;
+  btn.classList.toggle("hidden", n < 2);
 }
 
 async function loadReportDetail(path) {
@@ -863,8 +1049,12 @@ function renderCompare(data) {
     const values = reports.map((r) => r.metrics[k]);
     const numeric = values.filter((v) => typeof v === "number");
     const lowerBetter = LOWER_IS_BETTER.has(k);
-    const best = numeric.length ? (lowerBetter ? Math.min(...numeric) : Math.max(...numeric)) : null;
-    return { key: k, values, best };
+    const higherBetter = HIGHER_IS_BETTER.has(k);
+    // A metric key with no known direction gets no highlight at all — guessing
+    // "higher is better" for an unrecognized key (e.g. a new lower-is-better
+    // stat added upstream) would silently emerald-highlight the worst run.
+    const best = numeric.length && (lowerBetter || higherBetter) ? (lowerBetter ? Math.min(...numeric) : Math.max(...numeric)) : null;
+    return { key: k, values, best, direction: lowerBetter ? "↓" : higherBetter ? "↑" : "" };
   });
 
   const flatConfigs = reports.map((r) => r.config_flat || {});
@@ -890,7 +1080,7 @@ function renderCompare(data) {
       <table class="compare-table">
         <thead><tr><th>Metric</th>${headerCells}</tr></thead>
         <tbody>
-          ${metricRows.map((row) => `<tr><td>${escapeHtml(row.key)}</td>${row.values.map((v) => {
+          ${metricRows.map((row) => `<tr><td>${escapeHtml(row.key)}${row.direction ? ` <span style="color:var(--text-faint)">${row.direction}</span>` : ""}</td>${row.values.map((v) => {
             const isWinner = typeof v === "number" && v === row.best;
             return `<td class="${isWinner ? "winner" : ""}">${fmtNum(v)}</td>`;
           }).join("")}</tr>`).join("")}
@@ -1073,9 +1263,11 @@ const SCHED_STATUS_CLASS = {
 
 async function loadScheduler() {
   let data;
-  try { data = await api("/api/scheduler"); } catch (e) { return; }
+  try { data = await api("/api/scheduler"); } catch (e) { notePollResult("scheduler", false); return; }
+  notePollResult("scheduler", true);
   state.schedulerItems = data.items;
   state.schedulerMaxConcurrent = data.max_concurrent;
+  state.schedulerMaxConcurrentLimit = data.max_concurrent_limit;
   if (!state.schedulerConfigsLoaded) await populateSchedulerConfigSelect();
   renderScheduler();
 }
@@ -1101,6 +1293,13 @@ async function populateSchedulerConfigSelect() {
 function renderScheduler() {
   document.getElementById("concurrency-value").textContent = state.schedulerMaxConcurrent;
   document.getElementById("btn-concurrency-minus").disabled = state.schedulerMaxConcurrent <= 1;
+  // The server hard-caps max_concurrent at scheduler_max_concurrent_limit
+  // (dashboard_config.yaml) regardless of what the client sends; grey the
+  // button out at that point instead of letting it silently no-op.
+  const atLimit = state.schedulerMaxConcurrentLimit != null && state.schedulerMaxConcurrent >= state.schedulerMaxConcurrentLimit;
+  const plusBtn = document.getElementById("btn-concurrency-plus");
+  plusBtn.disabled = atLimit;
+  plusBtn.title = atLimit ? `Capped at ${state.schedulerMaxConcurrentLimit} (scheduler_max_concurrent_limit)` : "";
 
   const running = state.schedulerItems.filter((i) => i.status === "running" || i.status === "cancelling");
   const pending = state.schedulerItems.filter((i) => i.status === "pending");
@@ -1120,20 +1319,65 @@ function renderSchedulerBucket(containerId, items, emptyText, isPendingBucket) {
   const container = document.getElementById(containerId);
   if (!items.length) {
     container.innerHTML = `<div class="empty-state">${emptyText}</div>`;
+    state.schedulerBucketIds[containerId] = [];
     return;
   }
-  container.innerHTML = items.map((item, idx) => schedulerCardHtml(item, idx, items.length, isPendingBucket)).join("");
-  wireSchedulerCardEvents(container);
+
+  const currentIds = items.map((i) => i.id);
+  const structureChanged = currentIds.join(",") !== (state.schedulerBucketIds[containerId] || []).join(",");
+
+  if (structureChanged) {
+    // Same reasoning as renderMonitorList/renderTerminalList: only rebuild
+    // when items were actually added or removed (or, for the pending
+    // bucket, reordered — that changes the id sequence too), not on every
+    // 2s poll.
+    container.innerHTML = items.map((item, idx) => schedulerCardHtml(item, idx, items.length, isPendingBucket)).join("");
+    wireSchedulerCardEvents(container);
+    state.schedulerBucketIds[containerId] = currentIds;
+    return;
+  }
+
+  items.forEach((item, idx) => {
+    const card = container.querySelector(`.term-card[data-id="${cssEscapeAttr(item.id)}"]`);
+    if (!card) return;
+    const statusClass = SCHED_STATUS_CLASS[item.status] || "unmanaged";
+    const accent = card.querySelector(".term-card-accent");
+    if (accent) accent.className = `term-card-accent ${statusClass}`;
+    const statusEl = card.querySelector(".term-card-status");
+    if (statusEl) { statusEl.className = `term-card-status ${statusClass}`; statusEl.textContent = SCHED_STATUS_LABEL[item.status] || item.status; }
+
+    const footer = card.querySelector(".term-card-footer");
+    if (footer) {
+      const existingChip = footer.querySelector(".term-card-metric");
+      const m = item.latest_metrics;
+      const metricText = m ? `epoch ${m.epoch}${m.metrics && m.metrics["Val Dice"] !== undefined ? " · dice " + fmtNum(m.metrics["Val Dice"]) : ""}` : "";
+      if (metricText && (!existingChip || existingChip.textContent !== metricText)) {
+        if (existingChip) {
+          existingChip.textContent = metricText;
+        } else {
+          const chipEl = document.createElement("span");
+          chipEl.className = "term-card-metric";
+          chipEl.textContent = metricText;
+          footer.insertBefore(chipEl, footer.querySelector(".job-actions"));
+        }
+      } else if (!metricText && existingChip) {
+        existingChip.remove();
+      }
+    }
+
+    const actionsWrap = card.querySelector(".job-actions");
+    if (actionsWrap) {
+      const newActionsHtml = schedulerActionsHtml(item, idx, items.length, isPendingBucket);
+      if (actionsWrap.innerHTML !== newActionsHtml) {
+        actionsWrap.innerHTML = newActionsHtml;
+        wireSchedulerCardEvents(actionsWrap);
+      }
+    }
+  });
+  state.schedulerBucketIds[containerId] = currentIds;
 }
 
-function schedulerCardHtml(item, idx, total, isPendingBucket) {
-  const statusClass = SCHED_STATUS_CLASS[item.status] || "unmanaged";
-  const modeTag = `<span class="mode-tag mode-${item.mode === "eval" ? "eval" : "train"}">${item.mode}</span>`;
-  const chainTag = item.depends_on ? `<span class="mode-tag chain-tag">chained</span>` : "";
-  const sub = `${item.config_path}${item.extra_args ? " · " + item.extra_args : ""}`;
-  const m = item.latest_metrics;
-  const metricChip = m ? `<span class="term-card-metric">epoch ${m.epoch}${m.metrics && m.metrics["Val Dice"] !== undefined ? " · dice " + fmtNum(m.metrics["Val Dice"]) : ""}</span>` : "";
-
+function schedulerActionsHtml(item, idx, total, isPendingBucket) {
   let actions = "";
   if (isPendingBucket) {
     actions += `<div class="reorder-btns">
@@ -1148,6 +1392,16 @@ function schedulerCardHtml(item, idx, total, isPendingBucket) {
   } else if (item.status !== "cancelling") {
     actions += `<button class="btn btn-sm btn-ghost" data-action="remove" data-id="${item.id}">Clear</button>`;
   }
+  return actions;
+}
+
+function schedulerCardHtml(item, idx, total, isPendingBucket) {
+  const statusClass = SCHED_STATUS_CLASS[item.status] || "unmanaged";
+  const modeTag = `<span class="mode-tag mode-${item.mode === "eval" ? "eval" : "train"}">${item.mode}</span>`;
+  const chainTag = item.depends_on ? `<span class="mode-tag chain-tag">chained</span>` : "";
+  const sub = `${item.config_path}${item.extra_args ? " · " + item.extra_args : ""}`;
+  const m = item.latest_metrics;
+  const metricChip = m ? `<span class="term-card-metric">epoch ${m.epoch}${m.metrics && m.metrics["Val Dice"] !== undefined ? " · dice " + fmtNum(m.metrics["Val Dice"]) : ""}</span>` : "";
 
   return `<div class="term-card" data-id="${escapeHtml(item.id)}">
     <div class="term-card-accent ${statusClass}"></div>
@@ -1157,7 +1411,7 @@ function schedulerCardHtml(item, idx, total, isPendingBucket) {
       <div class="term-card-footer">
         <span class="term-card-status ${statusClass}">${SCHED_STATUS_LABEL[item.status] || item.status}</span>
         ${metricChip}
-        <div class="job-actions">${actions}</div>
+        <div class="job-actions">${schedulerActionsHtml(item, idx, total, isPendingBucket)}</div>
       </div>
     </div>
   </div>`;
@@ -1570,7 +1824,8 @@ async function saveCreatorConfig() {
 // ============================================================================
 async function loadMonitors() {
   let data;
-  try { data = await api("/api/monitors"); } catch (e) { return; }
+  try { data = await api("/api/monitors"); } catch (e) { notePollResult("monitors", false); return; }
+  notePollResult("monitors", true);
   const newMonitors = data.monitors;
 
   // Auto pop the dropdown open the moment a service starts, and auto-close
@@ -1808,10 +2063,14 @@ async function stopTensorboard() {
 
 // ---------------------------------------------------------------- boot
 function initButtons() {
+  initToastHoverPause();
   document.getElementById("btn-refresh-configs").addEventListener("click", loadConfigs);
   document.getElementById("btn-save-config").addEventListener("click", saveConfig);
   document.getElementById("btn-toggle-resolved").addEventListener("click", toggleResolvedConfig);
   document.getElementById("btn-run").addEventListener("click", runConfig);
+  document.getElementById("config-filter").addEventListener("input", (e) => { state.configFilter = e.target.value; renderConfigTree(); });
+  document.getElementById("report-filter").addEventListener("input", (e) => { state.reportFilter = e.target.value; renderReportList(); });
+  document.getElementById("terminal-filter").addEventListener("input", (e) => { state.terminalFilter = e.target.value; renderTerminalList(); });
 
   document.getElementById("btn-refresh-terminals").addEventListener("click", loadTerminals);
 
@@ -1848,8 +2107,13 @@ async function boot() {
   initNav();
   initButtons();
   await loadSystem();
-  await loadConfigs();
+  // Terminals and reports load before configs so the Configs tab's coverage
+  // dot (has this been run? does it have a report?) is correct on its very
+  // first paint, instead of only becoming accurate after a poll tick or a
+  // manual visit to Terminals/Reports.
   await loadTerminals();
+  await loadReports();
+  await loadConfigs();
   const interval = (state.system && state.system.poll_interval_ms) || 2000;
   state.pollTimer = setInterval(() => { loadTerminals(); loadMonitors(); loadScheduler(); }, interval);
 }

@@ -5,17 +5,23 @@ downloaded run into the host repo's own orchestration ledger.
 Drives the official `kaggle` CLI via subprocess — never imports the `kaggle`
 pip package in-process. Two reasons: (1) it's already installed wherever
 training itself runs (see env_activate_cmd in dashboard_config.yaml), so this
-adds no new dependency; (2) per-account credential switching is done via the
-KAGGLE_CONFIG_DIR env var, which is process-global — a subprocess call gets
-its own isolated `env=`, so concurrent bulk operations across accounts (see
+adds no new dependency; (2) per-account credential switching is done via
+per-account env vars (KAGGLE_CONFIG_DIR / KAGGLE_API_TOKEN / KAGGLE_USERNAME
+/ KAGGLE_KEY), all process-global — a subprocess call gets its own isolated
+`env=`, so concurrent bulk operations across accounts (see
 push_all/refresh_all/download_all) can't race the way an in-process client
 switching a shared os.environ would.
 
+An account can hold a classic username/key pair, a newer access token, or
+both — see the module comment above _validate_legacy_pair for why, and
+_run_kaggle for how the right one gets used without this module having to
+know which `kaggle` CLI version is actually installed.
+
 Account/worker registry and credentials are dashboard-owned state (data/
-kaggle_accounts.json, data/kaggle_accounts/<name>/kaggle.json — both
-gitignored), independent of any config already used to plan work in the host
-repo. Downloaded results land in the host repo's own results/ dir (wherever
-each worker's `results_dir` points) and get registered into its
+kaggle_accounts.json, data/kaggle_accounts/<name>/{kaggle.json,access_token}
+— all gitignored), independent of any config already used to plan work in
+the host repo. Downloaded results land in the host repo's own results/ dir
+(wherever each worker's `results_dir` points) and get registered into its
 artifacts/ledger — mirroring orchestration/ledger.py's schema stdlib-only,
 the same way backend/ledger.py already reads it without importing that
 package.
@@ -119,32 +125,48 @@ def _find_worker_and_account(data: Dict[str, Any], worker_id: str):
 
 
 # --------------------------------------------------------------------------- accounts
-_CREDS_KEYS = {"username", "key"}
+# Kaggle now issues two incompatible credential shapes: the classic
+# username/key pair (kaggle.json) and a newer bearer access token. Which one
+# an installed `kaggle` CLI actually understands depends on its version — see
+# the comment on _run_kaggle for how that's resolved without this module
+# having to sniff a version string itself. An account can store either credential,
+# or both (e.g. a token for everyday use plus the classic pair as a fallback
+# that still works if the token is later revoked).
+CREDS_FILENAME = "kaggle.json"
+TOKEN_FILENAME = "access_token"
 
 
-def _validate_kaggle_json(raw_text: str) -> Dict[str, str]:
-    try:
-        parsed = json.loads(raw_text)
-    except Exception as e:
-        raise KaggleOpsError(f"Not valid JSON: {e}")
-    if not isinstance(parsed, dict) or set(parsed) != _CREDS_KEYS:
-        raise KaggleOpsError(
-            'Expected the classic kaggle.json shape: {"username": ..., "key": ...}. '
-            "Get one from kaggle.com -> Settings -> API -> Create New Token."
-        )
-    username, key = parsed["username"], parsed["key"]
-    if not isinstance(username, str) or not isinstance(key, str) or not username or not key:
-        raise KaggleOpsError("username/key must both be non-empty strings")
+def _validate_legacy_pair(username: str, key: str) -> Dict[str, str]:
+    username, key = (username or "").strip(), (key or "").strip()
+    if not username or not key:
+        raise KaggleOpsError("Classic auth needs both a username and a key")
     if key.upper().startswith("KGAT"):
-        # A newer-format prefixed token doesn't authenticate the same way as
-        # a classic key with this CLI's Basic Auth — asking for the classic
-        # format up front beats discovering this on the first failed call.
+        # A newer-format token doesn't authenticate the same way as a classic
+        # key with this CLI's Basic Auth — redirect to the token field instead
+        # of storing something that will only fail later.
         raise KaggleOpsError(
-            "This looks like a new-format API token, which won't authenticate here. "
-            "Use a classic username/key pair instead (kaggle.com -> Settings -> API -> "
-            "Create New Token)."
+            "That looks like a new-format API token, not a classic key — paste it into "
+            "the API Token field instead."
         )
     return {"username": username, "key": key}
+
+
+def _validate_access_token(raw_token: str) -> str:
+    token = (raw_token or "").strip()
+    if not token:
+        raise KaggleOpsError("API token is empty")
+    if token.startswith("{"):
+        raise KaggleOpsError(
+            "That looks like a kaggle.json payload, not a bare token — paste the "
+            "username/key into the classic fields instead."
+        )
+    if "\n" in token or " " in token:
+        raise KaggleOpsError("API token should be a single unbroken string, with no whitespace")
+    return token
+
+
+def _creds_dir(name: str) -> Path:
+    return settings.kaggle_creds_dir / name
 
 
 def list_accounts() -> List[Dict[str, Any]]:
@@ -156,32 +178,112 @@ def list_accounts() -> List[Dict[str, Any]]:
     result = []
     for account in data["accounts"]:
         workers = [{**w, **state.get(w["worker_id"], {})} for w in account.get("workers", [])]
+        creds_dir = _creds_dir(account["name"])
         result.append({
             "name": account["name"],
             "kaggle_username": account.get("kaggle_username"),
+            "has_legacy_key": (creds_dir / CREDS_FILENAME).is_file(),
+            "has_api_token": (creds_dir / TOKEN_FILENAME).is_file(),
             "workers": workers,
             "usage_estimate": estimate_usage(account["name"]),
         })
     return result
 
 
-def add_account(name: str, kaggle_json_text: str) -> Dict[str, Any]:
+def add_account(
+    name: str, username: str = "", key: str = "", api_token: str = "",
+) -> Dict[str, Any]:
     name = (name or "").strip()
     if not name:
         raise KaggleOpsError("Missing account name")
-    creds = _validate_kaggle_json(kaggle_json_text)
+    username, key, api_token = (username or ""), (key or ""), (api_token or "")
+
+    # Gate legacy validation on `key` alone, not `username` — username is
+    # required regardless of which credential type is used (it's also how a
+    # token-only account identifies itself), so branching on it here would
+    # wrongly demand a classic key whenever a username was typed.
+    legacy = _validate_legacy_pair(username, key) if key.strip() else None
+    token = _validate_access_token(api_token) if api_token.strip() else None
+    if not legacy and not token:
+        raise KaggleOpsError("Provide a classic username/key pair, an API token, or both")
+
+    resolved_username = legacy["username"] if legacy else (username or "").strip()
+    if not resolved_username:
+        raise KaggleOpsError("Kaggle username is required (Kaggle gives no way to derive it from a bare token)")
+
     with _lock:
         data = _load_accounts()
         if _find_account(data, name) is not None:
             raise KaggleOpsError(f"Account '{name}' already exists")
-        creds_dir = settings.kaggle_creds_dir / name
+        creds_dir = _creds_dir(name)
         creds_dir.mkdir(parents=True, exist_ok=True)
-        creds_path = creds_dir / "kaggle.json"
-        creds_path.write_text(json.dumps(creds))
-        os.chmod(creds_path, 0o600)
-        data["accounts"].append({"name": name, "kaggle_username": creds["username"], "workers": []})
+        if legacy:
+            _write_secret(creds_dir / CREDS_FILENAME, json.dumps(legacy))
+        if token:
+            _write_secret(creds_dir / TOKEN_FILENAME, token)
+        data["accounts"].append({"name": name, "kaggle_username": resolved_username, "workers": []})
         _save_accounts(data)
-    return {"name": name, "kaggle_username": creds["username"]}
+    return {"name": name, "kaggle_username": resolved_username}
+
+
+def _write_secret(path: Path, text: str) -> None:
+    path.write_text(text)
+    os.chmod(path, 0o600)
+
+
+def update_credentials(
+    name: str, username: str = "", key: str = "", api_token: str = "",
+) -> Dict[str, Any]:
+    """Rotates one or both stored credentials for an existing account without
+    touching its workers — the account-delete flow wipes worker assignments
+    too, which is the wrong tool for "my key expired, swap it in"."""
+    username, key, api_token = (username or ""), (key or ""), (api_token or "")
+    token = _validate_access_token(api_token) if api_token.strip() else None
+    if not (username.strip() or key.strip()) and not token:
+        raise KaggleOpsError("Provide a new username/key pair, a new API token, or both")
+
+    with _lock:
+        data = _load_accounts()
+        account = _find_account(data, name)
+        if account is None:
+            raise KaggleOpsError(f"Unknown account '{name}'")
+        # Rotating just the key (the common case — the username doesn't
+        # change) shouldn't force the caller to retype a username that's
+        # already on file.
+        legacy = _validate_legacy_pair(username or account.get("kaggle_username", ""), key) if key.strip() else None
+        creds_dir = _creds_dir(name)
+        creds_dir.mkdir(parents=True, exist_ok=True)
+        if legacy:
+            _write_secret(creds_dir / CREDS_FILENAME, json.dumps(legacy))
+            account["kaggle_username"] = legacy["username"]
+        if token:
+            _write_secret(creds_dir / TOKEN_FILENAME, token)
+        _save_accounts(data)
+    return {"name": name, "kaggle_username": account["kaggle_username"]}
+
+
+def remove_credential(name: str, kind: str) -> Dict[str, Any]:
+    """Deletes just one of an account's two credential slots. Refuses to
+    remove the last one — an account with neither can't authenticate at all,
+    and that's a worse state than just telling the caller to add a
+    replacement first."""
+    if kind not in ("legacy", "token"):
+        raise KaggleOpsError("kind must be 'legacy' or 'token'")
+    with _lock:
+        data = _load_accounts()
+        account = _find_account(data, name)
+        if account is None:
+            raise KaggleOpsError(f"Unknown account '{name}'")
+        creds_dir = _creds_dir(name)
+        legacy_path, token_path = creds_dir / CREDS_FILENAME, creds_dir / TOKEN_FILENAME
+        target_path = legacy_path if kind == "legacy" else token_path
+        other_path = token_path if kind == "legacy" else legacy_path
+        if not target_path.is_file():
+            raise KaggleOpsError(f"'{name}' has no {kind} credential stored")
+        if not other_path.is_file():
+            raise KaggleOpsError(f"Can't remove '{name}'s only stored credential — add a replacement first")
+        target_path.unlink()
+    return {"name": name, "removed": kind}
 
 
 def remove_account(name: str) -> bool:
@@ -244,10 +346,33 @@ def remove_worker(account_name: str, worker_id: str) -> bool:
 
 # --------------------------------------------------------------------------- CLI subprocess
 def _run_kaggle(args: List[str], account_name: str, timeout: Optional[float] = None) -> subprocess.CompletedProcess:
-    creds_path = settings.kaggle_creds_dir / account_name / "kaggle.json"
-    if not creds_path.is_file():
+    creds_dir = _creds_dir(account_name)
+    legacy_path, token_path = creds_dir / CREDS_FILENAME, creds_dir / TOKEN_FILENAME
+    has_legacy, has_token = legacy_path.is_file(), token_path.is_file()
+    if not has_legacy and not has_token:
         raise KaggleOpsError(f"No credentials stored for account '{account_name}'")
-    env = {**os.environ, "KAGGLE_CONFIG_DIR": str(creds_path.parent)}
+
+    # Hand over whatever credentials this account has, in both env-var forms,
+    # rather than the dashboard picking one itself. The installed `kaggle`
+    # CLI's own auth() already tries an access token first and falls back to
+    # the legacy username/key pair (confirmed against its source: token ->
+    # legacy -> OAuth -> anonymous) — an older CLI that predates token support
+    # just doesn't recognize KAGGLE_API_TOKEN and uses the legacy pair. That
+    # makes the CLI's own version-aware priority order do the "which key is
+    # right for this install" decision, instead of this module guessing at a
+    # `kaggle --version` string.
+    env = {**os.environ, "KAGGLE_CONFIG_DIR": str(creds_dir)}
+    if has_token:
+        # KAGGLE_API_TOKEN accepts either the literal token or a path to a
+        # file containing it; passing the path keeps the secret itself out of
+        # the subprocess's env block.
+        env["KAGGLE_API_TOKEN"] = str(token_path)
+    if has_legacy:
+        try:
+            pair = json.loads(legacy_path.read_text())
+            env["KAGGLE_USERNAME"], env["KAGGLE_KEY"] = pair["username"], pair["key"]
+        except Exception:
+            pass
     try:
         return subprocess.run(
             [settings.kaggle_executable, *args],

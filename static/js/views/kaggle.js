@@ -12,6 +12,7 @@
 // IMPLEMENTATION_PLAN.md Phase 7 for the eventual full split).
 
 state.kaggleAccounts = [];
+state.kaggleCredEditOpen = new Set();
 
 async function loadKaggle() {
   const accountsBody = document.getElementById("kaggle-accounts-body");
@@ -38,22 +39,31 @@ function renderKaggleAccounts() {
     : "";
 
   if (!state.kaggleAccounts.length) {
-    body.innerHTML = `<div class="empty-state">No accounts configured yet — add one below with a classic kaggle.json (username/key), not a newer-format token.</div>`;
+    body.innerHTML = `<div class="empty-state">No accounts configured yet — add one below with a classic key, an API token, or both.</div>`;
     return;
   }
 
   body.innerHTML = state.kaggleAccounts.map((a) => {
     const usage = a.usage_estimate || {};
     const hours = usage.hours_this_week !== undefined ? usage.hours_this_week : "–";
-    return `<div class="list-row">
-      <div class="list-row-main">
-        <div class="list-row-title">${escapeHtml(a.name)}</div>
-        <div class="list-row-sub">Kaggle user: ${escapeHtml(a.kaggle_username || "–")} · ~${escapeHtml(String(hours))}h used this week (self-tracked estimate, not Kaggle's own quota)</div>
+    const credBadges = [
+      a.has_legacy_key ? `<span class="badge teal" title="Classic username/key pair stored">key</span>` : "",
+      a.has_api_token ? `<span class="badge violet" title="New-format API token stored">token</span>` : "",
+    ].join(" ");
+    const editOpen = state.kaggleCredEditOpen.has(a.name);
+    return `<div class="list-row" style="flex-direction:column; align-items:stretch;">
+      <div style="display:flex; align-items:center; gap:10px;">
+        <div class="list-row-main">
+          <div class="list-row-title">${escapeHtml(a.name)} ${credBadges}</div>
+          <div class="list-row-sub">Kaggle user: ${escapeHtml(a.kaggle_username || "–")} · ~${escapeHtml(String(hours))}h used this week (self-tracked estimate, not Kaggle's own quota)</div>
+        </div>
+        <div class="job-actions">
+          <button class="btn btn-sm btn-ghost" data-action="validate-account" data-account="${escapeHtml(a.name)}">Validate</button>
+          <button class="btn btn-sm btn-ghost" data-action="toggle-credentials" data-account="${escapeHtml(a.name)}">${editOpen ? "Cancel" : "Credentials"}</button>
+          <button class="btn btn-sm btn-danger" data-action="remove-account" data-account="${escapeHtml(a.name)}">Remove</button>
+        </div>
       </div>
-      <div class="job-actions">
-        <button class="btn btn-sm btn-ghost" data-action="validate-account" data-account="${escapeHtml(a.name)}">Validate</button>
-        <button class="btn btn-sm btn-danger" data-action="remove-account" data-account="${escapeHtml(a.name)}">Remove</button>
-      </div>
+      ${editOpen ? renderKaggleCredentialForm(a) : ""}
     </div>`;
   }).join("");
 
@@ -64,8 +74,61 @@ function renderKaggleAccounts() {
       const action = btn.dataset.action;
       if (action === "validate-account") validateKaggleAccount(account);
       else if (action === "remove-account") removeKaggleAccount(account);
+      else if (action === "toggle-credentials") toggleKaggleCredentialForm(account);
+      else if (action === "save-credentials") saveKaggleCredentials(account);
+      else if (action === "remove-credential") removeKaggleCredential(account, btn.dataset.kind);
     });
   });
+}
+
+function renderKaggleCredentialForm(a) {
+  return `<div class="scheduler-add-form" style="padding:10px 0 4px; margin-top:8px; border-top:1px dashed var(--border);">
+    <div class="field grow">
+      <label>New classic key (leave blank to keep current)</label>
+      <input class="text-input grow" id="kaggle-cred-key-${escapeHtml(a.name)}" type="password" autocomplete="off" placeholder="paste the key from kaggle.json" />
+    </div>
+    <div class="field grow">
+      <label>New API token (leave blank to keep current)</label>
+      <input class="text-input grow" id="kaggle-cred-token-${escapeHtml(a.name)}" type="password" autocomplete="off" placeholder="paste the new-format token" />
+    </div>
+    <button class="btn btn-sm btn-primary" data-action="save-credentials" data-account="${escapeHtml(a.name)}">Save</button>
+    ${a.has_legacy_key ? `<button class="btn btn-sm btn-danger" data-action="remove-credential" data-account="${escapeHtml(a.name)}" data-kind="legacy">Remove key</button>` : ""}
+    ${a.has_api_token ? `<button class="btn btn-sm btn-danger" data-action="remove-credential" data-account="${escapeHtml(a.name)}" data-kind="token">Remove token</button>` : ""}
+  </div>`;
+}
+
+function toggleKaggleCredentialForm(name) {
+  if (state.kaggleCredEditOpen.has(name)) state.kaggleCredEditOpen.delete(name);
+  else state.kaggleCredEditOpen.add(name);
+  renderKaggleAccounts();
+}
+
+async function saveKaggleCredentials(name) {
+  const key = document.getElementById(`kaggle-cred-key-${name}`).value.trim();
+  const api_token = document.getElementById(`kaggle-cred-token-${name}`).value.trim();
+  if (!key && !api_token) { toast("Enter a new key, a new token, or both", "err"); return; }
+  try {
+    await api(`/api/kaggle/accounts/${encodeURIComponent(name)}/credentials`, {
+      method: "PATCH", body: JSON.stringify({ key, api_token }),
+    });
+    toast(`Credentials updated for '${name}' — its workers were left untouched`, "ok");
+    state.kaggleCredEditOpen.delete(name);
+    loadKaggle();
+  } catch (e) {
+    toast("Couldn't update credentials: " + e.message, "err");
+  }
+}
+
+async function removeKaggleCredential(name, kind) {
+  const ok = await showConfirm("Remove this credential?", `This removes '${name}'s stored ${kind === "legacy" ? "classic key" : "API token"}. The other credential (if any) is left in place.`);
+  if (!ok) return;
+  try {
+    await api(`/api/kaggle/accounts/${encodeURIComponent(name)}/credentials/${kind}`, { method: "DELETE" });
+    toast(`Removed ${kind === "legacy" ? "classic key" : "API token"} from '${name}'`, "ok");
+    loadKaggle();
+  } catch (e) {
+    toast("Couldn't remove credential: " + e.message, "err");
+  }
 }
 
 function renderKaggleWorkerAccountOptions() {
@@ -128,17 +191,14 @@ async function addKaggleAccount() {
   const name = document.getElementById("kaggle-new-account-name").value.trim();
   const username = document.getElementById("kaggle-new-account-username").value.trim();
   const key = document.getElementById("kaggle-new-account-key").value.trim();
-  if (!name || !username || !key) { toast("Account name, Kaggle username and API key are all required", "err"); return; }
-  // The backend still expects (and validates) the classic kaggle.json shape —
-  // built here so the user only ever types the two plain fields Kaggle
-  // itself hands out, never raw JSON.
-  const kaggleJson = JSON.stringify({ username, key });
+  const api_token = document.getElementById("kaggle-new-account-token").value.trim();
+  if (!name || !username) { toast("Account name and Kaggle username are required", "err"); return; }
+  if (!key && !api_token) { toast("Provide a classic API key, an API token, or both", "err"); return; }
   try {
-    await api("/api/kaggle/accounts", { method: "POST", body: JSON.stringify({ name, kaggle_json: kaggleJson }) });
+    await api("/api/kaggle/accounts", { method: "POST", body: JSON.stringify({ name, username, key, api_token }) });
     toast(`Account '${name}' added`, "ok");
-    document.getElementById("kaggle-new-account-name").value = "";
-    document.getElementById("kaggle-new-account-username").value = "";
-    document.getElementById("kaggle-new-account-key").value = "";
+    ["kaggle-new-account-name", "kaggle-new-account-username", "kaggle-new-account-key", "kaggle-new-account-token"]
+      .forEach((id) => (document.getElementById(id).value = ""));
     loadKaggle();
   } catch (e) {
     toast("Couldn't add account: " + e.message, "err");

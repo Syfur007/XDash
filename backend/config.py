@@ -94,8 +94,9 @@ class Settings:
         self.dashboard_log_dir.mkdir(parents=True, exist_ok=True)
 
         # kaggle_accounts_file is the account/worker registry; kaggle_creds_dir
-        # holds one real kaggle.json per account (kaggle_creds_dir/<account>/
-        # kaggle.json). Both are gitignored — see backend/kaggle.py.
+        # holds each account's real credentials (kaggle_creds_dir/<account>/
+        # kaggle.json and/or .../access_token — an account may have either or
+        # both). Both are gitignored — see backend/kaggle.py.
         self.kaggle_accounts_file = self.state_dir / "kaggle_accounts.json"
         self.kaggle_state_file = self.state_dir / "kaggle_state.json"
         self.kaggle_creds_dir = self.state_dir / "kaggle_accounts"

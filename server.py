@@ -380,7 +380,9 @@ def api_kaggle_list_accounts():
 def api_kaggle_add_account():
     body = request.get_json(silent=True) or {}
     try:
-        return jsonify(kaggle_ops.add_account(body.get("name", ""), body.get("kaggle_json", "")))
+        return jsonify(kaggle_ops.add_account(
+            body.get("name", ""), body.get("username", ""), body.get("key", ""), body.get("api_token", ""),
+        ))
     except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
 
@@ -390,6 +392,25 @@ def api_kaggle_remove_account(name):
     if not kaggle_ops.remove_account(name):
         return err("Account not found", 404)
     return jsonify({"removed": True})
+
+
+@app.route("/api/kaggle/accounts/<name>/credentials", methods=["PATCH"])
+def api_kaggle_update_credentials(name):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(kaggle_ops.update_credentials(
+            name, body.get("username", ""), body.get("key", ""), body.get("api_token", ""),
+        ))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/kaggle/accounts/<name>/credentials/<kind>", methods=["DELETE"])
+def api_kaggle_remove_credential(name, kind):
+    try:
+        return jsonify(kaggle_ops.remove_credential(name, kind))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
 
 
 @app.route("/api/kaggle/accounts/<name>/validate", methods=["POST"])

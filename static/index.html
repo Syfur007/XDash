@@ -94,8 +94,12 @@
       <span class="state-label" id="telemetry-state">IDLE</span>
       <span class="job-name" id="telemetry-job"></span>
       <span class="metric-chip hidden" id="telemetry-metric"></span>
+      <span class="reconnecting-label hidden" id="telemetry-reconnecting">Reconnecting…</span>
     </div>
     <div class="topbar-spacer"></div>
+    <button class="hamburger-btn mobile-only-btn" id="btn-open-palette" aria-label="Search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+    </button>
     <div class="status-pills" id="status-pills">
       <div class="pill running">RUNNING <b id="count-running">0</b></div>
       <div class="pill restart">NEEDS RESTART <b id="count-restart">0</b></div>
@@ -120,6 +124,7 @@
       <div class="configs-layout">
         <div class="panel config-tree">
           <div class="panel-header"><span>Configs</span><span id="config-count"></span></div>
+          <div class="panel-filter"><input class="text-input" id="config-filter" placeholder="Filter configs…" autocomplete="off" /></div>
           <div class="config-tree-body" id="config-tree-body">
             <div class="empty-state">Loading…</div>
           </div>
@@ -246,6 +251,7 @@
       <div class="configs-layout">
         <div class="panel config-tree">
           <div class="panel-header"><span>Sessions</span><span id="terminal-count"></span></div>
+          <div class="panel-filter"><input class="text-input" id="terminal-filter" placeholder="Filter sessions…" autocomplete="off" /></div>
           <div class="config-tree-body" id="terminal-list-body">
             <div class="empty-state">Loading…</div>
           </div>
@@ -354,8 +360,12 @@
             <input class="text-input grow" id="kaggle-new-account-username" placeholder="e.g. teammateA" autocomplete="off" />
           </div>
           <div class="field grow">
-            <label>API key (kaggle.com → Settings → API → Create New Token)</label>
+            <label>Classic API key (optional if a token is given below)</label>
             <input class="text-input grow" id="kaggle-new-account-key" type="password" placeholder="paste the key from kaggle.json" autocomplete="off" />
+          </div>
+          <div class="field grow">
+            <label>API token (optional if a classic key is given above)</label>
+            <input class="text-input grow" id="kaggle-new-account-token" type="password" placeholder="paste the new-format token" autocomplete="off" />
           </div>
           <button class="btn btn-primary" id="btn-kaggle-add-account">Add account</button>
         </div>
@@ -412,6 +422,7 @@
       <div class="configs-layout">
         <div class="panel config-tree">
           <div class="panel-header"><span>Reports</span><span id="report-count"></span></div>
+          <div class="panel-filter"><input class="text-input" id="report-filter" placeholder="Filter reports…" autocomplete="off" /></div>
           <div class="config-tree-body" id="report-list-body">
             <div class="empty-state">Loading…</div>
           </div>
@@ -581,7 +592,7 @@
   </main>
 </div>
 
-<div class="toast" id="toast"></div>
+<div class="toast-stack" id="toast-stack"></div>
 
 <div class="modal-backdrop hidden" id="confirm-backdrop">
   <div class="modal">
