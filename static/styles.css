@@ -616,6 +616,49 @@ select, .text-input{
   white-space: nowrap;
 }
 
+/* ---------------------------------------------------------------- Kaggle tab: account/worker card grids */
+.kaggle-grid{
+  display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap:14px; padding:12px;
+}
+.kaggle-card{
+  display:flex; flex-direction:column;
+  border-radius: var(--radius-lg); border:1px solid var(--border-soft); background: var(--surface-2);
+  overflow:hidden; transition: border-color .12s ease, background .12s ease;
+}
+.kaggle-card:hover{ border-color: var(--border); background: var(--surface-3); }
+.kaggle-card-accent{ height:3px; background: var(--slate); }
+.kaggle-card-accent.emerald{ background: var(--emerald); }
+.kaggle-card-accent.red{ background: var(--red); }
+.kaggle-card-accent.amber{ background: var(--amber); }
+.kaggle-card-accent.teal{ background: var(--teal); }
+.kaggle-card-accent.violet{ background: var(--violet); }
+.kaggle-card-body{ flex:1; padding:14px; display:flex; flex-direction:column; gap:11px; }
+.kaggle-card-header{ display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+.kaggle-card-title{ font-weight:700; font-size:15px; color: var(--text); word-break:break-word; }
+.kaggle-card-sub{ font-family: var(--mono); font-size:10.5px; color: var(--text-faint); margin-top:2px; overflow-wrap:anywhere; }
+.kaggle-username-row{ display:flex; align-items:center; gap:6px; }
+.kaggle-username-row .text-input{ font-size:12.5px; padding:5px 8px; }
+.kaggle-username-row label{ font-size:9.5px; text-transform:uppercase; letter-spacing:0.4px; color: var(--text-faint); font-family: var(--mono); white-space:nowrap; }
+.kaggle-stat-row{ display:flex; flex-wrap:wrap; gap:8px; }
+.kaggle-stat{
+  display:flex; flex-direction:column; gap:2px; padding:6px 10px; border-radius: var(--radius);
+  background: var(--surface-3); border:1px solid var(--border-soft); min-width:88px; flex:1;
+}
+.kaggle-stat-label{ font-size:9.5px; text-transform:uppercase; letter-spacing:0.4px; color: var(--text-faint); font-family: var(--mono); }
+.kaggle-stat-value{ font-size:14px; font-weight:700; color: var(--text); font-family: var(--mono); }
+.kaggle-cred-chips{ display:flex; gap:6px; flex-wrap:wrap; }
+.kaggle-chip{
+  font-family: var(--mono); font-size:9.5px; text-transform:uppercase; letter-spacing:0.3px;
+  border:1px solid var(--border); border-radius:999px; padding:2px 8px; color: var(--text-faint);
+}
+.kaggle-chip.on{ color: var(--teal); border-color: rgba(79,209,197,0.35); background: rgba(79,209,197,0.1); }
+.kaggle-card-error{ font-size:11px; color: var(--red); word-break:break-word; }
+.kaggle-card-footer{
+  display:flex; gap:6px; flex-wrap:wrap; margin-top:auto; padding-top:11px;
+  border-top:1px solid var(--border-soft);
+}
+
 /* ---------------------------------------------------------------- read-only config preview (terminals view) */
 .config-preview{ border:1px solid var(--border-soft); border-radius: var(--radius); background:#0A101F; overflow:hidden; flex-shrink:0; }
 .config-preview-header{

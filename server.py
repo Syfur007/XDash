@@ -413,6 +413,15 @@ def api_kaggle_remove_credential(name, kind):
         return err(str(e), 400)
 
 
+@app.route("/api/kaggle/accounts/<name>/username", methods=["POST"])
+def api_kaggle_rename_username(name):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(kaggle_ops.rename_kaggle_username(name, body.get("kaggle_username", "")))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
 @app.route("/api/kaggle/accounts/<name>/validate", methods=["POST"])
 def api_kaggle_validate_account(name):
     try:

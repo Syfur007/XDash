@@ -262,6 +262,36 @@ def update_credentials(
     return {"name": name, "kaggle_username": account["kaggle_username"]}
 
 
+def rename_kaggle_username(name: str, new_username: str) -> Dict[str, Any]:
+    """Updates just the account's Kaggle username label — used to build
+    kernel refs (id: "<username>/<slug>") and shown in the UI — without
+    touching the stored key/token. update_credentials() only ever updates
+    the username as a side effect of rotating the legacy key, so a plain
+    "fix a typo'd username" edit had no path that didn't also demand
+    re-pasting the key. Keeps a stored legacy kaggle.json's own username
+    field in sync too, so KAGGLE_USERNAME (read from that file by
+    _run_kaggle) never disagrees with what the registry/UI shows."""
+    new_username = (new_username or "").strip()
+    if not new_username:
+        raise KaggleOpsError("Username can't be empty")
+    with _lock:
+        data = _load_accounts()
+        account = _find_account(data, name)
+        if account is None:
+            raise KaggleOpsError(f"Unknown account '{name}'")
+        account["kaggle_username"] = new_username
+        legacy_path = _creds_dir(name) / CREDS_FILENAME
+        if legacy_path.is_file():
+            try:
+                pair = json.loads(legacy_path.read_text())
+                pair["username"] = new_username
+                _write_secret(legacy_path, json.dumps(pair))
+            except Exception:
+                pass
+        _save_accounts(data)
+    return {"name": name, "kaggle_username": new_username}
+
+
 def remove_credential(name: str, kind: str) -> Dict[str, Any]:
     """Deletes just one of an account's two credential slots. Refuses to
     remove the last one — an account with neither can't authenticate at all,
