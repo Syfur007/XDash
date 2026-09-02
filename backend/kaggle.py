@@ -29,6 +29,7 @@ package.
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
@@ -36,6 +37,9 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
+import urllib.error
+import urllib.request
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
@@ -50,6 +54,8 @@ _ledger_lock = threading.Lock()   # guards concurrent appends to the host repo's
 STATUS_RE = re.compile(r'has status "([^"]+)"')
 IN_PROGRESS_STATUSES = {"queued", "preparing", "running"}
 FINISHED_STATUSES = {"complete"}
+FINAL_STATUSES = {"complete", "error", "cancelAcknowledged"}  # tick() stops polling/chains past these
+HISTORY_LIMIT = 50  # per-worker event log cap in kaggle_state.json — a rolling window, not an audit archive
 
 # Mirrors orchestration/ledger.py's RUNS_FIELDS in the host repo exactly —
 # a downloaded worker's own artifacts/ledger/runs.csv already has these
@@ -99,11 +105,19 @@ def _save_state(state: Dict[str, Any]) -> None:
     settings.kaggle_state_file.write_text(json.dumps(state, indent=2))
 
 
-def _update_worker_state(worker_id: str, patch: Dict[str, Any]) -> None:
+def _update_worker_state(worker_id: str, patch: Dict[str, Any], event: Optional[str] = None) -> None:
+    """Merges *patch* into the worker's state record. *event*, if given, also
+    appends a timestamped entry to that record's rolling history log (capped
+    at HISTORY_LIMIT) — not every patch is history-worthy (e.g. a routine
+    status poll that didn't change anything), so callers opt in explicitly."""
     with _lock:
         state = _load_state()
         rec = state.get(worker_id, {})
         rec.update(patch)
+        if event:
+            history = rec.setdefault("history", [])
+            history.append({"at": _now_iso(), "event": event})
+            del history[:-HISTORY_LIMIT]
         state[worker_id] = rec
         _save_state(state)
 
@@ -169,25 +183,63 @@ def _creds_dir(name: str) -> Path:
     return settings.kaggle_creds_dir / name
 
 
+def _notebook_changed(worker: Dict[str, Any], worker_state: Dict[str, Any]) -> Optional[bool]:
+    """True if the worker's on-disk notebook differs from the one last
+    successfully pushed (by content hash) — None if it's never been pushed,
+    or the file is currently missing, since "changed" isn't a meaningful
+    answer in either case."""
+    pushed_hash = worker_state.get("pushed_notebook_hash")
+    if not pushed_hash:
+        return None
+    notebook_abs = settings.repo_root / worker["notebook_path"]
+    if not notebook_abs.is_file():
+        return None
+    try:
+        current_hash = hashlib.sha1(notebook_abs.read_bytes()).hexdigest()
+    except OSError:
+        return None
+    return current_hash != pushed_hash
+
+
 def list_accounts() -> List[Dict[str, Any]]:
     """Accounts + workers, each worker enriched with its last known status
-    (from kaggle_state.json) and a self-tracked usage estimate. Never
-    touches the network — see refresh_status/refresh_all for that."""
+    (from kaggle_state.json), a self-tracked usage estimate/history, and
+    whether its notebook has changed since the last push. Never touches the
+    network — see refresh_status/refresh_all for that."""
     data = _load_accounts()
     state = _load_state()
     result = []
     for account in data["accounts"]:
-        workers = [{**w, **state.get(w["worker_id"], {})} for w in account.get("workers", [])]
+        workers = []
+        for w in account.get("workers", []):
+            w_state = state.get(w["worker_id"], {})
+            workers.append({**w, **w_state, "notebook_changed": _notebook_changed(w, w_state)})
         creds_dir = _creds_dir(account["name"])
         result.append({
             "name": account["name"],
             "kaggle_username": account.get("kaggle_username"),
             "has_legacy_key": (creds_dir / CREDS_FILENAME).is_file(),
             "has_api_token": (creds_dir / TOKEN_FILENAME).is_file(),
+            "auto_chain": bool(account.get("auto_chain")),
             "workers": workers,
             "usage_estimate": estimate_usage(account["name"]),
+            "usage_history": usage_history(account["name"]),
         })
     return result
+
+
+def set_auto_chain(name: str, enabled: bool) -> Dict[str, Any]:
+    """Toggles whether the background poller (see ensure_kaggle_worker_started
+    / _tick below) automatically pushes this account's next not-yet-pushed
+    worker once the current one reaches a final status."""
+    with _lock:
+        data = _load_accounts()
+        account = _find_account(data, name)
+        if account is None:
+            raise KaggleOpsError(f"Unknown account '{name}'")
+        account["auto_chain"] = bool(enabled)
+        _save_accounts(data)
+    return {"name": name, "auto_chain": bool(enabled)}
 
 
 def add_account(
@@ -234,62 +286,73 @@ def _write_secret(path: Path, text: str) -> None:
 def update_credentials(
     name: str, username: str = "", key: str = "", api_token: str = "",
 ) -> Dict[str, Any]:
-    """Rotates one or both stored credentials for an existing account without
-    touching its workers — the account-delete flow wipes worker assignments
-    too, which is the wrong tool for "my key expired, swap it in"."""
-    username, key, api_token = (username or ""), (key or ""), (api_token or "")
-    token = _validate_access_token(api_token) if api_token.strip() else None
-    if not (username.strip() or key.strip()) and not token:
-        raise KaggleOpsError("Provide a new username/key pair, a new API token, or both")
+    """Rotates one or both stored credentials for an existing account, and/or
+    just relabels its Kaggle username, without touching its workers — the
+    account-delete flow wipes worker assignments too, which is the wrong
+    tool for "my key expired, swap it in" or "I typo'd the username".
+
+    A username with no key is a pure relabel (keeps a stored legacy
+    kaggle.json's own username field in sync too, so KAGGLE_USERNAME — read
+    from that file by _run_kaggle — never disagrees with what's shown here);
+    a username with a key rotates the key and takes the username that came
+    with it, exactly like before."""
+    username, key, api_token = (username or "").strip(), (key or "").strip(), (api_token or "").strip()
+    token = _validate_access_token(api_token) if api_token else None
+    if not (username or key) and not token:
+        raise KaggleOpsError("Provide a new username, key, API token, or some combination")
 
     with _lock:
         data = _load_accounts()
         account = _find_account(data, name)
         if account is None:
             raise KaggleOpsError(f"Unknown account '{name}'")
-        # Rotating just the key (the common case — the username doesn't
-        # change) shouldn't force the caller to retype a username that's
-        # already on file.
-        legacy = _validate_legacy_pair(username or account.get("kaggle_username", ""), key) if key.strip() else None
         creds_dir = _creds_dir(name)
         creds_dir.mkdir(parents=True, exist_ok=True)
-        if legacy:
+
+        if key:
+            legacy = _validate_legacy_pair(username or account.get("kaggle_username", ""), key)
             _write_secret(creds_dir / CREDS_FILENAME, json.dumps(legacy))
             account["kaggle_username"] = legacy["username"]
+        elif username:
+            account["kaggle_username"] = username
+            legacy_path = creds_dir / CREDS_FILENAME
+            if legacy_path.is_file():
+                try:
+                    pair = json.loads(legacy_path.read_text())
+                    pair["username"] = username
+                    _write_secret(legacy_path, json.dumps(pair))
+                except Exception:
+                    pass
         if token:
             _write_secret(creds_dir / TOKEN_FILENAME, token)
         _save_accounts(data)
     return {"name": name, "kaggle_username": account["kaggle_username"]}
 
 
-def rename_kaggle_username(name: str, new_username: str) -> Dict[str, Any]:
-    """Updates just the account's Kaggle username label — used to build
-    kernel refs (id: "<username>/<slug>") and shown in the UI — without
-    touching the stored key/token. update_credentials() only ever updates
-    the username as a side effect of rotating the legacy key, so a plain
-    "fix a typo'd username" edit had no path that didn't also demand
-    re-pasting the key. Keeps a stored legacy kaggle.json's own username
-    field in sync too, so KAGGLE_USERNAME (read from that file by
-    _run_kaggle) never disagrees with what the registry/UI shows."""
-    new_username = (new_username or "").strip()
-    if not new_username:
-        raise KaggleOpsError("Username can't be empty")
+def rename_account(old_name: str, new_name: str) -> Dict[str, Any]:
+    """Renames an account's own dashboard-facing label (its registry key and
+    creds-dir name) — separate from its Kaggle username (see
+    update_credentials for that). Its nested workers move with it for free
+    since they live inside the same registry entry; kaggle_state.json is
+    keyed by worker_id only, so nothing there needs touching."""
+    new_name = (new_name or "").strip()
+    if not new_name:
+        raise KaggleOpsError("Account name can't be empty")
     with _lock:
         data = _load_accounts()
-        account = _find_account(data, name)
+        account = _find_account(data, old_name)
         if account is None:
-            raise KaggleOpsError(f"Unknown account '{name}'")
-        account["kaggle_username"] = new_username
-        legacy_path = _creds_dir(name) / CREDS_FILENAME
-        if legacy_path.is_file():
-            try:
-                pair = json.loads(legacy_path.read_text())
-                pair["username"] = new_username
-                _write_secret(legacy_path, json.dumps(pair))
-            except Exception:
-                pass
+            raise KaggleOpsError(f"Unknown account '{old_name}'")
+        if new_name != old_name and _find_account(data, new_name) is not None:
+            raise KaggleOpsError(f"Account '{new_name}' already exists")
+        if new_name != old_name:
+            old_dir = _creds_dir(old_name)
+            if old_dir.is_dir():
+                _creds_dir(new_name).parent.mkdir(parents=True, exist_ok=True)
+                old_dir.rename(_creds_dir(new_name))
+            account["name"] = new_name
         _save_accounts(data)
-    return {"name": name, "kaggle_username": new_username}
+    return {"name": new_name}
 
 
 def remove_credential(name: str, kind: str) -> Dict[str, Any]:
@@ -327,6 +390,16 @@ def remove_account(name: str) -> bool:
     return True
 
 
+def _validate_notebook_path(notebook_path: str) -> Path:
+    notebook_abs = (settings.repo_root / notebook_path).resolve()
+    repo_root = settings.repo_root.resolve()
+    if repo_root not in notebook_abs.parents and notebook_abs != repo_root:
+        raise KaggleOpsError("notebook_path escapes the repo root")
+    if not notebook_abs.is_file():
+        raise KaggleOpsError(f"Notebook not found: {notebook_path}")
+    return notebook_abs
+
+
 def add_worker(
     account_name: str, worker_id: str, notebook_path: str, kernel_slug: str,
     results_dir: str, budget_hours: Optional[float] = None,
@@ -334,12 +407,7 @@ def add_worker(
     worker_id = (worker_id or "").strip()
     if not worker_id or not kernel_slug or not notebook_path or not results_dir:
         raise KaggleOpsError("worker_id, notebook_path, kernel_slug and results_dir are all required")
-    notebook_abs = (settings.repo_root / notebook_path).resolve()
-    repo_root = settings.repo_root.resolve()
-    if repo_root not in notebook_abs.parents and notebook_abs != repo_root:
-        raise KaggleOpsError("notebook_path escapes the repo root")
-    if not notebook_abs.is_file():
-        raise KaggleOpsError(f"Notebook not found: {notebook_path}")
+    _validate_notebook_path(notebook_path)
 
     with _lock:
         data = _load_accounts()
@@ -464,13 +532,39 @@ def push(worker_id: str) -> Dict[str, Any]:
 
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip()
-        _update_worker_state(worker_id, {"status": "push_failed", "last_error": detail})
+        _update_worker_state(worker_id, {"status": "push_failed", "last_error": detail}, event="push failed")
         raise KaggleOpsError(f"Push failed for '{worker_id}': {detail}")
 
+    notebook_hash = hashlib.sha1(notebook_abs.read_bytes()).hexdigest()
     _update_worker_state(worker_id, {
         "status": "pushed", "pushed_at": _now_iso(), "last_error": None, "over_budget": False,
-    })
-    return {"worker_id": worker_id, "status": "pushed"}
+        "notified_final": False, "pushed_notebook_hash": notebook_hash,
+    }, event="pushed")
+    warning = _concurrent_push_warning(account, worker_id)
+    result = {"worker_id": worker_id, "status": "pushed"}
+    if warning:
+        result["concurrent_warning"] = warning
+    return result
+
+
+def _concurrent_push_warning(account: Dict[str, Any], worker_id: str) -> Optional[str]:
+    """Kaggle accounts typically run one kernel at a time — a second push
+    under the same account usually just queues (or bumps) the first rather
+    than running in parallel. Non-blocking: this only annotates the push
+    response so the caller can warn, since Kaggle's own behavior here isn't
+    something worth guessing at and hard-blocking on."""
+    state = _load_state()
+    siblings = [
+        w["worker_id"] for w in account.get("workers", [])
+        if w["worker_id"] != worker_id
+        and state.get(w["worker_id"], {}).get("status") in IN_PROGRESS_STATUSES
+    ]
+    if not siblings:
+        return None
+    return (
+        f"Account '{account['name']}' already has {', '.join(siblings)} in progress — "
+        "Kaggle typically runs one kernel per account at a time, so this push may just queue."
+    )
 
 
 # --------------------------------------------------------------------------- status
@@ -491,7 +585,8 @@ def refresh_status(worker_id: str) -> Dict[str, Any]:
     kaggle_status = m.group(1) if m else "unknown"
 
     state = _load_state()
-    pushed_at = state.get(worker_id, {}).get("pushed_at")
+    prior = state.get(worker_id, {})
+    pushed_at = prior.get("pushed_at")
     over_budget = False
     if kaggle_status in IN_PROGRESS_STATUSES and pushed_at:
         budget_hours = worker.get("budget_hours") or settings.kaggle_default_budget_hours
@@ -499,7 +594,11 @@ def refresh_status(worker_id: str) -> Dict[str, Any]:
         over_budget = elapsed_hours > budget_hours
 
     patch = {"status": kaggle_status, "last_error": None, "over_budget": over_budget, "checked_at": _now_iso()}
-    _update_worker_state(worker_id, patch)
+    # Only worth a history line when the status actually moved — a poll that
+    # just reconfirms "still running" every tick would otherwise flood the
+    # log with duplicate entries.
+    event = f"status: {kaggle_status}" if kaggle_status != prior.get("status") else None
+    _update_worker_state(worker_id, patch, event=event)
     return {"worker_id": worker_id, **patch}
 
 
@@ -595,30 +694,38 @@ def download(worker_id: str) -> Dict[str, Any]:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     registered = register_ledger(results_dir)
-    _update_worker_state(worker_id, {"status": "downloaded", "downloaded_at": _now_iso(), "last_error": None})
+    _update_worker_state(
+        worker_id, {"status": "downloaded", "downloaded_at": _now_iso(), "last_error": None},
+        event=f"downloaded — {len(registered)} run(s) registered" if registered else "downloaded",
+    )
     return {"worker_id": worker_id, "results_dir": str(results_dir), "registered_runs": registered}
 
 
 # --------------------------------------------------------------------------- quota estimate
-def _utc_week_start() -> datetime:
-    now = datetime.now(timezone.utc)
+def _utc_week_start(ref: Optional[datetime] = None) -> datetime:
+    now = ref or datetime.now(timezone.utc)
     monday = now - timedelta(days=now.weekday())
     return monday.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def estimate_usage(account_name: str) -> Dict[str, Any]:
-    """Self-tracked GPU-hours estimate for *account_name* this UTC week,
-    summed from this account's own downloaded run manifests. NOT Kaggle's
-    authoritative quota figure — Kaggle exposes no API for that (only a
-    logged-in browser session sees the real number on the account's Usage
-    page), so this can drift from it and is presented as an estimate."""
+def usage_history(account_name: str, weeks: int = 6) -> List[Dict[str, Any]]:
+    """Self-tracked GPU-hours per UTC week for *account_name*'s past *weeks*
+    weeks (oldest first, current week last), summed from this account's own
+    downloaded run manifests in a single pass over each worker's results
+    dir. NOT Kaggle's authoritative quota figure — Kaggle exposes no API for
+    that (only a logged-in browser session sees the real number on the
+    account's Usage page), so this is presented as an estimate throughout,
+    and can drift from it (e.g. kernels run outside this dashboard aren't
+    counted)."""
     data = _load_accounts()
     account = _find_account(data, account_name)
+    this_week_start = _utc_week_start()
+    buckets = [this_week_start - timedelta(weeks=n) for n in range(weeks - 1, -1, -1)]
+    totals = {b: 0.0 for b in buckets}
     if account is None:
-        return {"hours_this_week": 0.0, "week_start": None}
+        return [{"week_start": b.isoformat(), "hours": 0.0} for b in buckets]
 
-    week_start = _utc_week_start()
-    total = 0.0
+    earliest = buckets[0]
     for worker in account.get("workers", []):
         manifests_dir = (settings.repo_root / worker["results_dir"] / "artifacts" / "runs").resolve()
         if not manifests_dir.is_dir():
@@ -635,9 +742,21 @@ def estimate_usage(account_name: str) -> Dict[str, Any]:
                 started = datetime.fromisoformat(start_time)
             except ValueError:
                 continue
-            if started >= week_start:
-                total += float(gpu_hours)
-    return {"hours_this_week": round(total, 2), "week_start": week_start.isoformat()}
+            if started < earliest:
+                continue
+            bucket = _utc_week_start(started)
+            if bucket in totals:
+                totals[bucket] += float(gpu_hours)
+    return [{"week_start": b.isoformat(), "hours": round(totals[b], 2)} for b in buckets]
+
+
+def estimate_usage(account_name: str) -> Dict[str, Any]:
+    """This-week slice of usage_history() — kept as its own function since
+    it's the one number shown outside the sparkline (account card stat
+    tile, summary strip)."""
+    history = usage_history(account_name, weeks=1)
+    current = history[-1]
+    return {"hours_this_week": current["hours"], "week_start": current["week_start"]}
 
 
 # --------------------------------------------------------------------------- bulk / fleet ops
@@ -681,3 +800,162 @@ def download_all() -> List[Dict[str, Any]]:
         if state.get(w["worker_id"], {}).get("status") in FINISHED_STATUSES
     ]
     return _run_bulk(download, worker_ids)
+
+
+# --------------------------------------------------------------------------- registry export/import
+def export_registry() -> Dict[str, Any]:
+    """The account+worker registry, verbatim — no credentials are anywhere
+    in this structure (they live in separate files under kaggle_creds_dir,
+    never referenced here by content), so it's safe to hand to a teammate
+    or save as a file. Pairs with import_registry(), which only ever adds
+    workers to accounts that already exist locally — credentials are never
+    something an import can supply, by design."""
+    return _load_accounts()
+
+
+def import_registry(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Adds workers from *payload* (the shape export_registry() returns) to
+    accounts that already exist locally, matched by name. An account in the
+    payload that doesn't exist locally is skipped entirely — creating one
+    would need credentials, which an import file never carries — and a
+    worker whose worker_id already exists locally, or whose notebook can't
+    be found under this repo_root, is skipped too rather than silently
+    overwritten or half-added."""
+    accounts_in = payload.get("accounts") if isinstance(payload, dict) else None
+    if not isinstance(accounts_in, list):
+        raise KaggleOpsError('Expected {"accounts": [...]} — the same shape export_registry() produces')
+
+    added: List[Dict[str, str]] = []
+    skipped_accounts: List[str] = []
+    skipped_workers: List[Dict[str, str]] = []
+    with _lock:
+        data = _load_accounts()
+        for incoming in accounts_in:
+            name = (incoming or {}).get("name")
+            account = _find_account(data, name) if name else None
+            if account is None:
+                if name:
+                    skipped_accounts.append(name)
+                continue
+            for w in incoming.get("workers", []) or []:
+                worker_id = (w or {}).get("worker_id")
+                if not worker_id:
+                    continue
+                if _find_worker(account, worker_id) is not None:
+                    skipped_workers.append({"account": name, "worker_id": worker_id, "reason": "already exists"})
+                    continue
+                required = {"notebook_path", "kernel_slug", "results_dir"}
+                if not required.issubset(w):
+                    skipped_workers.append({"account": name, "worker_id": worker_id, "reason": "missing fields"})
+                    continue
+                try:
+                    _validate_notebook_path(w["notebook_path"])
+                except KaggleOpsError as e:
+                    skipped_workers.append({"account": name, "worker_id": worker_id, "reason": str(e)})
+                    continue
+                account.setdefault("workers", []).append({
+                    "worker_id": worker_id,
+                    "notebook_path": w["notebook_path"],
+                    "kernel_slug": w["kernel_slug"],
+                    "results_dir": w["results_dir"],
+                    "budget_hours": w.get("budget_hours") or settings.kaggle_default_budget_hours,
+                })
+                added.append({"account": name, "worker_id": worker_id})
+        if added:
+            _save_accounts(data)
+    return {"workers_added": added, "accounts_skipped": skipped_accounts, "workers_skipped": skipped_workers}
+
+
+# --------------------------------------------------------------------------- background poller
+# The one deliberate background thread in this module (mirroring
+# backend/scheduler.py's own ensure_worker_started/_tick — see that module's
+# docstring for why a narrow, explicit exception like this beats a second
+# thread architecture). It exists for two things a purely on-demand,
+# poll-on-click design can't do: firing a webhook when nobody's watching
+# the tab, and chaining a worker's next push automatically. Everything else
+# in this module still computes state fresh on every call.
+_poller_started = False
+_poller_lock = threading.Lock()
+
+
+def _send_webhook(text: str) -> None:
+    """Best-effort POST to a Slack/Discord-compatible incoming webhook (both
+    accept a bare {"text": ...} JSON body). Never raises — a webhook that's
+    unreachable or misconfigured shouldn't take down the poll tick, since
+    nothing downstream depends on it succeeding."""
+    url = settings.kaggle_webhook_url
+    if not url:
+        return
+    try:
+        req = urllib.request.Request(
+            url, data=json.dumps({"text": text}).encode(), method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        urllib.request.urlopen(req, timeout=10).close()
+    except (urllib.error.URLError, OSError):
+        pass
+
+
+def _next_chain_worker(account: Dict[str, Any], just_finished_id: str) -> Optional[str]:
+    """The next worker in *account*'s own list order that's never been
+    pushed at all. Deliberately not "the next one after just_finished_id" —
+    order in the stored list is the only ordering this module has, and
+    skipping straight to "first never-attempted" is simpler and doesn't
+    depend on just_finished_id's position. Never re-chains into a worker
+    that failed before — a chain silently retrying a broken push forever is
+    worse than requiring a human to look at it once."""
+    state = _load_state()
+    for w in account.get("workers", []):
+        if w["worker_id"] == just_finished_id:
+            continue
+        if "status" not in state.get(w["worker_id"], {}):
+            return w["worker_id"]
+    return None
+
+
+def _tick() -> None:
+    data = _load_accounts()
+    state = _load_state()
+    for account in data["accounts"]:
+        for w in account.get("workers", []):
+            worker_id = w["worker_id"]
+            rec = state.get(worker_id, {})
+            if not rec.get("pushed_at") or rec.get("notified_final"):
+                continue  # never pushed, or this transition was already handled
+            try:
+                result = refresh_status(worker_id)
+            except KaggleOpsError:
+                continue
+            new_status = result.get("status")
+            if new_status not in FINAL_STATUSES:
+                continue
+
+            _update_worker_state(worker_id, {"notified_final": True})
+            _send_webhook(f"Kaggle worker '{worker_id}' ({account['name']}) is now {new_status}.")
+
+            if account.get("auto_chain"):
+                next_id = _next_chain_worker(account, worker_id)
+                if next_id:
+                    try:
+                        push(next_id)
+                        _update_worker_state(next_id, {}, event=f"auto-pushed (chained after {worker_id})")
+                    except KaggleOpsError as e:
+                        _update_worker_state(next_id, {}, event=f"auto-push failed: {e}")
+
+
+def _poll_loop() -> None:
+    while True:
+        try:
+            _tick()
+        except Exception:
+            pass  # one bad tick must never kill the whole poller
+        time.sleep(max(30, settings.kaggle_poll_interval_seconds))
+
+
+def ensure_kaggle_worker_started() -> None:
+    global _poller_started
+    with _poller_lock:
+        if _poller_started:
+            return
+        threading.Thread(target=_poll_loop, daemon=True).start()
+        _poller_started = True

@@ -339,18 +339,28 @@
           <div class="view-sub">Push, poll, and pull training notebooks running as Kaggle kernels across multiple accounts.</div>
         </div>
         <div class="job-actions">
+          <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-autorefresh" title="Poll and re-render this tab automatically">Auto-refresh: off</button>
+          <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-notify" title="Browser notification when a worker finishes or errors">Notify: off</button>
+          <button class="btn btn-sm btn-ghost" id="btn-kaggle-export">Export registry</button>
+          <button class="btn btn-sm btn-ghost" id="btn-kaggle-import">Import registry</button>
+          <input type="file" id="kaggle-import-file" accept="application/json" class="hidden" />
           <button class="btn btn-ghost" id="btn-kaggle-push-all">Push all</button>
           <button class="btn btn-ghost" id="btn-kaggle-refresh-all">Refresh all</button>
           <button class="btn btn-ghost" id="btn-kaggle-download-all">Download all finished</button>
         </div>
       </div>
 
+      <div class="compute-summary-strip" id="kaggle-summary-strip"></div>
+
       <div class="panel">
-        <div class="panel-header"><span>Accounts</span><span id="kaggle-account-count"></span></div>
+        <div class="panel-header">
+          <div style="display:flex; gap:8px; align-items:center;"><span>Accounts</span><span id="kaggle-account-count"></span></div>
+          <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-add-account">+ Add account</button>
+        </div>
         <div class="kaggle-grid" id="kaggle-accounts-body">
           <div class="empty-state">Loading…</div>
         </div>
-        <div class="scheduler-add-form" style="padding:12px;">
+        <div class="scheduler-add-form hidden" id="kaggle-add-account-form" style="padding:12px;">
           <div class="field grow">
             <label>Account name</label>
             <input class="text-input grow" id="kaggle-new-account-name" placeholder="e.g. teammate-a" />
@@ -372,11 +382,14 @@
       </div>
 
       <div class="panel" style="margin-top:16px;">
-        <div class="panel-header"><span>Workers</span><span id="kaggle-worker-count"></span></div>
+        <div class="panel-header">
+          <div style="display:flex; gap:8px; align-items:center;"><span>Workers</span><span id="kaggle-worker-count"></span></div>
+          <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-add-worker">+ Add worker</button>
+        </div>
         <div class="kaggle-grid" id="kaggle-workers-body">
           <div class="empty-state">Loading…</div>
         </div>
-        <div class="scheduler-add-form" style="padding:12px; flex-wrap:wrap;">
+        <div class="scheduler-add-form hidden" id="kaggle-add-worker-form" style="padding:12px; flex-wrap:wrap;">
           <div class="field">
             <label>Account</label>
             <select id="kaggle-new-worker-account"><option value="">— pick an account —</option></select>

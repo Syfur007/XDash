@@ -78,6 +78,8 @@ class Settings:
         self.kaggle_executable = raw.get("kaggle_executable", "kaggle")
         self.kaggle_push_concurrency = max(1, int(raw.get("kaggle_push_concurrency", 3)))
         self.kaggle_default_budget_hours = float(raw.get("kaggle_default_budget_hours", 9.5))
+        self.kaggle_poll_interval_seconds = int(raw.get("kaggle_poll_interval_seconds", 180))
+        self.kaggle_webhook_url = (raw.get("kaggle_webhook_url") or "").strip()
 
         # Runtime state lives inside exp_dashboard/data so it never touches
         # the host repo. state_file is just a session_name -> {config, mode,

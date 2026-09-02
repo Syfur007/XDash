@@ -89,3 +89,17 @@ scheduler_max_queue_size: 200
 kaggle_executable: "kaggle"
 kaggle_push_concurrency: 3        # max concurrent push/status/download calls across accounts
 kaggle_default_budget_hours: 9.5  # session-length guardrail fallback when a worker has none set
+
+# The background poller (backend/kaggle.py's ensure_kaggle_worker_started/
+# _tick) checks any pushed-but-not-yet-final worker on this cadence, in
+# seconds — it's what fires the webhook below and drives chained auto-push
+# even when nobody has the Kaggle tab open. Floored at 30s regardless of
+# what's set here, to stay well clear of Kaggle's own API rate limits.
+kaggle_poll_interval_seconds: 180
+
+# Optional Slack/Discord-compatible incoming-webhook URL. Left blank,
+# nothing is sent. When set, the poller POSTs a plain {"text": "..."} body
+# whenever a pushed worker reaches a final status (complete/error/
+# cancelAcknowledged) — best-effort, a failed webhook call never affects
+# anything else the poller does.
+kaggle_webhook_url: ""

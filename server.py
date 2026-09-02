@@ -40,6 +40,7 @@ APP_DIR = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=str(APP_DIR / "static"), static_url_path="")
 
 scheduler.ensure_worker_started()
+kaggle_ops.ensure_kaggle_worker_started()
 
 
 def err(message, code=400):
@@ -413,11 +414,11 @@ def api_kaggle_remove_credential(name, kind):
         return err(str(e), 400)
 
 
-@app.route("/api/kaggle/accounts/<name>/username", methods=["POST"])
-def api_kaggle_rename_username(name):
+@app.route("/api/kaggle/accounts/<name>/rename", methods=["POST"])
+def api_kaggle_rename_account(name):
     body = request.get_json(silent=True) or {}
     try:
-        return jsonify(kaggle_ops.rename_kaggle_username(name, body.get("kaggle_username", "")))
+        return jsonify(kaggle_ops.rename_account(name, body.get("name", "")))
     except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
 
@@ -490,6 +491,29 @@ def api_kaggle_refresh_all():
 @app.route("/api/kaggle/download_all", methods=["POST"])
 def api_kaggle_download_all():
     return jsonify({"results": kaggle_ops.download_all()})
+
+
+@app.route("/api/kaggle/accounts/<name>/auto_chain", methods=["POST"])
+def api_kaggle_set_auto_chain(name):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(kaggle_ops.set_auto_chain(name, bool(body.get("enabled"))))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/kaggle/registry/export", methods=["GET"])
+def api_kaggle_export_registry():
+    return jsonify(kaggle_ops.export_registry())
+
+
+@app.route("/api/kaggle/registry/import", methods=["POST"])
+def api_kaggle_import_registry():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(kaggle_ops.import_registry(body))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
 
 
 # --------------------------------------------------------------------------- reports
