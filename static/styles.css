@@ -677,6 +677,11 @@ select, .text-input{
 }
 .kaggle-history-row{ padding:2px 0; color: var(--text-muted); overflow-wrap:anywhere; }
 .kaggle-history-time{ color: var(--text-faint); margin-right:8px; }
+.kaggle-notif-form .checkbox-label{
+  display:flex; align-items:center; gap:6px; font-family: var(--font, inherit); font-size:12px;
+  color: var(--text-muted); text-transform:none; letter-spacing:normal;
+}
+.kaggle-notif-form .checkbox-label input{ width:auto; }
 
 /* ---------------------------------------------------------------- read-only config preview (terminals view) */
 .config-preview{ border:1px solid var(--border-soft); border-radius: var(--radius); background:#0A101F; overflow:hidden; flex-shrink:0; }
@@ -797,6 +802,7 @@ select, .text-input{
   transition: background .15s ease, border-color .15s ease;
 }
 .toggle-switch.on{ background: rgba(52,211,153,0.22); border-color: var(--emerald); }
+.toggle-switch:disabled{ cursor:not-allowed; opacity:0.45; }
 .toggle-knob{
   position:absolute; top:2px; left:2px; width:16px; height:16px; border-radius:50%;
   background: var(--text-faint); transition: left .15s ease, background .15s ease;

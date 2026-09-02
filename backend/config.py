@@ -104,6 +104,14 @@ class Settings:
         self.kaggle_creds_dir = self.state_dir / "kaggle_accounts"
         self.kaggle_creds_dir.mkdir(parents=True, exist_ok=True)
 
+        # Runtime-editable settings for the 5 notification channels (Telegram,
+        # Discord, Slack, email, ntfy.sh) offered alongside the browser
+        # notification toggle — see backend/kaggle.py's "notification
+        # channels" section. Deliberately its own gitignored file, not a
+        # dashboard_config.yaml key, since it's edited from the Kaggle tab UI
+        # at runtime, not at deploy time.
+        self.kaggle_notifications_file = self.state_dir / "kaggle_notifications.json"
+
     def ensure_dirs(self):
         for d in (self.configs_dir, self.logs_dir, self.runs_dir, self.checkpoints_dir, self.plots_dir, self.reports_dir):
             d.mkdir(parents=True, exist_ok=True)

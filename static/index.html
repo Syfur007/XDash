@@ -417,6 +417,16 @@
           <button class="btn btn-primary" id="btn-kaggle-add-worker">Add worker</button>
         </div>
       </div>
+
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-header">
+          <div style="display:flex; gap:8px; align-items:center;"><span>Notifications</span><span id="kaggle-notif-count"></span></div>
+        </div>
+        <div class="view-sub" style="padding:0 14px 10px;">Server-side alerts the background poller sends when a worker finishes or errors — these fire even when nobody has this tab open, on top of the browser notification toggle above.</div>
+        <div class="kaggle-grid" id="kaggle-notif-body">
+          <div class="empty-state">Loading…</div>
+        </div>
+      </div>
     </section>
 
     <!-- ---------------------------------------------------- Reports view -->

@@ -516,6 +516,28 @@ def api_kaggle_import_registry():
         return err(str(e), 400)
 
 
+@app.route("/api/kaggle/notifications", methods=["GET"])
+def api_kaggle_get_notifications():
+    return jsonify(kaggle_ops.get_notification_settings())
+
+
+@app.route("/api/kaggle/notifications/<channel>", methods=["PATCH"])
+def api_kaggle_update_notifications(channel):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(kaggle_ops.update_notification_settings(channel, body))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/kaggle/notifications/<channel>/test", methods=["POST"])
+def api_kaggle_test_notification(channel):
+    try:
+        return jsonify(kaggle_ops.test_notification(channel))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
 # --------------------------------------------------------------------------- reports
 @app.route("/api/reports", methods=["GET"])
 def api_list_reports():
