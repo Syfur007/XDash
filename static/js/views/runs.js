@@ -83,7 +83,8 @@ function renderRunGroups() {
     const label = logging.experiment_name || group.config_hash.slice(0, 12);
     html += `<div class="category">
       <div class="category-label" title="config_hash ${escapeHtml(group.config_hash)}">
-        ${escapeHtml(label)} <span style="color:var(--text-faint);">(${escapeHtml(group.config_hash.slice(0, 7))})</span>
+        <span>${escapeHtml(label)} <span style="color:var(--text-faint);">(${escapeHtml(group.config_hash.slice(0, 7))})</span></span>
+        <span class="run-count">${group.runs.length} run${group.runs.length === 1 ? "" : "s"}</span>
       </div>
       <div class="run-group-grid" data-group-idx="${idx}">${renderSeedFoldGrid(group.runs)}</div>
     </div>`;
@@ -150,6 +151,20 @@ function renderRunDetail(run) {
   actionsEl.innerHTML = `<button class="btn btn-sm btn-ghost" id="btn-copy-resolved-config">Copy resolved config (YAML)</button>`;
   document.getElementById("btn-copy-resolved-config").addEventListener("click", () => copyResolvedConfig(run));
 
+  // A scannable hero row for the handful of fields that matter most at a
+  // glance — the full kv-table below still carries everything, this is
+  // purely a "don't make me read a table for the first 4 facts" shortcut.
+  const heroStats = [
+    ["Status", run.status || "–"],
+    ["Seed", run.seed !== null && run.seed !== undefined ? run.seed : "–"],
+    ["Fold", run.fold === null || run.fold === undefined ? "no CV" : run.fold],
+    ["GPU-hours", run.gpu_hours === null || run.gpu_hours === undefined ? "–" : Number(run.gpu_hours).toFixed(2)],
+    ["Duration", run.start_time && run.end_time ? fmtDuration(run.start_time, run.end_time) : "–"],
+  ];
+  let html = `<div class="entity-stat-row">${heroStats.map(([label, value]) =>
+    `<div class="entity-stat"><div class="entity-stat-label">${escapeHtml(label)}</div><div class="entity-stat-value">${escapeHtml(String(value))}</div></div>`
+  ).join("")}</div>`;
+
   const rows = [
     ["Config hash", run.config_hash],
     ["Seed", run.seed],
@@ -166,17 +181,17 @@ function renderRunDetail(run) {
     ["GPU-hours", run.gpu_hours === null || run.gpu_hours === undefined ? "–" : Number(run.gpu_hours).toFixed(3)],
   ];
 
-  let html = kvRows(rows);
+  html += kvRows(rows);
 
   if (run.error) {
-    html += `<div class="empty-state" style="color:var(--red); text-align:left; padding:10px 12px; border:1px solid rgba(229,72,77,0.35); border-radius:6px; margin:14px 0;">
-      <b>Error</b><br>${escapeHtml(run.error)}
+    html += `<div class="alert-box red">
+      <b>Error</b>${escapeHtml(run.error)}
     </div>`;
   }
 
   if (run.nondeterministic_ops && run.nondeterministic_ops.length) {
-    html += `<div class="empty-state" style="color:var(--red); text-align:left; padding:10px 12px; border:1px solid rgba(229,72,77,0.35); border-radius:6px; margin:14px 0;">
-      <b>Non-deterministic ops recorded</b> — this run is not guaranteed bit-reproducible:<br>
+    html += `<div class="alert-box red">
+      <b>Non-deterministic ops recorded</b> this run is not guaranteed bit-reproducible:<br>
       ${renderNondeterministicOps(run.nondeterministic_ops)}
     </div>`;
   }

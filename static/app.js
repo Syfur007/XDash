@@ -170,6 +170,19 @@ function timeAgo(iso) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
+// startIso..endIso (or ..now if still running) as a compact "1h 5m" string.
+function fmtDuration(startIso, endIso) {
+  if (!startIso) return "";
+  const start = new Date(startIso).getTime();
+  const end = endIso ? new Date(endIso).getTime() : Date.now();
+  const s = Math.max(0, (end - start) / 1000);
+  if (s < 60) return `${Math.floor(s)}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${Math.floor(s % 60)}s`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  return `${h}h ${m}m`;
+}
+
 function escapeHtml(s) {
   return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -1306,13 +1319,29 @@ function renderScheduler() {
   const past = state.schedulerItems.filter((i) => !["running", "cancelling", "pending"].includes(i.status))
     .sort((a, b) => (b.ended_at || "").localeCompare(a.ended_at || ""));
 
+  const fillPct = state.schedulerMaxConcurrent > 0 ? Math.min(100, (running.length / state.schedulerMaxConcurrent) * 100) : 0;
+  document.getElementById("concurrency-bar-fill").style.width = `${fillPct}%`;
+
   document.getElementById("count-running-sched").textContent = running.length;
   document.getElementById("count-pending-sched").textContent = pending.length;
   document.getElementById("count-past-sched").textContent = past.length;
 
+  renderSchedulerSummary(running, pending, past);
   renderSchedulerBucket("scheduler-running-list", running, "Nothing running.");
   renderSchedulerBucket("scheduler-pending-list", pending, "Nothing queued.", true);
   renderSchedulerBucket("scheduler-past-list", past, "No history yet.");
+}
+
+function renderSchedulerSummary(running, pending, past) {
+  const el = document.getElementById("scheduler-summary-strip");
+  if (!state.schedulerItems.length) { el.innerHTML = ""; return; }
+  const completed = past.filter((i) => i.status === "completed").length;
+  const failed = past.filter((i) => i.status === "failed").length;
+  el.innerHTML =
+    `<div class="compute-summary-chip"><b style="color:var(--amber);">${running.length}</b>running of ${state.schedulerMaxConcurrent} slot${state.schedulerMaxConcurrent === 1 ? "" : "s"}</div>` +
+    `<div class="compute-summary-chip"><b>${pending.length}</b>queued</div>` +
+    (completed ? `<div class="compute-summary-chip"><b style="color:var(--teal);">${completed}</b>completed</div>` : "") +
+    (failed ? `<div class="compute-summary-chip"><b style="color:var(--red);">${failed}</b>failed</div>` : "");
 }
 
 function renderSchedulerBucket(containerId, items, emptyText, isPendingBucket) {
@@ -1338,15 +1367,21 @@ function renderSchedulerBucket(containerId, items, emptyText, isPendingBucket) {
   }
 
   items.forEach((item, idx) => {
-    const card = container.querySelector(`.term-card[data-id="${cssEscapeAttr(item.id)}"]`);
+    const card = container.querySelector(`.entity-card[data-id="${cssEscapeAttr(item.id)}"]`);
     if (!card) return;
     const statusClass = SCHED_STATUS_CLASS[item.status] || "unmanaged";
-    const accent = card.querySelector(".term-card-accent");
-    if (accent) accent.className = `term-card-accent ${statusClass}`;
-    const statusEl = card.querySelector(".term-card-status");
-    if (statusEl) { statusEl.className = `term-card-status ${statusClass}`; statusEl.textContent = SCHED_STATUS_LABEL[item.status] || item.status; }
+    const accent = card.querySelector(".entity-card-accent");
+    if (accent) accent.className = `entity-card-accent ${statusClass}`;
+    const statusEl = card.querySelector(".entity-card-status");
+    if (statusEl) { statusEl.className = `entity-card-status ${statusClass}`; statusEl.textContent = SCHED_STATUS_LABEL[item.status] || item.status; }
 
-    const footer = card.querySelector(".term-card-footer");
+    const subEl = card.querySelector(".entity-card-sub");
+    if (subEl) {
+      const newSub = schedulerSubText(item);
+      if (subEl.textContent !== newSub) subEl.textContent = newSub;
+    }
+
+    const footer = card.querySelector(".entity-card-footer");
     if (footer) {
       const existingChip = footer.querySelector(".term-card-metric");
       const m = item.latest_metrics;
@@ -1395,21 +1430,35 @@ function schedulerActionsHtml(item, idx, total, isPendingBucket) {
   return actions;
 }
 
+// The config path/extra-args line, with elapsed time (running) or total
+// duration (finished) appended when timestamps are available — reused by
+// both the initial render and renderSchedulerBucket's incremental patch so
+// the two never drift out of sync on what a card's sub-line should say.
+function schedulerSubText(item) {
+  let sub = `${item.config_path}${item.extra_args ? " · " + item.extra_args : ""}`;
+  if (item.status === "running" || item.status === "cancelling") {
+    if (item.started_at) sub += ` · ${fmtDuration(item.started_at)} elapsed`;
+  } else if (item.started_at && item.ended_at) {
+    sub += ` · ran ${fmtDuration(item.started_at, item.ended_at)}`;
+  }
+  return sub;
+}
+
 function schedulerCardHtml(item, idx, total, isPendingBucket) {
   const statusClass = SCHED_STATUS_CLASS[item.status] || "unmanaged";
   const modeTag = `<span class="mode-tag mode-${item.mode === "eval" ? "eval" : "train"}">${item.mode}</span>`;
   const chainTag = item.depends_on ? `<span class="mode-tag chain-tag">chained</span>` : "";
-  const sub = `${item.config_path}${item.extra_args ? " · " + item.extra_args : ""}`;
+  const sub = schedulerSubText(item);
   const m = item.latest_metrics;
   const metricChip = m ? `<span class="term-card-metric">epoch ${m.epoch}${m.metrics && m.metrics["Val Dice"] !== undefined ? " · dice " + fmtNum(m.metrics["Val Dice"]) : ""}</span>` : "";
 
-  return `<div class="term-card" data-id="${escapeHtml(item.id)}">
-    <div class="term-card-accent ${statusClass}"></div>
-    <div class="term-card-body">
-      <div class="term-card-title" title="${escapeHtml(item.experiment_name || item.config_path)}">${escapeHtml(item.experiment_name || item.config_path)}${modeTag}${chainTag}</div>
-      <div class="term-card-sub" title="${escapeHtml(sub)}">${escapeHtml(sub)}</div>
-      <div class="term-card-footer">
-        <span class="term-card-status ${statusClass}">${SCHED_STATUS_LABEL[item.status] || item.status}</span>
+  return `<div class="entity-card" data-id="${escapeHtml(item.id)}">
+    <div class="entity-card-accent ${statusClass}"></div>
+    <div class="entity-card-body">
+      <div class="entity-card-title" title="${escapeHtml(item.experiment_name || item.config_path)}">${escapeHtml(item.experiment_name || item.config_path)}${modeTag}${chainTag}</div>
+      <div class="entity-card-sub" title="${escapeHtml(sub)}">${escapeHtml(sub)}</div>
+      <div class="entity-card-footer">
+        <span class="entity-card-status ${statusClass}">${SCHED_STATUS_LABEL[item.status] || item.status}</span>
         ${metricChip}
         <div class="job-actions">${schedulerActionsHtml(item, idx, total, isPendingBucket)}</div>
       </div>

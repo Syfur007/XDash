@@ -389,6 +389,16 @@ select, .text-input{
    height the shared calc(100vh - 150px) doesn't budget for — a scoped
    override, not a change to the shared rule every other view relies on. */
 .runs-layout{ height: calc(100vh - 210px); }
+/* Scoped to the Runs tab's own tree (#run-group-list-body) rather than the
+   bare .category rule above, which the Configs tab's sidebar shares — this
+   keeps the redesign to Scheduler/Runs without touching Configs' look. */
+#run-group-list-body .category{
+  margin:6px 6px 12px; padding:9px 9px 10px; border-radius: var(--radius); border:1px solid transparent;
+  transition: background .12s ease, border-color .12s ease;
+}
+#run-group-list-body .category:hover{ background: var(--surface-2); border-color: var(--border-soft); }
+#run-group-list-body .category-label{ padding:0 0 8px; }
+#run-group-list-body .category-label .run-count{ margin-left:auto; color: var(--text-faint); font-weight:400; text-transform:none; letter-spacing:0; }
 .compute-summary-strip{ display:flex; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
 .compute-summary-strip:empty{ margin-bottom:0; }
 .compute-summary-chip{
@@ -683,6 +693,61 @@ select, .text-input{
 }
 .kaggle-notif-form .checkbox-label input{ width:auto; }
 
+/* ---------------------------------------------------------------- shared entity-card grid (Scheduler, Runs)
+   Same visual language as the Kaggle tab's card grid above (top accent bar,
+   rounded-lg corners, hover-lift) but its own class names — Kaggle's markup
+   stays on .kaggle-*, untouched, so this redesign can't regress it. Status
+   modifiers are named after the actual status strings (running/completed/
+   interrupted/failed/stopped/unmanaged), mirroring .term-card-accent's own
+   convention, so callers can plug SCHED_STATUS_CLASS's output straight in. */
+.entity-grid{
+  display:grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap:12px;
+}
+.entity-list{ display:flex; flex-direction:column; gap:10px; }
+.entity-card{
+  display:flex; flex-direction:column;
+  border-radius: var(--radius-lg); border:1px solid var(--border-soft); background: var(--surface-2);
+  overflow:hidden; transition: border-color .12s ease, background .12s ease, box-shadow .12s ease, transform .12s ease;
+}
+.entity-card:hover{ border-color: var(--border); background: var(--surface-3); box-shadow: var(--shadow-panel); transform: translateY(-1px); }
+.entity-card-accent{ height:3px; background: var(--slate); }
+.entity-card-accent.running{ background: var(--amber); }
+.entity-card-accent.completed{ background: var(--teal); }
+.entity-card-accent.interrupted, .entity-card-accent.failed, .entity-card-accent.stopped{ background: var(--red); }
+.entity-card-accent.unmanaged{ background: var(--slate); }
+.entity-card-body{ flex:1; padding:13px 14px; display:flex; flex-direction:column; gap:9px; }
+.entity-card-header{ display:flex; align-items:flex-start; justify-content:space-between; gap:8px; }
+.entity-card-title{ font-weight:700; font-size:14px; color: var(--text); overflow-wrap:anywhere; word-break:break-word; }
+.entity-card-title .mode-tag{ font-weight:600; vertical-align:1px; }
+.entity-card-sub{ font-family: var(--mono); font-size:10.5px; color: var(--text-faint); overflow-wrap:anywhere; margin-top:1px; }
+.entity-card-footer{
+  display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:auto; padding-top:10px;
+  border-top:1px solid var(--border-soft);
+}
+.entity-card-status{
+  font-family: var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:0.5px; font-weight:700;
+}
+.entity-card-status.running{ color: var(--amber); }
+.entity-card-status.completed{ color: var(--teal); }
+.entity-card-status.interrupted, .entity-card-status.failed, .entity-card-status.stopped{ color: var(--red); }
+.entity-card-status.unmanaged{ color: var(--slate); }
+.entity-stat-row{ display:flex; flex-wrap:wrap; gap:8px; }
+.entity-stat{
+  display:flex; flex-direction:column; gap:2px; padding:6px 10px; border-radius: var(--radius);
+  background: var(--surface-3); border:1px solid var(--border-soft); min-width:80px; flex:1;
+}
+.entity-stat-label{ font-size:9.5px; text-transform:uppercase; letter-spacing:0.4px; color: var(--text-faint); font-family: var(--mono); }
+.entity-stat-value{ font-size:13.5px; font-weight:700; color: var(--text); font-family: var(--mono); }
+
+.alert-box{
+  font-size:11.5px; text-align:left; padding:10px 12px; border-radius: var(--radius);
+  margin:14px 0; line-height:1.55; overflow-wrap:anywhere;
+}
+.alert-box b{ display:block; margin-bottom:3px; }
+.alert-box.red{ color: var(--red); border:1px solid rgba(229,72,77,0.35); background: rgba(229,72,77,0.06); }
+.alert-box.amber{ color: var(--amber); border:1px solid rgba(245,166,35,0.35); background: rgba(245,166,35,0.06); }
+
 /* ---------------------------------------------------------------- read-only config preview (terminals view) */
 .config-preview{ border:1px solid var(--border-soft); border-radius: var(--radius); background:#0A101F; overflow:hidden; flex-shrink:0; }
 .config-preview-header{
@@ -731,9 +796,12 @@ select, .text-input{
   font-family: var(--mono); font-size:11px; font-weight:700; color: var(--text);
   background: var(--surface-3); border:1px solid var(--border); border-radius:999px; padding:1px 9px;
 }
-.scheduler-list{ display:flex; flex-direction:column; gap:0; }
-.scheduler-list .term-card{ cursor:default; }
-.scheduler-list .term-card:hover{ border-color: var(--border-soft); }
+.entity-list .entity-card{ cursor:default; }
+.concurrency-bar-track{
+  width:100%; height:5px; border-radius:999px; background: var(--surface-3);
+  border:1px solid var(--border-soft); overflow:hidden; margin-top:10px;
+}
+.concurrency-bar-fill{ height:100%; background: var(--amber); border-radius:999px; transition: width .2s ease; }
 .reorder-btns{ display:flex; flex-direction:column; gap:1px; margin-right:2px; }
 .reorder-btns button{
   width:20px; height:16px; border:none; background: var(--surface-3); color: var(--text-faint);

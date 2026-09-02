@@ -282,6 +282,8 @@
         <button class="btn btn-ghost" id="btn-refresh-scheduler">Refresh</button>
       </div>
 
+      <div class="compute-summary-strip" id="scheduler-summary-strip"></div>
+
       <div class="panel">
         <div class="panel-header"><span>Concurrency</span></div>
         <div class="concurrency-row">
@@ -291,6 +293,9 @@
             <span class="stepper-value" id="concurrency-value">1</span>
             <button class="stepper-btn" id="btn-concurrency-plus">+</button>
           </div>
+        </div>
+        <div style="padding:0 16px 14px;">
+          <div class="concurrency-bar-track"><div class="concurrency-bar-fill" id="concurrency-bar-fill" style="width:0%;"></div></div>
         </div>
       </div>
 
@@ -319,15 +324,15 @@
 
       <div class="scheduler-section">
         <h3 class="scheduler-section-title">Running <span class="count-badge" id="count-running-sched">0</span></h3>
-        <div id="scheduler-running-list" class="scheduler-list"><div class="empty-state">Nothing running.</div></div>
+        <div id="scheduler-running-list" class="entity-grid"><div class="empty-state">Nothing running.</div></div>
       </div>
       <div class="scheduler-section">
         <h3 class="scheduler-section-title">Scheduled <span class="count-badge" id="count-pending-sched">0</span></h3>
-        <div id="scheduler-pending-list" class="scheduler-list"><div class="empty-state">Nothing queued.</div></div>
+        <div id="scheduler-pending-list" class="entity-list"><div class="empty-state">Nothing queued.</div></div>
       </div>
       <div class="scheduler-section">
         <h3 class="scheduler-section-title">Past <span class="count-badge" id="count-past-sched">0</span></h3>
-        <div id="scheduler-past-list" class="scheduler-list"><div class="empty-state">No history yet.</div></div>
+        <div id="scheduler-past-list" class="entity-grid"><div class="empty-state">No history yet.</div></div>
       </div>
     </section>
 
@@ -640,10 +645,10 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/yaml/yaml.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
-<script src="app.js?v=5"></script>
+<script src="app.js?v=6"></script>
 <script src="js/components/badge.js?v=1"></script>
 <script src="js/components/heatmap-grid.js?v=1"></script>
-<script src="js/views/runs.js?v=1"></script>
+<script src="js/views/runs.js?v=2"></script>
 <script src="js/views/data.js?v=1"></script>
 <script src="js/views/kaggle.js?v=1"></script>
 <script src="js/palette.js?v=1"></script>
