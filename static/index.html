@@ -210,7 +210,13 @@
           <div class="view-title">Runs</div>
           <div class="view-sub">Runs recorded by the orchestration layer under <span style="font-family:var(--mono)">artifacts/</span>, grouped by config hash — each group's grid is one cell per seed/fold combination.</div>
         </div>
-        <button class="btn btn-ghost" id="btn-refresh-runs">Refresh</button>
+        <div class="job-actions">
+          <button class="btn btn-sm btn-ghost" id="btn-run-compare-mode" title="Click cells to select 2+ runs, then compare them side by side">Compare runs</button>
+          <button class="btn btn-primary hidden" id="btn-compare-runs">Compare selected (<span id="run-compare-count">0</span>)</button>
+          <button class="btn btn-sm btn-ghost" id="btn-export-runs-csv">Export CSV</button>
+          <button class="btn btn-sm btn-ghost" id="btn-export-runs-json">Export JSON</button>
+          <button class="btn btn-ghost" id="btn-refresh-runs">Refresh</button>
+        </div>
       </div>
 
       <div class="compute-summary-strip" id="compute-summary-strip"></div>
@@ -218,6 +224,7 @@
       <div class="configs-layout runs-layout">
         <div class="panel config-tree">
           <div class="panel-header"><span>Config groups</span><span id="run-group-count"></span></div>
+          <div class="panel-filter"><input class="text-input" id="run-group-filter" placeholder="Filter by name, hash, status, commit…" autocomplete="off" /></div>
           <div class="config-tree-body" id="run-group-list-body">
             <div class="empty-state">Loading…</div>
           </div>
@@ -232,7 +239,7 @@
             <div class="job-actions" id="run-detail-actions"></div>
           </div>
           <div class="editor-body" id="run-detail-body" style="overflow:auto; display:block; padding:20px;">
-            <div class="empty-state">Select a cell in a config group's grid on the left to see that run's manifest details.</div>
+            <div class="empty-state">Select a cell in a config group's grid on the left to see that run's manifest details, or click "Compare runs" to select several at once.</div>
           </div>
         </div>
       </div>
@@ -279,7 +286,11 @@
           <div class="view-title">Scheduler</div>
           <div class="view-sub">Queue up training/eval runs — they launch automatically as slots free up, even overnight.</div>
         </div>
-        <button class="btn btn-ghost" id="btn-refresh-scheduler">Refresh</button>
+        <div class="job-actions">
+          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-pause" title="Pause to stop new items launching — already-running items keep going">Queue: running</button>
+          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-notify" title="Send a notification (via the channels configured in the Kaggle tab) when a scheduled item finishes or fails">Notify on finish: off</button>
+          <button class="btn btn-ghost" id="btn-refresh-scheduler">Refresh</button>
+        </div>
       </div>
 
       <div class="compute-summary-strip" id="scheduler-summary-strip"></div>
@@ -300,7 +311,10 @@
       </div>
 
       <div class="panel" style="margin-top:16px;">
-        <div class="panel-header"><span>Add to schedule</span></div>
+        <div class="panel-header">
+          <span>Add to schedule</span>
+          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-more">More ways to add</button>
+        </div>
         <div class="scheduler-add-form">
           <div class="field grow">
             <label>Config</label>
@@ -319,6 +333,18 @@
             <input class="text-input grow" id="scheduler-extra-args" placeholder="--epochs 10 --lr 0.0005" />
           </div>
           <button class="btn btn-primary" id="btn-schedule-add">Add to schedule</button>
+          <button class="btn btn-sm btn-ghost" id="btn-schedule-save-template" title="Save the fields above as a reusable template">Save as template</button>
+        </div>
+        <div class="hidden" id="scheduler-more-panel">
+          <div class="scheduler-add-form" style="padding-top:0; border-top:1px dashed var(--border-soft);">
+            <div class="field grow">
+              <label>Bulk add — every config in a category</label>
+              <select id="scheduler-bulk-category"><option value="">— pick a category —</option></select>
+            </div>
+            <button class="btn btn-ghost" id="btn-scheduler-bulk-add">Add all in category</button>
+          </div>
+          <div class="view-sub" style="padding:4px 16px 0;">Saved templates</div>
+          <div id="scheduler-templates-body" class="entity-list" style="padding:10px 16px 16px;"></div>
         </div>
       </div>
 
@@ -327,11 +353,11 @@
         <div id="scheduler-running-list" class="entity-grid"><div class="empty-state">Nothing running.</div></div>
       </div>
       <div class="scheduler-section">
-        <h3 class="scheduler-section-title">Scheduled <span class="count-badge" id="count-pending-sched">0</span></h3>
+        <h3 class="scheduler-section-title">Scheduled <span class="count-badge" id="count-pending-sched">0</span> <span class="bulk-bar" id="scheduler-pending-bulk-bar"></span></h3>
         <div id="scheduler-pending-list" class="entity-list"><div class="empty-state">Nothing queued.</div></div>
       </div>
       <div class="scheduler-section">
-        <h3 class="scheduler-section-title">Past <span class="count-badge" id="count-past-sched">0</span></h3>
+        <h3 class="scheduler-section-title">Past <span class="count-badge" id="count-past-sched">0</span> <span class="bulk-bar" id="scheduler-past-bulk-bar"></span></h3>
         <div id="scheduler-past-list" class="entity-grid"><div class="empty-state">No history yet.</div></div>
       </div>
     </section>

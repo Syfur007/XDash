@@ -34,6 +34,8 @@ from backend import ledger
 from backend import bridge
 from backend import datasets_info
 from backend import kaggle as kaggle_ops
+from backend import notifications
+from backend import run_notes
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -145,6 +147,53 @@ def api_ledger_table(table):
         return jsonify({"rows": ledger.list_ledger_rows(table)})
     except ValueError as e:
         return err(str(e), 400)
+
+
+def _run_experiment_name(run: dict) -> str:
+    return ((run.get("resolved_config") or {}).get("logging") or {}).get("experiment_name") or ""
+
+
+@app.route("/api/runs/<run_id>/plots", methods=["GET"])
+def api_run_plots(run_id):
+    run = ledger.get_run(run_id)
+    if run is None:
+        return err(f"No manifest found for run '{run_id}'", 404)
+    experiment_name = _run_experiment_name(run)
+    return jsonify({"experiment_name": experiment_name, "plots": ledger.find_experiment_plots(experiment_name)})
+
+
+@app.route("/api/runs/<run_id>/plots/<filename>", methods=["GET"])
+def api_run_plot_file(run_id, filename):
+    run = ledger.get_run(run_id)
+    if run is None:
+        return err(f"No manifest found for run '{run_id}'", 404)
+    p = ledger.resolve_experiment_plot(_run_experiment_name(run), filename)
+    if p is None:
+        return err("Plot not found", 404)
+    return send_file(p, mimetype="image/png")
+
+
+@app.route("/api/runs/<run_id>/requeue-config", methods=["GET"])
+def api_run_requeue_config(run_id):
+    run = ledger.get_run(run_id)
+    if run is None:
+        return err(f"No manifest found for run '{run_id}'", 404)
+    experiment_name = _run_experiment_name(run)
+    config_path = cfg.find_config_by_experiment_name(experiment_name)
+    if not config_path:
+        return err(f"No config on disk matches experiment '{experiment_name}' anymore", 404)
+    return jsonify({"config_path": config_path})
+
+
+@app.route("/api/runs/notes", methods=["GET"])
+def api_run_notes():
+    return jsonify(run_notes.list_notes())
+
+
+@app.route("/api/runs/<run_id>/note", methods=["PUT"])
+def api_set_run_note(run_id):
+    body = request.get_json(silent=True) or {}
+    return jsonify(run_notes.set_note(run_id, body.get("tag", ""), body.get("note", "")))
 
 
 # --------------------------------------------------------------------------- bridge
@@ -371,6 +420,43 @@ def api_scheduler_max_concurrent():
     return jsonify({"max_concurrent": value})
 
 
+@app.route("/api/scheduler/paused", methods=["POST"])
+def api_scheduler_set_paused():
+    body = request.get_json(silent=True) or {}
+    return jsonify({"paused": scheduler.set_paused(body.get("value", False))})
+
+
+@app.route("/api/scheduler/notify_on_finish", methods=["POST"])
+def api_scheduler_set_notify():
+    body = request.get_json(silent=True) or {}
+    return jsonify({"notify_on_finish": scheduler.set_notify_on_finish(body.get("value", False))})
+
+
+@app.route("/api/scheduler/templates", methods=["GET"])
+def api_scheduler_list_templates():
+    return jsonify({"templates": scheduler.list_templates()})
+
+
+@app.route("/api/scheduler/templates", methods=["POST"])
+def api_scheduler_add_template():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(scheduler.add_template(
+            body.get("name", ""), body.get("config_path", ""), body.get("mode", "train"), body.get("extra_args", ""),
+        ))
+    except FileNotFoundError:
+        return err(f"Config not found: {body.get('config_path')}", 404)
+    except ValueError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/scheduler/templates/<template_id>", methods=["DELETE"])
+def api_scheduler_remove_template(template_id):
+    if not scheduler.remove_template(template_id):
+        return err("Template not found", 404)
+    return jsonify({"removed": True})
+
+
 # --------------------------------------------------------------------------- kaggle
 @app.route("/api/kaggle/accounts", methods=["GET"])
 def api_kaggle_list_accounts():
@@ -516,25 +602,27 @@ def api_kaggle_import_registry():
         return err(str(e), 400)
 
 
-@app.route("/api/kaggle/notifications", methods=["GET"])
-def api_kaggle_get_notifications():
-    return jsonify(kaggle_ops.get_notification_settings())
+# --------------------------------------------------------------------------- notifications
+# Shared by the Kaggle tab and the Scheduler tab — see backend/notifications.py.
+@app.route("/api/notifications", methods=["GET"])
+def api_get_notifications():
+    return jsonify(notifications.get_notification_settings())
 
 
-@app.route("/api/kaggle/notifications/<channel>", methods=["PATCH"])
-def api_kaggle_update_notifications(channel):
+@app.route("/api/notifications/<channel>", methods=["PATCH"])
+def api_update_notifications(channel):
     body = request.get_json(silent=True) or {}
     try:
-        return jsonify(kaggle_ops.update_notification_settings(channel, body))
-    except kaggle_ops.KaggleOpsError as e:
+        return jsonify(notifications.update_notification_settings(channel, body))
+    except notifications.NotificationError as e:
         return err(str(e), 400)
 
 
-@app.route("/api/kaggle/notifications/<channel>/test", methods=["POST"])
-def api_kaggle_test_notification(channel):
+@app.route("/api/notifications/<channel>/test", methods=["POST"])
+def api_test_notification(channel):
     try:
-        return jsonify(kaggle_ops.test_notification(channel))
-    except kaggle_ops.KaggleOpsError as e:
+        return jsonify(notifications.test_notification(channel))
+    except notifications.NotificationError as e:
         return err(str(e), 400)
 
 

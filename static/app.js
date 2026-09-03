@@ -106,6 +106,13 @@ const state = {
   schedulerMaxConcurrent: 1,
   schedulerMaxConcurrentLimit: null,
   schedulerConfigsLoaded: false,
+  schedulerConfigGroups: [],
+  schedulerPaused: false,
+  schedulerNotifyOnFinish: false,
+  schedulerTemplates: [],
+  schedulerTemplatesLoaded: false,
+  schedulerSelectMode: { pending: false, past: false },
+  schedulerSelected: { pending: new Set(), past: new Set() },
 
   pollTimer: null,
 };
@@ -181,6 +188,15 @@ function fmtDuration(startIso, endIso) {
   const h = Math.floor(s / 3600);
   const m = Math.floor((s % 3600) / 60);
   return `${h}h ${m}m`;
+}
+
+// Same idea as fmtDuration but for a raw seconds value rather than two ISO
+// timestamps — used for ETA math, where there's no "end" timestamp yet.
+function fmtSecs(s) {
+  if (!isFinite(s) || s < 0) return "?";
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  return `${(s / 3600).toFixed(1)}h`;
 }
 
 function escapeHtml(s) {
@@ -1281,6 +1297,8 @@ async function loadScheduler() {
   state.schedulerItems = data.items;
   state.schedulerMaxConcurrent = data.max_concurrent;
   state.schedulerMaxConcurrentLimit = data.max_concurrent_limit;
+  state.schedulerPaused = !!data.paused;
+  state.schedulerNotifyOnFinish = !!data.notify_on_finish;
   if (!state.schedulerConfigsLoaded) await populateSchedulerConfigSelect();
   renderScheduler();
 }
@@ -1289,8 +1307,10 @@ async function populateSchedulerConfigSelect() {
   state.schedulerConfigsLoaded = true;
   try {
     const data = await api("/api/configs");
+    state.schedulerConfigGroups = data.groups || [];
     const select = document.getElementById("scheduler-config-select");
-    for (const group of data.groups) {
+    const bulkSelect = document.getElementById("scheduler-bulk-category");
+    for (const group of state.schedulerConfigGroups) {
       const optgroup = document.createElement("optgroup");
       optgroup.label = group.category;
       for (const c of group.configs) {
@@ -1299,8 +1319,20 @@ async function populateSchedulerConfigSelect() {
         optgroup.appendChild(opt);
       }
       select.appendChild(optgroup);
+      if (bulkSelect) {
+        const catOpt = document.createElement("option");
+        catOpt.value = group.category; catOpt.textContent = `${group.category} (${group.configs.length})`;
+        bulkSelect.appendChild(catOpt);
+      }
     }
   } catch (e) {}
+}
+
+// Finds a config's own path by exact path match — used to prefill Add to
+// schedule with a known-good path (retry/duplicate/template already have
+// one), no re-fetch needed since populateSchedulerConfigSelect() cached it.
+function schedulerConfigExists(configPath) {
+  return state.schedulerConfigGroups.some((g) => g.configs.some((c) => c.path === configPath));
 }
 
 function renderScheduler() {
@@ -1326,10 +1358,16 @@ function renderScheduler() {
   document.getElementById("count-pending-sched").textContent = pending.length;
   document.getElementById("count-past-sched").textContent = past.length;
 
+  document.getElementById("btn-scheduler-toggle-pause").textContent = state.schedulerPaused ? "Queue: paused" : "Queue: running";
+  document.getElementById("btn-scheduler-toggle-pause").classList.toggle("btn-danger", state.schedulerPaused);
+  document.getElementById("btn-scheduler-toggle-notify").textContent = `Notify on finish: ${state.schedulerNotifyOnFinish ? "on" : "off"}`;
+
   renderSchedulerSummary(running, pending, past);
   renderSchedulerBucket("scheduler-running-list", running, "Nothing running.");
-  renderSchedulerBucket("scheduler-pending-list", pending, "Nothing queued.", true);
-  renderSchedulerBucket("scheduler-past-list", past, "No history yet.");
+  renderSchedulerBucket("scheduler-pending-list", pending, "Nothing queued.", true, "pending");
+  renderSchedulerBucket("scheduler-past-list", past, "No history yet.", false, "past");
+  renderSchedulerBulkBar("pending", pending);
+  renderSchedulerBulkBar("past", past);
 }
 
 function renderSchedulerSummary(running, pending, past) {
@@ -1344,7 +1382,9 @@ function renderSchedulerSummary(running, pending, past) {
     (failed ? `<div class="compute-summary-chip"><b style="color:var(--red);">${failed}</b>failed</div>` : "");
 }
 
-function renderSchedulerBucket(containerId, items, emptyText, isPendingBucket) {
+// bucketKey is null for Running (no bulk-select there), "pending" or "past"
+// otherwise — drives whether a select-mode checkbox renders on each card.
+function renderSchedulerBucket(containerId, items, emptyText, isPendingBucket, bucketKey) {
   const container = document.getElementById(containerId);
   if (!items.length) {
     container.innerHTML = `<div class="empty-state">${emptyText}</div>`;
@@ -1360,7 +1400,7 @@ function renderSchedulerBucket(containerId, items, emptyText, isPendingBucket) {
     // when items were actually added or removed (or, for the pending
     // bucket, reordered — that changes the id sequence too), not on every
     // 2s poll.
-    container.innerHTML = items.map((item, idx) => schedulerCardHtml(item, idx, items.length, isPendingBucket)).join("");
+    container.innerHTML = items.map((item, idx) => schedulerCardHtml(item, idx, items.length, isPendingBucket, bucketKey)).join("");
     wireSchedulerCardEvents(container);
     state.schedulerBucketIds[containerId] = currentIds;
     return;
@@ -1380,6 +1420,15 @@ function renderSchedulerBucket(containerId, items, emptyText, isPendingBucket) {
       const newSub = schedulerSubText(item);
       if (subEl.textContent !== newSub) subEl.textContent = newSub;
     }
+
+    const progressEl = card.querySelector(".scheduler-progress-cell");
+    if (progressEl) {
+      const newProgress = schedulerProgressHtml(item);
+      if (progressEl.innerHTML !== newProgress) progressEl.innerHTML = newProgress;
+    }
+
+    const logEl = card.querySelector(".scheduler-log-tail");
+    if (item.log_tail && logEl && logEl.textContent !== item.log_tail) logEl.textContent = item.log_tail;
 
     const footer = card.querySelector(".entity-card-footer");
     if (footer) {
@@ -1426,7 +1475,11 @@ function schedulerActionsHtml(item, idx, total, isPendingBucket) {
     actions += `<button class="btn btn-sm btn-danger" data-action="cancel" data-id="${item.id}">Cancel</button>`;
   } else if (item.status !== "cancelling") {
     actions += `<button class="btn btn-sm btn-ghost" data-action="remove" data-id="${item.id}">Clear</button>`;
+    if (item.status === "failed" || item.status === "cancelled") {
+      actions += `<button class="btn btn-sm btn-ghost" data-action="retry" data-id="${item.id}">Retry</button>`;
+    }
   }
+  actions += `<button class="btn-icon" data-action="duplicate" data-id="${item.id}" title="Duplicate — add this same config/mode/args back onto the queue">⧉</button>`;
   return actions;
 }
 
@@ -1444,19 +1497,48 @@ function schedulerSubText(item) {
   return sub;
 }
 
-function schedulerCardHtml(item, idx, total, isPendingBucket) {
+// A thin progress bar + rough ETA — only rendered when the config actually
+// declares training.epochs (see scheduler.py's _total_epochs) and the
+// terminal's log has produced at least one epoch line so far. ETA is a
+// linear extrapolation from elapsed-time-per-epoch-so-far, nothing fancier.
+function schedulerProgressHtml(item) {
+  if (item.status !== "running" && item.status !== "cancelling") return "";
+  const epoch = item.latest_metrics && item.latest_metrics.epoch;
+  if (!epoch || !item.total_epochs) return "";
+  const pct = Math.min(100, (epoch / item.total_epochs) * 100);
+  let title = `Epoch ${epoch} / ${item.total_epochs}`;
+  if (item.started_at) {
+    const elapsedS = Math.max(0, (Date.now() - new Date(item.started_at).getTime()) / 1000);
+    const remaining = Math.max(0, item.total_epochs - epoch) * (elapsedS / epoch);
+    title += ` · ETA ${fmtSecs(remaining)}`;
+  }
+  return `<div class="concurrency-bar-track" title="${escapeHtml(title)}"><div class="concurrency-bar-fill" style="width:${pct.toFixed(1)}%;"></div></div>`;
+}
+
+function schedulerCardHtml(item, idx, total, isPendingBucket, bucketKey) {
   const statusClass = SCHED_STATUS_CLASS[item.status] || "unmanaged";
   const modeTag = `<span class="mode-tag mode-${item.mode === "eval" ? "eval" : "train"}">${item.mode}</span>`;
   const chainTag = item.depends_on ? `<span class="mode-tag chain-tag">chained</span>` : "";
   const sub = schedulerSubText(item);
   const m = item.latest_metrics;
   const metricChip = m ? `<span class="term-card-metric">epoch ${m.epoch}${m.metrics && m.metrics["Val Dice"] !== undefined ? " · dice " + fmtNum(m.metrics["Val Dice"]) : ""}</span>` : "";
+  const checkboxHtml = bucketKey && state.schedulerSelectMode[bucketKey]
+    ? `<input type="checkbox" class="scheduler-select-checkbox" data-action="toggle-select" data-bucket="${bucketKey}" data-id="${item.id}" ${state.schedulerSelected[bucketKey].has(item.id) ? "checked" : ""} />`
+    : "";
+  const logTailHtml = item.log_tail ? `<pre class="scheduler-log-tail">${escapeHtml(item.log_tail)}</pre>` : "";
 
   return `<div class="entity-card" data-id="${escapeHtml(item.id)}">
     <div class="entity-card-accent ${statusClass}"></div>
     <div class="entity-card-body">
-      <div class="entity-card-title" title="${escapeHtml(item.experiment_name || item.config_path)}">${escapeHtml(item.experiment_name || item.config_path)}${modeTag}${chainTag}</div>
-      <div class="entity-card-sub" title="${escapeHtml(sub)}">${escapeHtml(sub)}</div>
+      <div style="display:flex; align-items:flex-start; gap:8px;">
+        ${checkboxHtml}
+        <div style="flex:1; min-width:0;">
+          <div class="entity-card-title" title="${escapeHtml(item.experiment_name || item.config_path)}">${escapeHtml(item.experiment_name || item.config_path)}${modeTag}${chainTag}</div>
+          <div class="entity-card-sub" title="${escapeHtml(sub)}">${escapeHtml(sub)}</div>
+        </div>
+      </div>
+      <div class="scheduler-progress-cell">${schedulerProgressHtml(item)}</div>
+      ${logTailHtml}
       <div class="entity-card-footer">
         <span class="entity-card-status ${statusClass}">${SCHED_STATUS_LABEL[item.status] || item.status}</span>
         ${metricChip}
@@ -1476,7 +1558,12 @@ function wireSchedulerCardEvents(container) {
       else if (action === "cancel") cancelSchedulerItem(id);
       else if (action === "move-up") moveSchedulerItem(id, -1);
       else if (action === "move-down") moveSchedulerItem(id, 1);
+      else if (action === "retry") retrySchedulerItem(id);
+      else if (action === "duplicate") duplicateSchedulerItem(id);
     });
+  });
+  container.querySelectorAll('input[data-action="toggle-select"]').forEach((el) => {
+    el.addEventListener("change", () => toggleSchedulerItemSelected(el.dataset.bucket, el.dataset.id, el.checked));
   });
 }
 
@@ -1495,6 +1582,31 @@ async function addSchedulerItem() {
   }
 }
 
+// Shared by Retry, Duplicate, "Use template", and requeuing a run from the
+// Runs tab — every one of those is just "add_item with a known-good
+// (config_path, mode, extra_args) tuple" under a different trigger.
+async function quickAddSchedulerItem(config_path, mode, extra_args, okLabel) {
+  try {
+    await api("/api/scheduler/items", { method: "POST", body: JSON.stringify({ config_path, mode, extra_args }) });
+    toast(okLabel || "Added to schedule", "ok");
+    loadScheduler();
+  } catch (e) {
+    toast("Couldn't schedule: " + e.message, "err");
+  }
+}
+
+function retrySchedulerItem(id) {
+  const item = state.schedulerItems.find((i) => i.id === id);
+  if (!item) return;
+  quickAddSchedulerItem(item.config_path, item.mode, item.extra_args, `Re-queued '${item.experiment_name || item.config_path}'`);
+}
+
+function duplicateSchedulerItem(id) {
+  const item = state.schedulerItems.find((i) => i.id === id);
+  if (!item) return;
+  quickAddSchedulerItem(item.config_path, item.mode, item.extra_args, `Cloned '${item.experiment_name || item.config_path}' onto the queue`);
+}
+
 async function removeSchedulerItem(id) {
   try { await api(`/api/scheduler/items/${encodeURIComponent(id)}`, { method: "DELETE" }); loadScheduler(); }
   catch (e) { toast("Couldn't remove: " + e.message, "err"); }
@@ -1505,6 +1617,191 @@ async function cancelSchedulerItem(id) {
   if (!confirmed) return;
   try { await api(`/api/scheduler/items/${encodeURIComponent(id)}/cancel`, { method: "POST" }); toast("Cancelling…", "ok"); loadScheduler(); }
   catch (e) { toast("Couldn't cancel: " + e.message, "err"); }
+}
+
+// ------------------------------------------------------------- bulk select (Scheduled/Past)
+function renderSchedulerBulkBar(bucketKey) {
+  const el = document.getElementById(`scheduler-${bucketKey}-bulk-bar`);
+  if (!el) return;
+  const items = bucketKey === "pending"
+    ? state.schedulerItems.filter((i) => i.status === "pending")
+    : state.schedulerItems.filter((i) => !["running", "cancelling", "pending"].includes(i.status));
+  if (!items.length) { el.innerHTML = ""; return; }
+
+  const selectMode = state.schedulerSelectMode[bucketKey];
+  const selectedCount = state.schedulerSelected[bucketKey].size;
+  el.innerHTML = selectMode
+    ? `<button class="btn btn-sm btn-ghost" data-bulk="toggle" data-bucket="${bucketKey}">Cancel select</button>
+       <span style="font-family:var(--mono); font-size:11px; color:var(--text-faint);">${selectedCount} selected</span>
+       <button class="btn btn-sm btn-danger" data-bulk="remove" data-bucket="${bucketKey}" ${selectedCount ? "" : "disabled"}>Remove selected</button>`
+    : `<button class="btn btn-sm btn-ghost" data-bulk="toggle" data-bucket="${bucketKey}">Select</button>`;
+
+  el.querySelectorAll("button[data-bulk]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (btn.dataset.bulk === "toggle") toggleSchedulerSelectMode(btn.dataset.bucket);
+      else if (btn.dataset.bulk === "remove") bulkRemoveSchedulerSelected(btn.dataset.bucket);
+    });
+  });
+}
+
+function toggleSchedulerSelectMode(bucketKey) {
+  state.schedulerSelectMode[bucketKey] = !state.schedulerSelectMode[bucketKey];
+  state.schedulerSelected[bucketKey].clear();
+  state.schedulerBucketIds[`scheduler-${bucketKey}-list`] = null; // force a structural rebuild so checkboxes (dis)appear
+  renderScheduler();
+}
+
+function toggleSchedulerItemSelected(bucketKey, id, checked) {
+  if (checked) state.schedulerSelected[bucketKey].add(id);
+  else state.schedulerSelected[bucketKey].delete(id);
+  renderSchedulerBulkBar(bucketKey);
+}
+
+async function bulkRemoveSchedulerSelected(bucketKey) {
+  const ids = Array.from(state.schedulerSelected[bucketKey]);
+  if (!ids.length) return;
+  const confirmed = await showConfirm(
+    `Remove ${ids.length} item${ids.length === 1 ? "" : "s"}?`,
+    "This clears them from the scheduler list. A still-running item is cancelled first."
+  );
+  if (!confirmed) return;
+  const results = await Promise.allSettled(ids.map((id) => api(`/api/scheduler/items/${encodeURIComponent(id)}`, { method: "DELETE" })));
+  const failed = results.filter((r) => r.status === "rejected").length;
+  state.schedulerSelected[bucketKey].clear();
+  state.schedulerSelectMode[bucketKey] = false;
+  toast(
+    failed ? `Removed ${ids.length - failed} of ${ids.length} (${failed} failed)` : `Removed ${ids.length} item${ids.length === 1 ? "" : "s"}`,
+    failed ? "err" : "ok"
+  );
+  loadScheduler();
+}
+
+// ------------------------------------------------------------- pause / notify-on-finish
+async function toggleSchedulerPaused() {
+  try {
+    const res = await api("/api/scheduler/paused", { method: "POST", body: JSON.stringify({ value: !state.schedulerPaused }) });
+    state.schedulerPaused = res.paused;
+    renderScheduler();
+    toast(state.schedulerPaused ? "Queue paused — nothing new will launch until resumed" : "Queue resumed", "ok");
+  } catch (e) {
+    toast("Couldn't update: " + e.message, "err");
+  }
+}
+
+async function toggleSchedulerNotify() {
+  try {
+    const res = await api("/api/scheduler/notify_on_finish", { method: "POST", body: JSON.stringify({ value: !state.schedulerNotifyOnFinish }) });
+    state.schedulerNotifyOnFinish = res.notify_on_finish;
+    renderScheduler();
+  } catch (e) {
+    toast("Couldn't update: " + e.message, "err");
+  }
+}
+
+// ------------------------------------------------------------- templates
+async function loadSchedulerTemplates() {
+  try {
+    const data = await api("/api/scheduler/templates");
+    state.schedulerTemplates = data.templates || [];
+  } catch (e) {
+    state.schedulerTemplates = [];
+  }
+  renderSchedulerTemplates();
+}
+
+function renderSchedulerTemplates() {
+  const el = document.getElementById("scheduler-templates-body");
+  if (!el) return;
+  if (!state.schedulerTemplates.length) {
+    el.innerHTML = `<div class="empty-state" style="height:auto; padding:16px 0;">No saved templates yet — fill the form above and click "Save as template".</div>`;
+    return;
+  }
+  el.innerHTML = state.schedulerTemplates.map((t) => `
+    <div class="entity-card">
+      <div class="entity-card-accent"></div>
+      <div class="entity-card-body" style="flex-direction:row; align-items:center; gap:10px; padding:10px 13px;">
+        <div style="flex:1; min-width:0;">
+          <div class="entity-card-title" style="font-size:13px;">${escapeHtml(t.name)} <span class="mode-tag mode-${t.mode === "eval" ? "eval" : "train"}">${t.mode}</span></div>
+          <div class="entity-card-sub">${escapeHtml(t.config_path)}${t.extra_args ? " · " + escapeHtml(t.extra_args) : ""}</div>
+        </div>
+        <button class="btn btn-sm btn-primary" data-tpl-action="use" data-id="${t.id}">Use</button>
+        <button class="btn-icon" data-tpl-action="delete" data-id="${t.id}" title="Delete template">✕</button>
+      </div>
+    </div>`).join("");
+  el.querySelectorAll("button[data-tpl-action]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const t = state.schedulerTemplates.find((x) => x.id === btn.dataset.id);
+      if (!t) return;
+      if (btn.dataset.tplAction === "use") quickAddSchedulerItem(t.config_path, t.mode, t.extra_args, `Added '${t.name}' to the queue`);
+      else deleteSchedulerTemplate(t.id);
+    });
+  });
+}
+
+async function saveCurrentAsTemplate() {
+  const config_path = document.getElementById("scheduler-config-select").value;
+  const mode = document.getElementById("scheduler-mode-select").value;
+  const extra_args = document.getElementById("scheduler-extra-args").value.trim();
+  if (!config_path) { toast("Pick a config first", "err"); return; }
+  const name = window.prompt("Name this template:", "");
+  if (!name) return;
+  try {
+    await api("/api/scheduler/templates", { method: "POST", body: JSON.stringify({ name, config_path, mode, extra_args }) });
+    toast(`Saved template '${name}'`, "ok");
+    loadSchedulerTemplates();
+  } catch (e) {
+    toast("Couldn't save template: " + e.message, "err");
+  }
+}
+
+async function deleteSchedulerTemplate(id) {
+  try {
+    await api(`/api/scheduler/templates/${encodeURIComponent(id)}`, { method: "DELETE" });
+    loadSchedulerTemplates();
+  } catch (e) {
+    toast("Couldn't delete template: " + e.message, "err");
+  }
+}
+
+// ------------------------------------------------------------- bulk add by category
+async function bulkAddCategory() {
+  const category = document.getElementById("scheduler-bulk-category").value;
+  const mode = document.getElementById("scheduler-mode-select").value;
+  const extra_args = document.getElementById("scheduler-extra-args").value.trim();
+  if (!category) { toast("Pick a category first", "err"); return; }
+  const group = state.schedulerConfigGroups.find((g) => g.category === category);
+  if (!group || !group.configs.length) { toast("That category has no configs", "err"); return; }
+  const confirmed = await showConfirm(
+    `Add ${group.configs.length} configs to the queue?`,
+    `Every config in "${category}" is added as its own ${mode} item${extra_args ? ` with args "${extra_args}"` : ""}.`
+  );
+  if (!confirmed) return;
+  let added = 0, failed = 0;
+  for (const c of group.configs) {
+    try {
+      await api("/api/scheduler/items", { method: "POST", body: JSON.stringify({ config_path: c.path, mode, extra_args }) });
+      added++;
+    } catch (e) {
+      failed++;
+    }
+  }
+  toast(
+    failed ? `Added ${added} of ${group.configs.length} (${failed} failed — queue limit reached?)` : `Added ${added} configs from "${category}"`,
+    failed ? "err" : "ok"
+  );
+  loadScheduler();
+}
+
+function toggleSchedulerMorePanel() {
+  const panel = document.getElementById("scheduler-more-panel");
+  const btn = document.getElementById("btn-scheduler-toggle-more");
+  const opening = panel.classList.contains("hidden");
+  panel.classList.toggle("hidden");
+  btn.textContent = opening ? "Hide" : "More ways to add";
+  if (opening && !state.schedulerTemplatesLoaded) {
+    state.schedulerTemplatesLoaded = true;
+    loadSchedulerTemplates();
+  }
 }
 
 async function moveSchedulerItem(id, direction) {
@@ -2127,6 +2424,11 @@ function initButtons() {
   document.getElementById("btn-schedule-add").addEventListener("click", addSchedulerItem);
   document.getElementById("btn-concurrency-minus").addEventListener("click", () => updateSchedulerConcurrency(-1));
   document.getElementById("btn-concurrency-plus").addEventListener("click", () => updateSchedulerConcurrency(1));
+  document.getElementById("btn-scheduler-toggle-pause").addEventListener("click", toggleSchedulerPaused);
+  document.getElementById("btn-scheduler-toggle-notify").addEventListener("click", toggleSchedulerNotify);
+  document.getElementById("btn-schedule-save-template").addEventListener("click", saveCurrentAsTemplate);
+  document.getElementById("btn-scheduler-toggle-more").addEventListener("click", toggleSchedulerMorePanel);
+  document.getElementById("btn-scheduler-bulk-add").addEventListener("click", bulkAddCategory);
 
   document.getElementById("btn-refresh-reports").addEventListener("click", loadReports);
   document.getElementById("btn-compare-reports").addEventListener("click", compareReports);

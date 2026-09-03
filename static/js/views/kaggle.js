@@ -20,14 +20,15 @@ state.kaggleLastSeenStatus = {};     // worker_id -> status, so loadKaggle() can
 state.kaggleAutoRefreshTimer = null;
 state.kaggleAutoRefresh = _kaggleGetPref("kaggleAutoRefresh");
 state.kaggleNotify = _kaggleGetPref("kaggleNotify");
-state.kaggleNotifications = {};       // channel -> settings, from GET /api/kaggle/notifications
+state.kaggleNotifications = {};       // channel -> settings, from GET /api/notifications
 state.kaggleNotifEditOpen = new Set(); // channel keys with their edit form open
 
-// The 5 server-side notification channels offered alongside the browser
-// Notification toggle above — sent by the backend's background poller
-// (backend/kaggle.py's _send_notifications), so they fire even when nobody
-// has this tab open. `required` drives the "configured" chip; `secret`
-// fields are masked round-trip (see get_notification_settings()).
+// The 5 server-side notification channels (backend/notifications.py),
+// offered alongside the browser Notification toggle above — sent by the
+// Kaggle background poller (and, if enabled, the Scheduler's own tick), so
+// they fire even when nobody has this tab open. `required` drives the
+// "configured" chip; `secret` fields are masked round-trip (see
+// get_notification_settings()).
 const KAGGLE_NOTIF_CHANNELS = [
   {
     key: "telegram", label: "Telegram", icon: "✈️",
@@ -268,7 +269,7 @@ function renderKaggleSparkline(history) {
 // ----------------------------------------------------------- notification channels
 async function loadKaggleNotifications() {
   try {
-    state.kaggleNotifications = await api("/api/kaggle/notifications");
+    state.kaggleNotifications = await api("/api/notifications");
   } catch (e) {
     // Non-critical panel — render whatever we already have rather than
     // blanking the accounts/workers panels' own error state on top of it.
@@ -356,7 +357,7 @@ function renderKaggleNotifForm(c, cfg) {
 }
 
 function toggleKaggleNotifEnabled(channel, enabled) {
-  api(`/api/kaggle/notifications/${channel}`, { method: "PATCH", body: JSON.stringify({ enabled }) })
+  api(`/api/notifications/${channel}`, { method: "PATCH", body: JSON.stringify({ enabled }) })
     .then(() => loadKaggleNotifications())
     .catch((e) => toast(`Couldn't update ${channel}: ${e.message}`, "err"));
 }
@@ -376,7 +377,7 @@ async function saveKaggleNotification(channel) {
     patch[f.key] = f.type === "checkbox" ? el.checked : el.value.trim();
   });
   try {
-    const result = await api(`/api/kaggle/notifications/${channel}`, { method: "PATCH", body: JSON.stringify(patch) });
+    const result = await api(`/api/notifications/${channel}`, { method: "PATCH", body: JSON.stringify(patch) });
     state.kaggleNotifications[channel] = result;
     state.kaggleNotifEditOpen.delete(channel);
     renderKaggleNotifications();
@@ -389,7 +390,7 @@ async function saveKaggleNotification(channel) {
 async function testKaggleNotification(channel) {
   const c = KAGGLE_NOTIF_CHANNELS.find((x) => x.key === channel);
   try {
-    await api(`/api/kaggle/notifications/${channel}/test`, { method: "POST" });
+    await api(`/api/notifications/${channel}/test`, { method: "POST" });
     toast(`Test message sent via ${c.label} — check it arrived`, "ok");
   } catch (e) {
     toast(`${c.label} test failed: ${e.message}`, "err");

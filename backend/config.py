@@ -92,6 +92,7 @@ class Settings:
         self.state_file = self.state_dir / "terminals_state.json"
         self.monitors_file = self.state_dir / "monitors.json"
         self.scheduler_file = self.state_dir / "scheduler.json"
+        self.run_notes_file = self.state_dir / "run_notes.json"
         self.dashboard_log_dir = self.state_dir / "dashboard_logs"
         self.dashboard_log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -105,12 +106,16 @@ class Settings:
         self.kaggle_creds_dir.mkdir(parents=True, exist_ok=True)
 
         # Runtime-editable settings for the 5 notification channels (Telegram,
-        # Discord, Slack, email, ntfy.sh) offered alongside the browser
-        # notification toggle — see backend/kaggle.py's "notification
-        # channels" section. Deliberately its own gitignored file, not a
-        # dashboard_config.yaml key, since it's edited from the Kaggle tab UI
-        # at runtime, not at deploy time.
-        self.kaggle_notifications_file = self.state_dir / "kaggle_notifications.json"
+        # Discord, Slack, email, ntfy.sh) — see backend/notifications.py.
+        # Shared by the Kaggle tab (worker completion) and the Scheduler tab
+        # (notify_on_finish), so it's a plain top-level state file rather
+        # than scoped to either feature's name. Deliberately its own
+        # gitignored file, not a dashboard_config.yaml key, since it's
+        # edited from the dashboard UI at runtime, not at deploy time. Kept
+        # the same on-disk filename it shipped with (kaggle_notifications.json)
+        # so any already-configured channels on a running deployment aren't
+        # orphaned by this rename.
+        self.notifications_file = self.state_dir / "kaggle_notifications.json"
 
     def ensure_dirs(self):
         for d in (self.configs_dir, self.logs_dir, self.runs_dir, self.checkpoints_dir, self.plots_dir, self.reports_dir):

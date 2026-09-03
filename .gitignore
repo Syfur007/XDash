@@ -6,5 +6,6 @@ data/kaggle_state.json
 data/kaggle_accounts.json
 data/kaggle_accounts/
 data/kaggle_notifications.json
+data/run_notes.json
 __pycache__/
 *.pyc

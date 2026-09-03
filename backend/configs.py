@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import yaml
 
 from .config import settings
@@ -77,6 +77,27 @@ def repo_relative_path(rel_path: str) -> str:
     repo_root (e.g. "mkunet/foo.yaml" -> "configs/mkunet/foo.yaml")."""
     fp = _resolve(rel_path)
     return fp.relative_to(settings.repo_root).as_posix()
+
+
+def find_config_by_experiment_name(experiment_name: str) -> Optional[str]:
+    """Best-effort reverse lookup for the Runs tab's "Re-run" action: a run's
+    manifest records resolved_config (a fully-materialized dict) and
+    config_hash, but never the original configs/*.yaml path it came from —
+    so this matches on logging.experiment_name instead, the same field
+    list_configs()'s coverage-dot already cross-references. Not perfectly
+    rigorous (a config can be renamed/edited after a run, or two configs
+    could theoretically share a name), but it's the only link that exists
+    without hashing every config file the same way the orchestration layer
+    does, which the dashboard deliberately doesn't reimplement. Returns None
+    when nothing on disk matches, rather than guessing.
+    """
+    if not experiment_name:
+        return None
+    for group in list_configs():
+        for c in group["configs"]:
+            if c["experiment_name"] == experiment_name:
+                return c["path"]
+    return None
 
 
 def get_experiment_name(rel_path: str) -> str:

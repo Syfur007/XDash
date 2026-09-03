@@ -96,3 +96,40 @@ def runs_grouped_by_config_hash() -> List[Dict[str, Any]]:
         {"config_hash": h, "runs": sorted(rs, key=_sort_key)}
         for h, rs in sorted(groups.items(), key=lambda kv: _newest(kv[1]), reverse=True)
     ]
+
+
+# ---------------------------------------------------------- per-run training curves
+# train.py (via loguru) writes logs_dir/<experiment_name>/<experiment_name>.log
+# and a sibling plots/ directory of already-rendered matplotlib PNGs
+# (epoch_dice.png, epoch_loss.png, ...) — the same tree a Kaggle-downloaded
+# run's zip unpacks into. Reusing these existing images is simpler and
+# higher-fidelity than re-deriving a chart from the raw log client-side, and
+# it works for any run whose logs/ survived, not just ones still tracked as
+# a live/recent terminal session.
+def _experiment_plots_dir(experiment_name: str) -> Optional[Path]:
+    if not experiment_name:
+        return None
+    return settings.logs_dir / experiment_name / "plots"
+
+
+def find_experiment_plots(experiment_name: str) -> List[str]:
+    """Filenames (not full paths) of pre-rendered training-curve PNGs for
+    *experiment_name*, if any."""
+    plot_dir = _experiment_plots_dir(experiment_name)
+    if not plot_dir or not plot_dir.is_dir():
+        return []
+    return sorted(p.name for p in plot_dir.glob("*.png") if p.is_file())
+
+
+def resolve_experiment_plot(experiment_name: str, filename: str) -> Optional[Path]:
+    """Safe path resolution for serving one plot PNG — rejects anything that
+    isn't a bare *.png filename before it ever touches the filesystem, so a
+    crafted filename can't escape logs_dir/<experiment_name>/plots/."""
+    plot_dir = _experiment_plots_dir(experiment_name)
+    if not plot_dir or not filename or "/" in filename or "\\" in filename or not filename.lower().endswith(".png"):
+        return None
+    candidate = (plot_dir / filename).resolve()
+    resolved_dir = plot_dir.resolve()
+    if resolved_dir != candidate.parent:
+        return None
+    return candidate if candidate.is_file() else None
