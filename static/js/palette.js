@@ -46,7 +46,7 @@ function buildPaletteIndex() {
         kind: "run",
         label: r.run_id,
         sub: `${expLabel} · ${r.status}`,
-        action: () => { switchView("runs"); selectRun(r.run_id); },
+        action: () => { switchToSubtab("experiments", "experiments-subtabs", "runs"); selectRun(r.run_id); },
       });
     }
   }

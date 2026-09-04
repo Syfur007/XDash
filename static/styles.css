@@ -109,13 +109,10 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   border-color: var(--border);
 }
 .nav-item[data-view="configs"].active{ border-left-color: var(--blue); }
-.nav-item[data-view="creator"].active{ border-left-color: var(--blue); }
-.nav-item[data-view="scheduler"].active{ border-left-color: var(--violet); }
-.nav-item[data-view="terminals"].active{ border-left-color: var(--amber); }
+.nav-item[data-view="experiments"].active{ border-left-color: var(--amber); }
+.nav-item[data-view="runners"].active{ border-left-color: var(--emerald); }
 .nav-item[data-view="reports"].active{ border-left-color: var(--teal); }
 .nav-item[data-view="history"].active{ border-left-color: var(--violet); }
-.nav-item[data-view="monitors"].active{ border-left-color: var(--emerald); }
-.nav-item[data-view="tensorboard"].active{ border-left-color: var(--red); }
 .nav-item.active .nav-dot{ background: var(--amber); }
 
 .sidebar-footer{
@@ -225,6 +222,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .panel-header{
   display:flex; align-items:center; justify-content:space-between;
+  flex-wrap:wrap; gap:8px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--border-soft);
   font-size: 12.5px;
@@ -575,7 +573,7 @@ select, .text-input{
 .tb-status-row .pulse-dot{ margin-top:4px; }
 .tb-status-label{ font-weight:600; font-size:15px; }
 .tb-status-sub{ color: var(--text-muted); font-size:12.5px; margin-top:3px; line-height:1.5; }
-.tb-toolbar{ display:flex; align-items:center; gap:12px; }
+.tb-toolbar{ display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
 
 /* ---------------------------------------------------------------- scrollbars */
 ::-webkit-scrollbar{ width:10px; height:10px; }
@@ -1095,3 +1093,35 @@ select, .text-input{
   .status-pills{ display:none; } /* keep the topbar readable on very small screens; full detail is one tap away on the Terminals page */
   .brand-sub{ display:none; }
 }
+
+/* ---------------------------------------------------------- Subtab strip
+   Shared by any view that merges several former tabs behind one nav item
+   (Configs [Browse|Create], Experiments [Active|Queue|Runs & Results]) —
+   see static/app.js's initSubtabStrip(). Reuses the same active-state
+   language as .nav-item.active rather than a second visual vocabulary. */
+.subtab-strip{ display:flex; gap:6px; flex-wrap:wrap; margin-bottom:16px; }
+.subtab-btn{
+  padding:7px 14px; border-radius: var(--radius);
+  border:1px solid var(--border-soft); background: var(--surface);
+  color: var(--text-muted); font-size:12.5px; font-family: var(--sans);
+  cursor:pointer; transition: background .12s ease, color .12s ease, border-color .12s ease;
+}
+.subtab-btn:hover{ background: var(--surface-2); color: var(--text); }
+.subtab-btn.active{ background: var(--surface-3); color: var(--text); border-color: var(--amber-dim); }
+.subtab-btn .count-badge{ margin-left:6px; }
+.subtab-panel{ display:none; }
+.subtab-panel.active{ display:block; }
+
+/* ---------------------------------------------------------- Assignments */
+.assignment-block-row td{
+  padding:6px 12px !important;
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size:11px;
+  text-transform:uppercase;
+  letter-spacing:0.04em;
+  background: var(--surface);
+  text-align:left !important;
+  border-bottom:1px solid var(--border-soft);
+}
+.assignment-notes-cell{ max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

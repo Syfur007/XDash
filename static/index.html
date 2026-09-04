@@ -10,7 +10,7 @@
 
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css">
-<link rel="stylesheet" href="styles.css?v=5">
+<link rel="stylesheet" href="styles.css?v=6">
 </head>
 <body>
 
@@ -27,29 +27,25 @@
     </div>
 
     <nav class="nav">
-      <div class="nav-item active" data-view="configs">
+      <div class="nav-item active" data-view="overview">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="13" width="7" height="7" rx="1"/><rect x="14" y="13" width="7" height="7" rx="1"/></svg>
+        Overview
+      </div>
+      <div class="nav-item" data-view="configs">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 9v11"/></svg>
         Configs
       </div>
-      <div class="nav-item" data-view="creator">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 5v14M5 12h14"/></svg>
-        Create Config
-      </div>
-      <div class="nav-item" data-view="runs">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="13" width="7" height="7" rx="1"/><rect x="14" y="13" width="7" height="7" rx="1"/></svg>
-        Runs
-      </div>
-      <div class="nav-item" data-view="terminals">
+      <div class="nav-item" data-view="experiments">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M8 9l3 3-3 3M13 15h3"/></svg>
-        Terminals
+        Experiments
       </div>
-      <div class="nav-item" data-view="scheduler">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3.5 2"/></svg>
-        Scheduler
+      <div class="nav-item" data-view="runners">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12h4l2.5 7L13 5l2.5 7H21"/></svg>
+        Runners
       </div>
-      <div class="nav-item" data-view="kaggle">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4v16M4 12l8-8M4 12l8 8M12 4l8 16"/></svg>
-        Kaggle
+      <div class="nav-item" data-view="assignments">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 3h6v4H9z"/><path d="M6 7h12v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1z"/><path d="M9 12h6M9 16h6"/></svg>
+        Assignments
       </div>
       <div class="nav-item" data-view="reports">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h9l5 5v13H6z"/><path d="M14 3v5h5M9 13h6M9 17h6M9 9h2"/></svg>
@@ -62,14 +58,6 @@
       <div class="nav-item" data-view="data">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
         Data
-      </div>
-      <div class="nav-item" data-view="monitors">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12h4l2.5 7L13 5l2.5 7H21"/></svg>
-        Machine Stats
-      </div>
-      <div class="nav-item" data-view="tensorboard">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5M10 19V9M16 19v-6M22 19H2"/></svg>
-        TensorBoard
       </div>
     </nav>
 
@@ -111,274 +99,361 @@
   <!-- ============================================================ main -->
   <main class="main">
 
+    <!-- ---------------------------------------------------- Overview view -->
+    <section class="view active" id="view-overview">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Overview</div>
+          <div class="view-sub">Fleet snapshot — every runner's capacity, and what's happened recently across all of them.</div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header"><span>Runners</span></div>
+        <div class="entity-grid" id="overview-runners-body" style="padding:14px 16px;">
+          <div class="empty-state">Loading…</div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-header"><span>Recent activity</span></div>
+        <div id="overview-activity-body" style="padding:6px 16px 16px;">
+          <div class="empty-state">Loading…</div>
+        </div>
+      </div>
+    </section>
+
     <!-- ---------------------------------------------------- Configs view -->
-    <section class="view active" id="view-configs">
+    <section class="view" id="view-configs">
       <div class="view-header">
         <div>
           <div class="view-title">Configs</div>
-          <div class="view-sub">Browse, edit, and launch experiment configs from the configs/ directory.</div>
+          <div class="view-sub">Browse, edit, launch, and visually build experiment configs from the configs/ directory.</div>
         </div>
         <button class="btn btn-ghost" id="btn-refresh-configs">Refresh</button>
       </div>
 
-      <div class="configs-layout">
-        <div class="panel config-tree">
-          <div class="panel-header"><span>Configs</span><span id="config-count"></span></div>
-          <div class="panel-filter"><input class="text-input" id="config-filter" placeholder="Filter configs…" autocomplete="off" /></div>
-          <div class="config-tree-body" id="config-tree-body">
+      <div class="subtab-strip" id="configs-subtabs">
+        <button class="subtab-btn active" data-subtab="browse">Browse</button>
+        <button class="subtab-btn" data-subtab="create">Create</button>
+      </div>
+
+      <div class="subtab-panel active" data-subtab="browse">
+        <div class="configs-layout">
+          <div class="panel config-tree">
+            <div class="panel-header"><span>Configs</span><span id="config-count"></span></div>
+            <div class="panel-filter"><input class="text-input" id="config-filter" placeholder="Filter configs…" autocomplete="off" /></div>
+            <div class="config-tree-body" id="config-tree-body">
+              <div class="empty-state">Loading…</div>
+            </div>
+          </div>
+
+          <div class="panel editor-pane">
+            <div class="editor-toolbar">
+              <span class="editor-path" id="editor-path">No config selected</span>
+              <span class="editor-status" id="editor-status"></span>
+              <button class="btn btn-sm btn-ghost" id="btn-toggle-resolved" disabled title="Show the fully compose-merged, schema-validated config — what utils.config.load_config() actually returns, not just this file's own lines">Show resolved</button>
+              <button class="btn btn-sm" id="btn-save-config" disabled>Save changes</button>
+            </div>
+            <div class="editor-body" id="editor-body">
+              <div class="empty-state">Select a config on the left to view and edit it.</div>
+            </div>
+            <div class="editor-body hidden" id="resolved-config-body" style="overflow:auto; display:block; padding:16px;"></div>
+            <div class="run-bar" id="run-bar" style="display:none;">
+              <label>RUN ON</label>
+              <select id="run-target-select"><option value="local">mclab</option></select>
+              <label>MODE</label>
+              <select id="run-mode">
+                <option value="train">train.py</option>
+                <option value="eval">eval.py</option>
+              </select>
+              <label>EXTRA ARGS</label>
+              <input class="text-input grow" id="run-extra-args" placeholder="--epochs 10 --lr 0.0005" />
+              <button class="btn btn-primary" id="btn-run">Run ▸</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="subtab-panel" data-subtab="create">
+        <div class="creator-layout">
+          <div class="creator-form-col">
+            <div class="panel">
+              <div class="panel-header"><span>Start from</span></div>
+              <div class="creator-base-row">
+                <select id="creator-base-select"><option value="">— pick a config to use as a template —</option></select>
+                <button class="btn btn-sm btn-primary" id="btn-load-base">Load as template</button>
+                <button class="btn btn-sm btn-ghost" id="btn-blank-base">Start blank</button>
+              </div>
+            </div>
+
+            <div id="creator-sections"></div>
+
+            <div class="panel" style="margin-top:18px;">
+              <div class="panel-header"><span>Save config</span></div>
+              <div class="creator-save-row">
+                <div class="field">
+                  <label>Folder</label>
+                  <select id="creator-folder-select"><option value="">general</option></select>
+                  <input class="text-input hidden" id="creator-new-folder-input" placeholder="new-folder-name" />
+                </div>
+                <div class="field grow">
+                  <label>Filename</label>
+                  <input class="text-input grow" id="creator-filename-input" placeholder="my_experiment.yaml" />
+                </div>
+                <button class="btn btn-primary" id="btn-save-creator-config">Save config</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="creator-preview-col">
+            <div class="panel creator-preview-panel">
+              <div class="panel-header"><span>Live preview</span></div>
+              <pre class="creator-preview-body" id="creator-preview-body"></pre>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- Experiments view -->
+    <section class="view" id="view-experiments">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Experiments</div>
+          <div class="view-sub">Launch, watch, queue, and review runs — across every runner (mclab and Kaggle).</div>
+        </div>
+      </div>
+
+      <div class="subtab-strip" id="experiments-subtabs">
+        <button class="subtab-btn active" data-subtab="active">Active</button>
+        <button class="subtab-btn" data-subtab="queue">Queue</button>
+        <button class="subtab-btn" data-subtab="runs">Runs & Results</button>
+      </div>
+
+      <!-- ····························································· Active -->
+      <div class="subtab-panel active" data-subtab="active">
+        <div class="panel" style="margin-bottom:16px;">
+          <div class="panel-header"><span>Also running on Kaggle</span></div>
+          <div class="kaggle-grid" id="experiments-kaggle-active-body" style="padding:12px 16px;">
             <div class="empty-state">Loading…</div>
           </div>
         </div>
 
-        <div class="panel editor-pane">
-          <div class="editor-toolbar">
-            <span class="editor-path" id="editor-path">No config selected</span>
-            <span class="editor-status" id="editor-status"></span>
-            <button class="btn btn-sm btn-ghost" id="btn-toggle-resolved" disabled title="Show the fully compose-merged, schema-validated config — what utils.config.load_config() actually returns, not just this file's own lines">Show resolved</button>
-            <button class="btn btn-sm" id="btn-save-config" disabled>Save changes</button>
-          </div>
-          <div class="editor-body" id="editor-body">
-            <div class="empty-state">Select a config on the left to view and edit it.</div>
-          </div>
-          <div class="editor-body hidden" id="resolved-config-body" style="overflow:auto; display:block; padding:16px;"></div>
-          <div class="run-bar" id="run-bar" style="display:none;">
-            <label>MODE</label>
-            <select id="run-mode">
-              <option value="train">train.py</option>
-              <option value="eval">eval.py</option>
-            </select>
-            <label>EXTRA ARGS</label>
-            <input class="text-input grow" id="run-extra-args" placeholder="--epochs 10 --lr 0.0005" />
-            <button class="btn btn-primary" id="btn-run">Launch in terminal ▸</button>
-          </div>
+        <div class="job-actions" style="margin-bottom:12px;">
+          <button class="btn btn-ghost" id="btn-refresh-terminals">Refresh mclab sessions</button>
         </div>
-      </div>
-    </section>
-
-    <!-- ---------------------------------------------------- Config Creator view -->
-    <section class="view" id="view-creator">
-      <div class="view-header">
-        <div>
-          <div class="view-title">Create Config</div>
-          <div class="view-sub">Build a new experiment config visually — optionally starting from an existing one as a template.</div>
-        </div>
-      </div>
-
-      <div class="creator-layout">
-        <div class="creator-form-col">
-          <div class="panel">
-            <div class="panel-header"><span>Start from</span></div>
-            <div class="creator-base-row">
-              <select id="creator-base-select"><option value="">— pick a config to use as a template —</option></select>
-              <button class="btn btn-sm btn-primary" id="btn-load-base">Load as template</button>
-              <button class="btn btn-sm btn-ghost" id="btn-blank-base">Start blank</button>
+        <div class="configs-layout">
+          <div class="panel config-tree">
+            <div class="panel-header"><span>Sessions</span><span id="terminal-count"></span></div>
+            <div class="panel-filter"><input class="text-input" id="terminal-filter" placeholder="Filter sessions…" autocomplete="off" /></div>
+            <div class="config-tree-body" id="terminal-list-body">
+              <div class="empty-state">Loading…</div>
             </div>
           </div>
 
-          <div id="creator-sections"></div>
-
-          <div class="panel" style="margin-top:18px;">
-            <div class="panel-header"><span>Save config</span></div>
-            <div class="creator-save-row">
-              <div class="field">
-                <label>Folder</label>
-                <select id="creator-folder-select"><option value="">general</option></select>
-                <input class="text-input hidden" id="creator-new-folder-input" placeholder="new-folder-name" />
+          <div class="panel editor-pane">
+            <div class="editor-toolbar" id="terminal-toolbar" style="flex-wrap:wrap;">
+              <div style="flex:1;min-width:220px;">
+                <div class="term-title" id="term-title">No terminal selected</div>
+                <div class="term-subtitle" id="term-subtitle"></div>
               </div>
+              <div class="job-actions" id="terminal-actions"></div>
+            </div>
+            <div class="editor-body" id="terminal-body">
+              <div class="empty-state">Select a session on the left, or launch a new one from the Configs tab.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ····························································· Queue -->
+      <div class="subtab-panel" data-subtab="queue">
+        <div class="job-actions" style="margin-bottom:12px;">
+          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-pause" title="Pause to stop new items launching — already-running items keep going">Queue: running</button>
+          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-notify" title="Send a notification (via the channels configured on the Runners tab) when a scheduled item finishes or fails">Notify on finish: off</button>
+          <button class="btn btn-ghost" id="btn-refresh-scheduler">Refresh</button>
+        </div>
+
+        <div class="compute-summary-strip" id="scheduler-summary-strip"></div>
+
+        <div class="panel">
+          <div class="panel-header"><span>Concurrency</span></div>
+          <div class="concurrency-row">
+            <span class="concurrency-label">Max experiments running at once</span>
+            <div class="stepper">
+              <button class="stepper-btn" id="btn-concurrency-minus">−</button>
+              <span class="stepper-value" id="concurrency-value">1</span>
+              <button class="stepper-btn" id="btn-concurrency-plus">+</button>
+            </div>
+          </div>
+          <div style="padding:0 16px 14px;">
+            <div class="concurrency-bar-track"><div class="concurrency-bar-fill" id="concurrency-bar-fill" style="width:0%;"></div></div>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-top:16px;">
+          <div class="panel-header">
+            <span>Add to schedule</span>
+            <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-more">More ways to add</button>
+          </div>
+          <div class="scheduler-add-form">
+            <div class="field grow">
+              <label>Config</label>
+              <select id="scheduler-config-select"><option value="">— pick a config —</option></select>
+            </div>
+            <div class="field">
+              <label>Mode</label>
+              <select id="scheduler-mode-select">
+                <option value="train">Train</option>
+                <option value="eval">Eval</option>
+                <option value="both">Train + Eval</option>
+              </select>
+            </div>
+            <div class="field grow">
+              <label>Extra args</label>
+              <input class="text-input grow" id="scheduler-extra-args" placeholder="--epochs 10 --lr 0.0005" />
+            </div>
+            <button class="btn btn-primary" id="btn-schedule-add">Add to schedule</button>
+            <button class="btn btn-sm btn-ghost" id="btn-schedule-save-template" title="Save the fields above as a reusable template">Save as template</button>
+          </div>
+          <div class="hidden" id="scheduler-more-panel">
+            <div class="scheduler-add-form" style="padding-top:0; border-top:1px dashed var(--border-soft);">
               <div class="field grow">
-                <label>Filename</label>
-                <input class="text-input grow" id="creator-filename-input" placeholder="my_experiment.yaml" />
+                <label>Bulk add — every config in a category</label>
+                <select id="scheduler-bulk-category"><option value="">— pick a category —</option></select>
               </div>
-              <button class="btn btn-primary" id="btn-save-creator-config">Save config</button>
+              <button class="btn btn-ghost" id="btn-scheduler-bulk-add">Add all in category</button>
             </div>
+            <div class="view-sub" style="padding:4px 16px 0;">Saved templates</div>
+            <div id="scheduler-templates-body" class="entity-list" style="padding:10px 16px 16px;"></div>
           </div>
         </div>
 
-        <div class="creator-preview-col">
-          <div class="panel creator-preview-panel">
-            <div class="panel-header"><span>Live preview</span></div>
-            <pre class="creator-preview-body" id="creator-preview-body"></pre>
-          </div>
+        <div class="scheduler-section">
+          <h3 class="scheduler-section-title">Running <span class="count-badge" id="count-running-sched">0</span></h3>
+          <div id="scheduler-running-list" class="entity-grid"><div class="empty-state">Nothing running.</div></div>
+        </div>
+        <div class="scheduler-section">
+          <h3 class="scheduler-section-title">Scheduled <span class="count-badge" id="count-pending-sched">0</span> <span class="bulk-bar" id="scheduler-pending-bulk-bar"></span></h3>
+          <div id="scheduler-pending-list" class="entity-list"><div class="empty-state">Nothing queued.</div></div>
+        </div>
+        <div class="scheduler-section">
+          <h3 class="scheduler-section-title">Past <span class="count-badge" id="count-past-sched">0</span> <span class="bulk-bar" id="scheduler-past-bulk-bar"></span></h3>
+          <div id="scheduler-past-list" class="entity-grid"><div class="empty-state">No history yet.</div></div>
         </div>
       </div>
-    </section>
 
-    <!-- ---------------------------------------------------- Runs view -->
-    <section class="view" id="view-runs">
-      <div class="view-header">
-        <div>
-          <div class="view-title">Runs</div>
-          <div class="view-sub">Runs recorded by the orchestration layer under <span style="font-family:var(--mono)">artifacts/</span>, grouped by config hash — each group's grid is one cell per seed/fold combination.</div>
-        </div>
-        <div class="job-actions">
+      <!-- ···························································· Runs & Results -->
+      <div class="subtab-panel" data-subtab="runs">
+        <div class="job-actions" style="margin-bottom:12px; flex-wrap:wrap;">
           <button class="btn btn-sm btn-ghost" id="btn-run-compare-mode" title="Click cells to select 2+ runs, then compare them side by side">Compare runs</button>
           <button class="btn btn-primary hidden" id="btn-compare-runs">Compare selected (<span id="run-compare-count">0</span>)</button>
           <button class="btn btn-sm btn-ghost" id="btn-export-runs-csv">Export CSV</button>
           <button class="btn btn-sm btn-ghost" id="btn-export-runs-json">Export JSON</button>
           <button class="btn btn-ghost" id="btn-refresh-runs">Refresh</button>
         </div>
-      </div>
 
-      <div class="compute-summary-strip" id="compute-summary-strip"></div>
+        <div class="compute-summary-strip" id="compute-summary-strip"></div>
 
-      <div class="configs-layout runs-layout">
-        <div class="panel config-tree">
-          <div class="panel-header"><span>Config groups</span><span id="run-group-count"></span></div>
-          <div class="panel-filter"><input class="text-input" id="run-group-filter" placeholder="Filter by name, hash, status, commit…" autocomplete="off" /></div>
-          <div class="config-tree-body" id="run-group-list-body">
-            <div class="empty-state">Loading…</div>
-          </div>
-        </div>
-
-        <div class="panel editor-pane">
-          <div class="editor-toolbar" id="run-detail-toolbar" style="flex-wrap:wrap;">
-            <div style="flex:1;min-width:220px;">
-              <div class="term-title" id="run-detail-title">No run selected</div>
-              <div class="term-subtitle" id="run-detail-subtitle"></div>
+        <div class="configs-layout runs-layout">
+          <div class="panel config-tree">
+            <div class="panel-header"><span>Config groups</span><span id="run-group-count"></span></div>
+            <div class="panel-filter"><input class="text-input" id="run-group-filter" placeholder="Filter by name, hash, status, commit…" autocomplete="off" /></div>
+            <div class="config-tree-body" id="run-group-list-body">
+              <div class="empty-state">Loading…</div>
             </div>
-            <div class="job-actions" id="run-detail-actions"></div>
           </div>
-          <div class="editor-body" id="run-detail-body" style="overflow:auto; display:block; padding:20px;">
-            <div class="empty-state">Select a cell in a config group's grid on the left to see that run's manifest details, or click "Compare runs" to select several at once.</div>
+
+          <div class="panel editor-pane">
+            <div class="editor-toolbar" id="run-detail-toolbar" style="flex-wrap:wrap;">
+              <div style="flex:1;min-width:220px;">
+                <div class="term-title" id="run-detail-title">No run selected</div>
+                <div class="term-subtitle" id="run-detail-subtitle"></div>
+              </div>
+              <div class="job-actions" id="run-detail-actions"></div>
+            </div>
+            <div class="editor-body" id="run-detail-body" style="overflow:auto; display:block; padding:20px;">
+              <div class="empty-state">Select a cell in a config group's grid on the left to see that run's manifest details, or click "Compare runs" to select several at once.</div>
+            </div>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- ---------------------------------------------------- Terminals view -->
-    <section class="view" id="view-terminals">
+    <!-- ---------------------------------------------------- Runners view -->
+    <section class="view" id="view-runners">
       <div class="view-header">
         <div>
-          <div class="view-title">Terminals</div>
-          <div class="view-sub">Every experiment run is a tmux session. Select one to see its full scrollable output.</div>
-        </div>
-        <button class="btn btn-ghost" id="btn-refresh-terminals">Refresh</button>
-      </div>
-
-      <div class="configs-layout">
-        <div class="panel config-tree">
-          <div class="panel-header"><span>Sessions</span><span id="terminal-count"></span></div>
-          <div class="panel-filter"><input class="text-input" id="terminal-filter" placeholder="Filter sessions…" autocomplete="off" /></div>
-          <div class="config-tree-body" id="terminal-list-body">
-            <div class="empty-state">Loading…</div>
-          </div>
-        </div>
-
-        <div class="panel editor-pane">
-          <div class="editor-toolbar" id="terminal-toolbar" style="flex-wrap:wrap;">
-            <div style="flex:1;min-width:220px;">
-              <div class="term-title" id="term-title">No terminal selected</div>
-              <div class="term-subtitle" id="term-subtitle"></div>
-            </div>
-            <div class="job-actions" id="terminal-actions"></div>
-          </div>
-          <div class="editor-body" id="terminal-body">
-            <div class="empty-state">Select a session on the left, or launch a new one from the Configs tab.</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ---------------------------------------------------- Scheduler view -->
-    <section class="view" id="view-scheduler">
-      <div class="view-header">
-        <div>
-          <div class="view-title">Scheduler</div>
-          <div class="view-sub">Queue up training/eval runs — they launch automatically as slots free up, even overnight.</div>
-        </div>
-        <div class="job-actions">
-          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-pause" title="Pause to stop new items launching — already-running items keep going">Queue: running</button>
-          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-notify" title="Send a notification (via the channels configured in the Kaggle tab) when a scheduled item finishes or fails">Notify on finish: off</button>
-          <button class="btn btn-ghost" id="btn-refresh-scheduler">Refresh</button>
+          <div class="view-title">Runners</div>
+          <div class="view-sub">Every compute backend this dashboard can launch on — mclab, plus each configured Kaggle account. Workers below also show up in Experiments → Active while a push is in flight.</div>
         </div>
       </div>
 
-      <div class="compute-summary-strip" id="scheduler-summary-strip"></div>
-
-      <div class="panel">
-        <div class="panel-header"><span>Concurrency</span></div>
-        <div class="concurrency-row">
-          <span class="concurrency-label">Max experiments running at once</span>
-          <div class="stepper">
-            <button class="stepper-btn" id="btn-concurrency-minus">−</button>
-            <span class="stepper-value" id="concurrency-value">1</span>
-            <button class="stepper-btn" id="btn-concurrency-plus">+</button>
-          </div>
-        </div>
-        <div style="padding:0 16px 14px;">
-          <div class="concurrency-bar-track"><div class="concurrency-bar-fill" id="concurrency-bar-fill" style="width:0%;"></div></div>
+      <div class="panel" style="margin-bottom:16px;">
+        <div class="panel-header"><span>mclab</span></div>
+        <div id="runner-local-body" style="padding:14px 16px;">
+          <div class="empty-state">Loading…</div>
         </div>
       </div>
 
-      <div class="panel" style="margin-top:16px;">
+      <div class="panel" style="margin-bottom:16px;">
         <div class="panel-header">
-          <span>Add to schedule</span>
-          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-more">More ways to add</button>
+          <span>Machine Stats</span>
+          <button class="btn btn-ghost" id="btn-refresh-monitors">Refresh</button>
         </div>
-        <div class="scheduler-add-form">
-          <div class="field grow">
-            <label>Config</label>
-            <select id="scheduler-config-select"><option value="">— pick a config —</option></select>
-          </div>
-          <div class="field">
-            <label>Mode</label>
-            <select id="scheduler-mode-select">
-              <option value="train">Train</option>
-              <option value="eval">Eval</option>
-              <option value="both">Train + Eval</option>
-            </select>
-          </div>
-          <div class="field grow">
-            <label>Extra args</label>
-            <input class="text-input grow" id="scheduler-extra-args" placeholder="--epochs 10 --lr 0.0005" />
-          </div>
-          <button class="btn btn-primary" id="btn-schedule-add">Add to schedule</button>
-          <button class="btn btn-sm btn-ghost" id="btn-schedule-save-template" title="Save the fields above as a reusable template">Save as template</button>
+        <div class="monitor-list" id="monitor-list-body" style="padding:12px 16px;">
+          <div class="empty-state">Loading…</div>
         </div>
-        <div class="hidden" id="scheduler-more-panel">
-          <div class="scheduler-add-form" style="padding-top:0; border-top:1px dashed var(--border-soft);">
-            <div class="field grow">
-              <label>Bulk add — every config in a category</label>
-              <select id="scheduler-bulk-category"><option value="">— pick a category —</option></select>
+        <div style="padding:0 16px 16px;">
+          <div class="panel-header" style="padding-left:0;"><span>Add a new metric</span></div>
+          <div class="add-monitor-form">
+            <div class="field">
+              <label>Name</label>
+              <input class="text-input" id="monitor-name-input" placeholder="e.g. GPU processes" />
             </div>
-            <button class="btn btn-ghost" id="btn-scheduler-bulk-add">Add all in category</button>
+            <div class="field grow">
+              <label>Command</label>
+              <input class="text-input grow" id="monitor-command-input" placeholder="e.g. iostat -x 1" />
+            </div>
+            <div class="field">
+              <label>Watch interval (s, 0 = self-refreshing)</label>
+              <input class="text-input" id="monitor-interval-input" type="number" min="0" value="2" style="width:100%;" />
+            </div>
+            <button class="btn btn-primary" id="btn-add-monitor">Add metric</button>
           </div>
-          <div class="view-sub" style="padding:4px 16px 0;">Saved templates</div>
-          <div id="scheduler-templates-body" class="entity-list" style="padding:10px 16px 16px;"></div>
         </div>
       </div>
 
-      <div class="scheduler-section">
-        <h3 class="scheduler-section-title">Running <span class="count-badge" id="count-running-sched">0</span></h3>
-        <div id="scheduler-running-list" class="entity-grid"><div class="empty-state">Nothing running.</div></div>
+      <div class="panel" style="margin-bottom:20px;">
+        <div class="panel-header"><span>TensorBoard</span></div>
+        <div class="tb-panel" style="border:none; padding:14px 16px;">
+          <div class="tb-status-row">
+            <div class="pulse-dot" id="tb-dot"></div>
+            <div>
+              <div class="tb-status-label" id="tb-status-label">Not running</div>
+              <div class="tb-status-sub" id="tb-status-sub">Starts a tensorboard process on the server and opens it in a new browser tab, reading from <span id="tb-logdir" style="font-family:var(--mono)"></span>.</div>
+            </div>
+          </div>
+          <div class="tb-toolbar">
+            <button class="btn btn-primary" id="btn-tb-start">Start TensorBoard</button>
+            <button class="btn btn-danger hidden" id="btn-tb-stop">Stop</button>
+            <a class="btn btn-ghost hidden" id="btn-tb-open" target="_blank" rel="noopener">Open in new tab ↗</a>
+          </div>
+        </div>
       </div>
-      <div class="scheduler-section">
-        <h3 class="scheduler-section-title">Scheduled <span class="count-badge" id="count-pending-sched">0</span> <span class="bulk-bar" id="scheduler-pending-bulk-bar"></span></h3>
-        <div id="scheduler-pending-list" class="entity-list"><div class="empty-state">Nothing queued.</div></div>
-      </div>
-      <div class="scheduler-section">
-        <h3 class="scheduler-section-title">Past <span class="count-badge" id="count-past-sched">0</span> <span class="bulk-bar" id="scheduler-past-bulk-bar"></span></h3>
-        <div id="scheduler-past-list" class="entity-grid"><div class="empty-state">No history yet.</div></div>
-      </div>
-    </section>
 
-    <!-- ---------------------------------------------------- Kaggle view -->
-    <section class="view" id="view-kaggle">
-      <div class="view-header">
-        <div>
-          <div class="view-title">Kaggle</div>
-          <div class="view-sub">Push, poll, and pull training notebooks running as Kaggle kernels across multiple accounts.</div>
-        </div>
-        <div class="job-actions">
-          <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-autorefresh" title="Poll and re-render this tab automatically">Auto-refresh: off</button>
-          <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-notify" title="Browser notification when a worker finishes or errors">Notify: off</button>
-          <button class="btn btn-sm btn-ghost" id="btn-kaggle-export">Export registry</button>
-          <button class="btn btn-sm btn-ghost" id="btn-kaggle-import">Import registry</button>
-          <input type="file" id="kaggle-import-file" accept="application/json" class="hidden" />
-          <button class="btn btn-ghost" id="btn-kaggle-push-all">Push all</button>
-          <button class="btn btn-ghost" id="btn-kaggle-refresh-all">Refresh all</button>
-          <button class="btn btn-ghost" id="btn-kaggle-download-all">Download all finished</button>
-        </div>
+      <div class="view-sub" style="margin:4px 0 12px; font-weight:600; color:var(--text);">Kaggle accounts</div>
+
+      <div class="job-actions" style="margin-bottom:12px; flex-wrap:wrap;">
+        <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-autorefresh" title="Poll and re-render this section automatically">Auto-refresh: off</button>
+        <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-notify" title="Browser notification when a worker finishes or errors">Notify: off</button>
+        <button class="btn btn-sm btn-ghost" id="btn-kaggle-export">Export registry</button>
+        <button class="btn btn-sm btn-ghost" id="btn-kaggle-import">Import registry</button>
+        <input type="file" id="kaggle-import-file" accept="application/json" class="hidden" />
+        <button class="btn btn-ghost" id="btn-kaggle-push-all">Push all</button>
+        <button class="btn btn-ghost" id="btn-kaggle-refresh-all">Refresh all</button>
+        <button class="btn btn-ghost" id="btn-kaggle-download-all">Download all finished</button>
       </div>
 
       <div class="compute-summary-strip" id="kaggle-summary-strip"></div>
@@ -430,10 +505,6 @@
             <input class="text-input" id="kaggle-new-worker-id" placeholder="w1" />
           </div>
           <div class="field grow">
-            <label>Notebook path (repo-relative)</label>
-            <input class="text-input grow" id="kaggle-new-worker-notebook" placeholder="path/to/worker.ipynb" />
-          </div>
-          <div class="field grow">
             <label>Kernel slug</label>
             <input class="text-input grow" id="kaggle-new-worker-slug" placeholder="my-worker-1" />
           </div>
@@ -445,6 +516,14 @@
             <label>Budget (hours)</label>
             <input class="text-input" id="kaggle-new-worker-budget" placeholder="9.5" />
           </div>
+          <div class="field grow">
+            <label>Template override (repo-relative, optional)</label>
+            <input class="text-input grow" id="kaggle-new-worker-template" placeholder="leave blank to use the default launch template" />
+          </div>
+          <div class="field grow">
+            <label>Fixed notebook path (repo-relative, optional — legacy)</label>
+            <input class="text-input grow" id="kaggle-new-worker-notebook" placeholder="leave blank unless this worker pushes one specific hand-authored notebook, not a per-launch config" />
+          </div>
           <button class="btn btn-primary" id="btn-kaggle-add-worker">Add worker</button>
         </div>
       </div>
@@ -453,9 +532,73 @@
         <div class="panel-header">
           <div style="display:flex; gap:8px; align-items:center;"><span>Notifications</span><span id="kaggle-notif-count"></span></div>
         </div>
-        <div class="view-sub" style="padding:0 14px 10px;">Server-side alerts the background poller sends when a worker finishes or errors — these fire even when nobody has this tab open, on top of the browser notification toggle above.</div>
+        <div class="view-sub" style="padding:0 14px 10px;">Server-side alerts the background poller sends when a worker finishes or errors — these fire even when nobody has this tab open, on top of the browser notification toggle above. Also drives Experiments → Queue's "Notify on finish" toggle.</div>
         <div class="kaggle-grid" id="kaggle-notif-body">
           <div class="empty-state">Loading…</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- Assignments view -->
+    <section class="view" id="view-assignments">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Assignments</div>
+          <div class="view-sub">Plan which runner (mclab, or a Kaggle worker) should run each not-yet-launched config — answers "who's doing what" before Experiments answers "what's running now."</div>
+        </div>
+        <button class="btn btn-ghost" id="btn-refresh-assignments">Refresh</button>
+      </div>
+
+      <div class="panel">
+        <div class="panel-header"><span id="assignment-form-title">Add / edit assignment</span></div>
+        <div class="scheduler-add-form" style="flex-wrap:wrap;">
+          <div class="field grow">
+            <label>Config</label>
+            <select id="assignment-config-select"><option value="">— pick a config —</option></select>
+          </div>
+          <div class="field">
+            <label>Seed (optional)</label>
+            <input class="text-input" id="assignment-seed-input" placeholder="1337" style="width:90px;" />
+          </div>
+          <div class="field">
+            <label>Block (optional)</label>
+            <input class="text-input" id="assignment-block-input" placeholder="A" style="width:80px;" />
+          </div>
+          <div class="field">
+            <label>Runner</label>
+            <select id="assignment-runner-select"><option value="">— pick a runner —</option></select>
+          </div>
+          <div class="field">
+            <label>...or free label</label>
+            <input class="text-input" id="assignment-runner-free" placeholder="e.g. w3" style="width:100px;" />
+          </div>
+          <div class="field">
+            <label>Status</label>
+            <input class="text-input" id="assignment-status-input" placeholder="planned" style="width:110px;" />
+          </div>
+          <div class="field grow">
+            <label>Notes</label>
+            <input class="text-input grow" id="assignment-notes-input" placeholder="optional" />
+          </div>
+          <button class="btn btn-primary" id="btn-assignment-submit">Add row</button>
+          <button class="btn btn-sm btn-ghost hidden" id="btn-assignment-cancel-edit">Cancel edit</button>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-header">
+          <div style="display:flex; gap:8px; align-items:center;"><span>Board</span><span id="assignment-count"></span></div>
+          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+            <input class="text-input" id="assignment-import-path" placeholder="experiment_status.csv" style="width:200px;" />
+            <button class="btn btn-sm btn-ghost" id="btn-assignment-import" title="Import a legacy config,dataset,block,worker,status,... CSV — every column is preserved">Import CSV</button>
+            <button class="btn btn-sm btn-ghost" id="btn-assignment-export">Export CSV</button>
+          </div>
+        </div>
+        <div style="padding:0 16px 16px; overflow:auto;">
+          <table class="compare-table" style="width:100%;">
+            <thead><tr><th>Config</th><th>Seed</th><th>Runner</th><th>Status</th><th>Notes</th><th>Updated</th><th></th></tr></thead>
+            <tbody id="assignment-table-body"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody>
+          </table>
         </div>
       </div>
     </section>
@@ -585,64 +728,6 @@
       </div>
     </section>
 
-    <!-- ---------------------------------------------------- Machine Stats view -->
-    <section class="view" id="view-monitors">
-      <div class="view-header">
-        <div>
-          <div class="view-title">Machine Stats</div>
-          <div class="view-sub">System & GPU monitoring commands, each running in its own tmux session.</div>
-        </div>
-        <button class="btn btn-ghost" id="btn-refresh-monitors">Refresh</button>
-      </div>
-
-      <div class="monitor-list" id="monitor-list-body">
-        <div class="empty-state">Loading…</div>
-      </div>
-
-      <div class="panel" style="margin-top:18px;">
-        <div class="panel-header"><span>Add a new metric</span></div>
-        <div class="add-monitor-form">
-          <div class="field">
-            <label>Name</label>
-            <input class="text-input" id="monitor-name-input" placeholder="e.g. GPU processes" />
-          </div>
-          <div class="field grow">
-            <label>Command</label>
-            <input class="text-input grow" id="monitor-command-input" placeholder="e.g. iostat -x 1" />
-          </div>
-          <div class="field">
-            <label>Watch interval (s, 0 = self-refreshing)</label>
-            <input class="text-input" id="monitor-interval-input" type="number" min="0" value="2" style="width:100%;" />
-          </div>
-          <button class="btn btn-primary" id="btn-add-monitor">Add metric</button>
-        </div>
-      </div>
-    </section>
-
-    <!-- ---------------------------------------------------- TensorBoard view -->
-    <section class="view" id="view-tensorboard">
-      <div class="view-header">
-        <div>
-          <div class="view-title">TensorBoard</div>
-          <div class="view-sub">Live scalars, images, and graphs from <span id="tb-logdir" style="font-family:var(--mono)"></span></div>
-        </div>
-      </div>
-      <div class="panel tb-panel">
-        <div class="tb-status-row">
-          <div class="pulse-dot" id="tb-dot"></div>
-          <div>
-            <div class="tb-status-label" id="tb-status-label">Not running</div>
-            <div class="tb-status-sub" id="tb-status-sub">Starts a tensorboard process on the server and opens it in a new browser tab.</div>
-          </div>
-        </div>
-        <div class="tb-toolbar">
-          <button class="btn btn-primary" id="btn-tb-start">Start TensorBoard</button>
-          <button class="btn btn-danger hidden" id="btn-tb-stop">Stop</button>
-          <a class="btn btn-ghost hidden" id="btn-tb-open" target="_blank" rel="noopener">Open in new tab ↗</a>
-        </div>
-      </div>
-    </section>
-
   </main>
 </div>
 
@@ -671,12 +756,19 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/yaml/yaml.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
-<script src="app.js?v=6"></script>
+<script src="app.js?v=7"></script>
 <script src="js/components/badge.js?v=1"></script>
 <script src="js/components/heatmap-grid.js?v=1"></script>
 <script src="js/views/runs.js?v=2"></script>
 <script src="js/views/data.js?v=1"></script>
-<script src="js/views/kaggle.js?v=1"></script>
+<script src="js/views/kaggle.js?v=2"></script>
+<script src="js/views/assignments.js?v=1"></script>
+<script src="js/views/runners.js?v=1"></script>
+<script src="js/views/experiments.js?v=1"></script>
+<script src="js/views/overview.js?v=1"></script>
 <script src="js/palette.js?v=1"></script>
+<script>
+  initSubtabStrip("configs-subtabs", (key) => { if (key === "create") initCreatorView(); });
+</script>
 </body>
 </html>

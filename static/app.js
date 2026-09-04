@@ -76,6 +76,7 @@ const state = {
   terminalChart: null,
   renderedTerminalSession: null,
   configPreviewCache: {},
+  runTargetsLoaded: false,
   configPreviewCollapsed: false,
   terminalLogCollapsed: false,
   resolvedConfigVisible: false,
@@ -255,15 +256,49 @@ function closeSidebar() {
 function switchView(view) {
   document.querySelectorAll(".nav-item").forEach((el) => el.classList.toggle("active", el.dataset.view === view));
   document.querySelectorAll(".view").forEach((el) => el.classList.toggle("active", el.id === `view-${view}`));
-  if (view === "tensorboard") refreshTensorboardStatus();
-  if (view === "runs" && !state.runGroups.length) loadRuns();
   if (view === "reports" && !state.reportGroups.length) loadReports();
   if (view === "history" && !state.historyTree.length) loadHistory();
-  if (view === "monitors") loadMonitors();
   if (view === "data") loadDataView();
-  if (view === "creator") initCreatorView();
-  if (view === "scheduler") loadScheduler();
-  if (view === "kaggle") loadKaggle();
+  if (view === "runners") { loadMonitors(); refreshTensorboardStatus(); loadKaggle(); loadRunnersOverview(); }
+  if (view === "experiments") loadExperimentsKaggleActive();
+  if (view === "assignments" && !state.assignmentsLoaded) loadAssignments();
+  if (view === "overview") loadOverview();
+}
+
+// ------------------------------------------------------------------ subtabs
+// Shared by any view merging several former tabs behind one nav item
+// (Configs [Browse|Create], Experiments [Active|Queue|Runs & Results]) — see
+// styles.css's .subtab-strip/.subtab-btn/.subtab-panel. `onOpen(key)` fires
+// only the *first* time a given subtab is opened (mirrors switchView()'s own
+// "load lazily, once" pattern for tabs that aren't already unconditionally
+// polled by boot()'s setInterval).
+function initSubtabStrip(stripId, onOpen) {
+  const strip = document.getElementById(stripId);
+  if (!strip) return;
+  const opened = new Set();
+  const panelContainer = strip.parentElement;
+  strip.querySelectorAll(".subtab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => activateSubtab(stripId, btn.dataset.subtab));
+  });
+  strip._onOpen = (key) => { if (!opened.has(key)) { opened.add(key); if (onOpen) onOpen(key); } };
+  const initial = strip.querySelector(".subtab-btn.active");
+  if (initial) strip._onOpen(initial.dataset.subtab);
+}
+
+function activateSubtab(stripId, key) {
+  const strip = document.getElementById(stripId);
+  if (!strip) return;
+  strip.querySelectorAll(".subtab-btn").forEach((b) => b.classList.toggle("active", b.dataset.subtab === key));
+  strip.parentElement.querySelectorAll(":scope > .subtab-panel").forEach((p) => p.classList.toggle("active", p.dataset.subtab === key));
+  if (strip._onOpen) strip._onOpen(key);
+}
+
+// Palette jump targets ("go to this run") need both the top-level tab and
+// (where the tab now has subtabs) the right subtab active before the
+// jump-target's own selector (selectRun(), etc.) runs against visible DOM.
+function switchToSubtab(view, stripId, key) {
+  switchView(view);
+  activateSubtab(stripId, key);
 }
 
 // ---------------------------------------------------------------- system info
@@ -358,6 +393,7 @@ async function selectConfig(path) {
   renderConfigTree();
   document.getElementById("editor-path").textContent = path;
   document.getElementById("run-bar").style.display = "flex";
+  if (!state.runTargetsLoaded) populateRunTargetSelect();
   document.getElementById("btn-save-config").disabled = false;
   document.getElementById("btn-toggle-resolved").disabled = false;
   // Switching configs always drops back to the raw view — a stale resolved
@@ -469,22 +505,66 @@ async function loadResolvedConfig() {
   }
 }
 
+// Runner picker (DASHBOARD_REDESIGN_PLAN.md §3.2): mclab is always launchable
+// directly; a Kaggle worker is only offered here if it's template-backed
+// (no notebook_path — see backend/kaggle.py's add_worker() docstring), since
+// only those actually run *this* picked config — a notebook-backed worker
+// ignores config_path entirely and keeps its own push button on the Runners
+// tab. Value encodes runner_id and (for Kaggle) worker_id as
+// "kaggle:<account>::<worker_id>" — split back apart in runConfig().
+async function populateRunTargetSelect() {
+  state.runTargetsLoaded = true;
+  const select = document.getElementById("run-target-select");
+  try {
+    const data = await api("/api/kaggle/accounts");
+    for (const account of data.accounts || []) {
+      for (const w of account.workers || []) {
+        if (w.notebook_path) continue;
+        const opt = document.createElement("option");
+        opt.value = `kaggle:${account.name}::${w.worker_id}`;
+        opt.textContent = `Kaggle: ${account.name}/${w.worker_id}`;
+        select.appendChild(opt);
+      }
+    }
+  } catch (e) { /* mclab-only select still works fine */ }
+}
+
 async function runConfig() {
   if (!state.selectedConfigPath) return;
   if (state.editorDirty && !(await showConfirm("Launch anyway?", "You have unsaved edits. Launch the last saved version anyway?"))) return;
+  const target = document.getElementById("run-target-select").value || "local";
   const mode = document.getElementById("run-mode").value;
   const extra_args = document.getElementById("run-extra-args").value.trim();
+
+  if (target === "local") {
+    try {
+      const term = await api("/api/terminals", {
+        method: "POST",
+        body: JSON.stringify({ config_path: state.selectedConfigPath, mode, extra_args }),
+      });
+      toast("Launched in a new terminal", "ok");
+      state.selectedTerminal = term.session_name;
+      switchToSubtab("experiments", "experiments-subtabs", "active");
+      await loadTerminals();
+    } catch (e) {
+      toast("Couldn't launch: " + e.message, "err");
+    }
+    return;
+  }
+
+  const sepIdx = target.indexOf("::");
+  const runnerId = target.slice(0, sepIdx);
+  const workerId = target.slice(sepIdx + 2);
   try {
-    const term = await api("/api/terminals", {
+    const result = await api(`/api/runners/${encodeURIComponent(runnerId)}/launch`, {
       method: "POST",
-      body: JSON.stringify({ config_path: state.selectedConfigPath, mode, extra_args }),
+      body: JSON.stringify({ config_path: state.selectedConfigPath, mode, extra_args, target: workerId }),
     });
-    toast("Launched in a new terminal", "ok");
-    state.selectedTerminal = term.session_name;
-    switchView("terminals");
-    await loadTerminals();
+    const label = `${runnerId.replace("kaggle:", "")}/${workerId}`;
+    toast(result.concurrent_warning ? `Pushed to ${label} — ${result.concurrent_warning}` : `Pushed to ${label}`, result.concurrent_warning ? "" : "ok");
+    switchView("runners");
   } catch (e) {
-    toast("Couldn't launch: " + e.message, "err");
+    toast("Couldn't push: " + e.message, "err");
   }
 }
 

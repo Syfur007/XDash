@@ -7,5 +7,7 @@ data/kaggle_accounts.json
 data/kaggle_accounts/
 data/kaggle_notifications.json
 data/run_notes.json
+data/assignments.json
 __pycache__/
 *.pyc
+.venv/

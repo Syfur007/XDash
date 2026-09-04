@@ -36,6 +36,9 @@ from backend import datasets_info
 from backend import kaggle as kaggle_ops
 from backend import notifications
 from backend import run_notes
+from backend import runners as runner_registry
+from backend.runners.base import ACTIVE_STATUSES, LaunchSpec, RunnerCapabilityError
+from backend import assignments
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -524,10 +527,11 @@ def api_kaggle_add_worker(name):
         return jsonify(kaggle_ops.add_worker(
             name,
             body.get("worker_id", ""),
-            body.get("notebook_path", ""),
             body.get("kernel_slug", ""),
             body.get("results_dir", ""),
             body.get("budget_hours"),
+            body.get("notebook_path", ""),
+            body.get("template_path", ""),
         ))
     except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
@@ -542,8 +546,21 @@ def api_kaggle_remove_worker(name, worker_id):
 
 @app.route("/api/kaggle/workers/<worker_id>/push", methods=["POST"])
 def api_kaggle_push(worker_id):
+    # config_path/mode/extra_args are only required for a template-backed worker (push() ignores
+    # them for a notebook-backed one) — see backend/kaggle.py's add_worker()/push() docstrings.
+    body = request.get_json(silent=True) or {}
     try:
-        return jsonify(kaggle_ops.push(worker_id))
+        return jsonify(kaggle_ops.push(
+            worker_id, body.get("config_path", ""), body.get("mode", "train"), body.get("extra_args", ""),
+        ))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/kaggle/workers/<worker_id>/restart", methods=["POST"])
+def api_kaggle_restart_worker(worker_id):
+    try:
+        return jsonify(kaggle_ops.restart(worker_id))
     except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
 
@@ -600,6 +617,102 @@ def api_kaggle_import_registry():
         return jsonify(kaggle_ops.import_registry(body))
     except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
+
+
+# --------------------------------------------------------------------------- runners (DASHBOARD_REDESIGN_PLAN.md Phase 0)
+# Additive facade over terminals/scheduler/kaggle — every route above keeps working unchanged;
+# these compose the same data into one runner-agnostic shape.
+@app.route("/api/runners", methods=["GET"])
+def api_list_runners():
+    return jsonify({"runners": [r.as_dict() for r in runner_registry.list_runners()]})
+
+
+@app.route("/api/experiments/active", methods=["GET"])
+def api_experiments_active():
+    units = []
+    for r in runner_registry.list_runners():
+        for u in (r.active_units() if hasattr(r, "active_units") else r.list_units()):
+            if u.status in ACTIVE_STATUSES:
+                units.append({
+                    "unit_id": u.unit_id, "runner_id": u.runner_id, "label": u.label,
+                    "status": u.status, "raw_status": u.raw_status,
+                    "config_path": u.config_path, "mode": u.mode, "extra": u.extra,
+                })
+    return jsonify({"units": units})
+
+
+@app.route("/api/runners/<path:runner_id>/launch", methods=["POST"])
+def api_runner_launch(runner_id):
+    """Symmetric one-click launch across runner kinds (DASHBOARD_REDESIGN_PLAN.md §3.2) — same
+    body shape whether runner_id is "local" or "kaggle:<account>"; `target` is required (and
+    means a worker_id) only for a Kaggle runner."""
+    body = request.get_json(silent=True) or {}
+    try:
+        r = runner_registry.get_runner(runner_id)
+    except KeyError as e:
+        return err(e.args[0] if e.args else str(e), 404)  # KeyError.__str__ re-reprs the message; args[0] is the plain text
+    spec = LaunchSpec(
+        config_path=body.get("config_path", ""), mode=body.get("mode", "train"),
+        extra_args=body.get("extra_args", ""), target=body.get("target"),
+    )
+    try:
+        u = r.launch(spec)
+    except FileNotFoundError:
+        return err(f"Config not found: {spec.config_path}", 404)
+    except (ValueError, kaggle_ops.KaggleOpsError, RunnerCapabilityError, tmux.TmuxError) as e:
+        return err(str(e), 400)
+    result = {"unit_id": u.unit_id, "runner_id": u.runner_id, "status": u.status}
+    if u.extra.get("concurrent_warning"):
+        result["concurrent_warning"] = u.extra["concurrent_warning"]
+    return jsonify(result)
+
+
+# --------------------------------------------------------------------------- assignment board (Phase 7)
+@app.route("/api/assignments", methods=["GET"])
+def api_list_assignments():
+    return jsonify({"rows": assignments.list_rows()})
+
+
+@app.route("/api/assignments", methods=["POST"])
+def api_add_assignment():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(assignments.add_row(
+            body.get("config_path", ""), body.get("seed"), body.get("runner_id", ""),
+            body.get("status", "planned"), body.get("notes", ""),
+        ))
+    except assignments.AssignmentError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/assignments/<row_id>", methods=["PATCH"])
+def api_update_assignment(row_id):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(assignments.update_row(row_id, body))
+    except assignments.AssignmentError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/assignments/<row_id>", methods=["DELETE"])
+def api_delete_assignment(row_id):
+    if not assignments.remove_row(row_id):
+        return err("Row not found", 404)
+    return jsonify({"removed": True})
+
+
+@app.route("/api/assignments/import_csv", methods=["POST"])
+def api_import_assignments_csv():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(assignments.import_csv(body.get("csv_path", "")))
+    except assignments.AssignmentError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/assignments/export_csv", methods=["GET"])
+def api_export_assignments_csv():
+    return app.response_class(assignments.export_csv(), mimetype="text/csv")
 
 
 # --------------------------------------------------------------------------- notifications

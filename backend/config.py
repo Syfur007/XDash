@@ -80,6 +80,11 @@ class Settings:
         self.kaggle_default_budget_hours = float(raw.get("kaggle_default_budget_hours", 9.5))
         self.kaggle_poll_interval_seconds = int(raw.get("kaggle_poll_interval_seconds", 180))
         self.kaggle_webhook_url = (raw.get("kaggle_webhook_url") or "").strip()
+        # Shared launch-template notebook a template-backed worker renders config/mode/extra_args
+        # into before every push, when it has no per-worker `template_path` override — see
+        # backend/kaggle.py's LAUNCH_SPEC_MARKER / _render_launch_notebook(). Repo-relative, same
+        # convention as a worker's notebook_path.
+        self.kaggle_default_template = raw.get("kaggle_default_template", "notebooks/kaggle_worker_template.ipynb")
 
         # Runtime state lives inside exp_dashboard/data so it never touches
         # the host repo. state_file is just a session_name -> {config, mode,
@@ -93,6 +98,7 @@ class Settings:
         self.monitors_file = self.state_dir / "monitors.json"
         self.scheduler_file = self.state_dir / "scheduler.json"
         self.run_notes_file = self.state_dir / "run_notes.json"
+        self.assignments_file = self.state_dir / "assignments.json"
         self.dashboard_log_dir = self.state_dir / "dashboard_logs"
         self.dashboard_log_dir.mkdir(parents=True, exist_ok=True)
 

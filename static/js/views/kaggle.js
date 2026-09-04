@@ -23,6 +23,15 @@ state.kaggleNotify = _kaggleGetPref("kaggleNotify");
 state.kaggleNotifications = {};       // channel -> settings, from GET /api/notifications
 state.kaggleNotifEditOpen = new Set(); // channel keys with their edit form open
 
+// Template-backed workers (no notebook_path — see backend/kaggle.py's add_worker() docstring)
+// need a config/mode/extra_args picked per push, the same way a mclab launch does — this opens
+// a small inline form on the worker's card instead of pushing immediately. A notebook-backed
+// worker (has notebook_path — e.g. the pre-existing iccit-kaggle-worker3/4.ipynb) keeps the
+// original one-click Push button, unchanged.
+state.kagglePushFormOpen = new Set();   // worker_ids with the inline push form expanded
+state.kaggleConfigGroups = [];          // GET /api/configs, cached lazily the first time a push form opens
+state.kaggleConfigsLoaded = false;
+
 // The 5 server-side notification channels (backend/notifications.py),
 // offered alongside the browser Notification toggle above — sent by the
 // Kaggle background poller (and, if enabled, the Scheduler's own tick), so
@@ -509,7 +518,7 @@ function renderKaggleWorkers() {
   countEl.textContent = allWorkers.length ? `${allWorkers.length} worker${allWorkers.length === 1 ? "" : "s"}` : "";
 
   if (!allWorkers.length) {
-    body.innerHTML = `<div class="empty-state">No workers configured yet. Add one below once you've added an account — it should point at a notebook already committed in this repo.</div>`;
+    body.innerHTML = `<div class="empty-state">No workers configured yet. Add one below once you've added an account — leave the notebook/template fields blank to push per-config launches through the default template, the same way you'd pick a config to launch on mclab.</div>`;
     return;
   }
 
@@ -533,13 +542,40 @@ function renderKaggleWorkers() {
             : `<div class="kaggle-history-row">No activity yet.</div>`
         }</div>`
       : "";
+    // Template-backed (no notebook_path): push needs a config/mode/extra_args picked, same as
+    // an mclab launch — see DASHBOARD_REDESIGN_PLAN.md §2.2. Notebook-backed (legacy,
+    // notebook_path set): the notebook already decides what it runs, so Push stays one-click.
+    const templateBacked = !w.notebook_path;
+    const lastSpec = w.last_config_path ? `<div class="kaggle-card-sub" title="Last pushed">last: ${escapeHtml(w.last_config_path)} (${escapeHtml(w.last_mode || "train")})</div>` : "";
+    const pushFormOpen = state.kagglePushFormOpen.has(w.worker_id);
+    const pushFormHtml = templateBacked && pushFormOpen ? `
+      <div class="scheduler-add-form" style="padding:10px 0 4px; flex-wrap:wrap;">
+        <div class="field grow">
+          <label>Config</label>
+          <select id="kaggle-push-config-${cssEscapeAttr(w.worker_id)}"><option value="">— pick a config —</option></select>
+        </div>
+        <div class="field">
+          <label>Mode</label>
+          <select id="kaggle-push-mode-${cssEscapeAttr(w.worker_id)}">
+            <option value="train">train.py</option>
+            <option value="eval">eval.py</option>
+          </select>
+        </div>
+        <div class="field grow">
+          <label>Extra args</label>
+          <input class="text-input grow" id="kaggle-push-args-${cssEscapeAttr(w.worker_id)}" placeholder="--epochs 10" />
+        </div>
+        <button class="btn btn-sm btn-primary" data-action="submit-push-worker" data-id="${escapeHtml(w.worker_id)}">Push ▸</button>
+        <button class="btn btn-sm btn-ghost" data-action="cancel-push-worker" data-id="${escapeHtml(w.worker_id)}">Cancel</button>
+      </div>` : "";
     return `<div class="kaggle-card">
       <div class="kaggle-card-accent ${accentClass}"></div>
       <div class="kaggle-card-body">
         <div class="kaggle-card-header">
           <div>
             <div class="kaggle-card-title">${escapeHtml(w.worker_id)}</div>
-            <div class="kaggle-card-sub">${escapeHtml(w.account_name)} · ${escapeHtml(w.kernel_slug)}</div>
+            <div class="kaggle-card-sub">${escapeHtml(w.account_name)} · ${escapeHtml(w.kernel_slug)} ${templateBacked ? '· <span title="Renders a config into the shared/override template on push">template-backed</span>' : '· <span title="Pushes a fixed notebook verbatim">notebook-backed</span>'}</div>
+            ${lastSpec}
           </div>
           <div>${renderStatusBadge(status)} ${overBudgetBadge} ${notebookChangedBadge}</div>
         </div>
@@ -557,9 +593,11 @@ function renderKaggleWorkers() {
 
         ${errorHtml}
         ${historyHtml}
+        ${pushFormHtml}
 
         <div class="kaggle-card-footer">
           <button class="btn btn-sm btn-ghost" data-action="push-worker" data-id="${escapeHtml(w.worker_id)}">Push</button>
+          ${w.last_config_path ? `<button class="btn btn-sm btn-ghost" data-action="restart-worker" data-id="${escapeHtml(w.worker_id)}" title="Re-push with the same config/mode/args as last time">Restart</button>` : ""}
           <button class="btn btn-sm btn-ghost" data-action="refresh-worker" data-id="${escapeHtml(w.worker_id)}">Refresh</button>
           <button class="btn btn-sm btn-ghost" data-action="download-worker" data-id="${escapeHtml(w.worker_id)}">Download</button>
           <button class="btn btn-sm btn-ghost" data-action="toggle-history" data-id="${escapeHtml(w.worker_id)}">${historyOpen ? "Hide history" : "History"}</button>
@@ -569,12 +607,17 @@ function renderKaggleWorkers() {
     </div>`;
   }).join("");
 
+  body.querySelectorAll("select[id^='kaggle-push-config-']").forEach((sel) => populateKaggleConfigSelect(sel));
+
   body.querySelectorAll("button[data-action]").forEach((btn) => {
     btn.addEventListener("click", (e) => {
       e.stopPropagation();
       const id = btn.dataset.id;
       const action = btn.dataset.action;
       if (action === "push-worker") pushKaggleWorker(id);
+      else if (action === "submit-push-worker") submitKagglePushForm(id);
+      else if (action === "cancel-push-worker") { state.kagglePushFormOpen.delete(id); renderKaggleWorkers(); }
+      else if (action === "restart-worker") restartKaggleWorker(id);
       else if (action === "refresh-worker") refreshKaggleWorker(id);
       else if (action === "download-worker") downloadKaggleWorker(id);
       else if (action === "remove-worker") removeKaggleWorker(btn.dataset.account, id);
@@ -632,23 +675,59 @@ async function removeKaggleAccount(name) {
 }
 
 // ----------------------------------------------------------------- workers
+function findKaggleWorker(workerId) {
+  for (const a of state.kaggleAccounts) {
+    const w = (a.workers || []).find((w) => w.worker_id === workerId);
+    if (w) return w;
+  }
+  return null;
+}
+
+// Populates one <select> with every config, grouped by category — same shape as
+// populateSchedulerConfigSelect() in app.js, duplicated (not shared) since it also wires a
+// second bulk-category <select> this doesn't need; kept in sync manually if that ever changes.
+async function populateKaggleConfigSelect(selectEl) {
+  if (!state.kaggleConfigsLoaded) {
+    state.kaggleConfigsLoaded = true;
+    try {
+      const data = await api("/api/configs");
+      state.kaggleConfigGroups = data.groups || [];
+    } catch (e) { /* leave empty — the select just stays a single placeholder option */ }
+  }
+  for (const group of state.kaggleConfigGroups) {
+    const optgroup = document.createElement("optgroup");
+    optgroup.label = group.category;
+    for (const c of group.configs) {
+      const opt = document.createElement("option");
+      opt.value = c.path; opt.textContent = c.name;
+      optgroup.appendChild(opt);
+    }
+    selectEl.appendChild(optgroup);
+  }
+}
+
 async function addKaggleWorker() {
   const account_name = document.getElementById("kaggle-new-worker-account").value;
   const worker_id = document.getElementById("kaggle-new-worker-id").value.trim();
   const notebook_path = document.getElementById("kaggle-new-worker-notebook").value.trim();
+  const template_path = document.getElementById("kaggle-new-worker-template").value.trim();
   const kernel_slug = document.getElementById("kaggle-new-worker-slug").value.trim();
   const results_dir = document.getElementById("kaggle-new-worker-results").value.trim();
   const budgetRaw = document.getElementById("kaggle-new-worker-budget").value.trim();
-  if (!account_name || !worker_id || !notebook_path || !kernel_slug || !results_dir) {
-    toast("Account, worker id, notebook path, kernel slug and results dir are all required", "err");
+  if (!account_name || !worker_id || !kernel_slug || !results_dir) {
+    toast("Account, worker id, kernel slug and results dir are all required", "err");
     return;
   }
-  const body = { worker_id, notebook_path, kernel_slug, results_dir };
+  if (notebook_path && template_path) {
+    toast("Set either a fixed notebook path or a template override, not both", "err");
+    return;
+  }
+  const body = { worker_id, kernel_slug, results_dir, notebook_path, template_path };
   if (budgetRaw) body.budget_hours = parseFloat(budgetRaw);
   try {
     await api(`/api/kaggle/accounts/${encodeURIComponent(account_name)}/workers`, { method: "POST", body: JSON.stringify(body) });
     toast(`Worker '${worker_id}' added`, "ok");
-    ["kaggle-new-worker-id", "kaggle-new-worker-notebook", "kaggle-new-worker-slug", "kaggle-new-worker-results", "kaggle-new-worker-budget"]
+    ["kaggle-new-worker-id", "kaggle-new-worker-notebook", "kaggle-new-worker-template", "kaggle-new-worker-slug", "kaggle-new-worker-results", "kaggle-new-worker-budget"]
       .forEach((id) => (document.getElementById(id).value = ""));
     toggleKaggleAddForm("kaggle-add-worker-form", "btn-kaggle-toggle-add-worker", "+ Add worker", "Cancel");
     loadKaggle();
@@ -672,16 +751,54 @@ async function removeKaggleWorker(accountName, workerId) {
   }
 }
 
-async function pushKaggleWorker(workerId) {
+// Notebook-backed: push immediately (config_path/mode/extra_args are ignored server-side for
+// these — see backend/kaggle.py's push()). Template-backed: open the inline config/mode/args
+// form on the card instead — see submitKagglePushForm() for what actually calls the API.
+function pushKaggleWorker(workerId) {
+  const w = findKaggleWorker(workerId);
+  if (w && w.notebook_path) {
+    doKagglePush(workerId, {});
+    return;
+  }
+  state.kagglePushFormOpen.add(workerId);
+  renderKaggleWorkers();
+}
+
+async function submitKagglePushForm(workerId) {
+  const safeId = cssEscapeAttr(workerId);
+  const config_path = document.getElementById(`kaggle-push-config-${safeId}`).value;
+  const mode = document.getElementById(`kaggle-push-mode-${safeId}`).value;
+  const extra_args = document.getElementById(`kaggle-push-args-${safeId}`).value.trim();
+  if (!config_path) { toast("Pick a config first", "err"); return; }
+  const ok = await doKagglePush(workerId, { config_path, mode, extra_args });
+  if (ok) state.kagglePushFormOpen.delete(workerId);
+}
+
+async function restartKaggleWorker(workerId) {
   try {
-    const result = await api(`/api/kaggle/workers/${encodeURIComponent(workerId)}/push`, { method: "POST" });
+    const result = await api(`/api/kaggle/workers/${encodeURIComponent(workerId)}/restart`, { method: "POST" });
+    delete state.kaggleLastFailedAction[workerId];
+    toast(result.concurrent_warning ? `Re-pushed '${workerId}' — ${result.concurrent_warning}` : `Re-pushed '${workerId}'`, result.concurrent_warning ? "" : "ok");
+    loadKaggle();
+  } catch (e) {
+    state.kaggleLastFailedAction[workerId] = "push";
+    toast(`Restart failed: ${e.message}`, "err");
+    renderKaggleWorkers();
+  }
+}
+
+async function doKagglePush(workerId, spec) {
+  try {
+    const result = await api(`/api/kaggle/workers/${encodeURIComponent(workerId)}/push`, { method: "POST", body: JSON.stringify(spec) });
     delete state.kaggleLastFailedAction[workerId];
     toast(result.concurrent_warning ? `Pushed '${workerId}' — ${result.concurrent_warning}` : `Pushed '${workerId}'`, result.concurrent_warning ? "" : "ok");
     loadKaggle();
+    return true;
   } catch (e) {
     state.kaggleLastFailedAction[workerId] = "push";
     toast(`Push failed: ${e.message}`, "err");
     renderKaggleWorkers();
+    return false;
   }
 }
 
@@ -731,7 +848,9 @@ async function pushAllKaggleWorkers() {
   if (!targets.length) { toast("No workers configured", "err"); return; }
   const ok = await showConfirm(
     `Push ${targets.length} worker${targets.length === 1 ? "" : "s"}?`,
-    `This pushes every configured worker, using real GPU quota on each account: ${targets.join(", ")}`
+    `This pushes every configured worker, using real GPU quota on each account: ${targets.join(", ")}. ` +
+    `Template-backed workers with no config picked yet (no prior push) will fail individually — ` +
+    `push those once from their own card first, then "Push all" re-pushes their last config.`
   );
   if (!ok) return;
   try {

@@ -47,16 +47,55 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import settings
+from . import configs as cfg
 from . import notifications as notif
 
 _lock = threading.Lock()          # guards kaggle_accounts.json / kaggle_state.json
 _ledger_lock = threading.Lock()   # guards concurrent appends to the host repo's runs.csv
 
 STATUS_RE = re.compile(r'has status "([^"]+)"')
+_ENUM_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.")
+# Live-verified 2026-09 against the actually-installed `kaggle` CLI (pip package "kaggle" 1.7.4.5,
+# github.com/Kaggle/kaggle-api): `kernels status` prints the Python enum's own repr — e.g.
+# `has status "KernelWorkerStatus.RUNNING"` — not the bare lowercase string
+# IN_PROGRESS_STATUSES/FINISHED_STATUSES/FINAL_STATUSES below expect. Confirmed via a real push +
+# status poll during this feature's own testing (DASHBOARD_REDESIGN_PLAN.md §2.1's fact-check).
+# Without this normalization, over-budget detection, the poller's final-status/notification
+# trigger, and download_all()'s "only download finished workers" filter all silently never fire
+# against this CLI version — every comparison below is an exact-match against a lowercase set.
+_STATUS_ALIASES = {"cancelacknowledged": "cancelAcknowledged"}
+
+
+def _normalize_kaggle_status(raw: str) -> str:
+    value = _ENUM_PREFIX_RE.sub("", (raw or "").strip()).strip().lower()
+    return _STATUS_ALIASES.get(value, value)
 IN_PROGRESS_STATUSES = {"queued", "preparing", "running"}
 FINISHED_STATUSES = {"complete"}
 FINAL_STATUSES = {"complete", "error", "cancelAcknowledged"}  # tick() stops polling/chains past these
 HISTORY_LIMIT = 50  # per-worker event log cap in kaggle_state.json — a rolling window, not an audit archive
+
+# Template-notebook launch (dashboard redesign, 2026-09): one push == one config, same shape as
+# an mclab launch, instead of the notebook itself hand-authoring a whole batch of configs. The
+# dashboard renders this cell's three placeholders into a copy of the worker's template notebook
+# (settings.kaggle_default_template, or a per-worker override) before every push — see
+# _render_launch_notebook(). A worker that instead sets its own `notebook_path` (the original,
+# still-supported shape — e.g. the existing iccit-kaggle-worker3/4 notebooks) is pushed verbatim,
+# unrendered, exactly as before; the two modes are mutually exclusive per worker, checked in
+# push() below.
+LAUNCH_SPEC_MARKER = "# DASHBOARD:LAUNCH_SPEC"
+_LAUNCH_PLACEHOLDERS = {
+    "config_path": "__DASHBOARD_CONFIG_PATH__",
+    "mode": "__DASHBOARD_MODE__",
+    "extra_args": "__DASHBOARD_EXTRA_ARGS__",
+    # Resolved server-side from settings.train_script/eval_script, never hardcoded in the
+    # template — a deployment may point these at a wrapper (e.g. this study's own
+    # scripts/run_iccit_sweep.py, which loops the pre-registered seeds and writes the
+    # manifest/ledger rows train.py's own CLI never does) rather than train.py/eval.py
+    # directly. Mirrors tmux_runner.build_launch_command()'s own settings.train_script /
+    # settings.eval_script choice exactly, so a Kaggle-launched run and an mclab-launched run
+    # of the same config actually run the *same command* — not just a structurally similar one.
+    "script": "__DASHBOARD_SCRIPT__",
+}
 
 # Mirrors orchestration/ledger.py's RUNS_FIELDS in the host repo exactly —
 # a downloaded worker's own artifacts/ledger/runs.csv already has these
@@ -184,15 +223,26 @@ def _creds_dir(name: str) -> Path:
     return settings.kaggle_creds_dir / name
 
 
+def _source_notebook_path(worker: Dict[str, Any]) -> str:
+    """The notebook this worker's next push is rendered from (template-backed)
+    or copied from verbatim (notebook-backed) — see add_worker()'s docstring."""
+    return worker.get("notebook_path") or worker.get("template_path") or settings.kaggle_default_template
+
+
 def _notebook_changed(worker: Dict[str, Any], worker_state: Dict[str, Any]) -> Optional[bool]:
-    """True if the worker's on-disk notebook differs from the one last
-    successfully pushed (by content hash) — None if it's never been pushed,
-    or the file is currently missing, since "changed" isn't a meaningful
-    answer in either case."""
-    pushed_hash = worker_state.get("pushed_notebook_hash")
+    """True if the worker's on-disk *source* notebook/template differs from
+    the one in effect at the last push (by content hash) — None if it's
+    never been pushed, or the file is currently missing, since "changed"
+    isn't a meaningful answer in either case. Compared against
+    `pushed_template_hash` (the source file's own hash), not
+    `pushed_notebook_hash` (the exact, possibly-rendered bytes actually
+    pushed) — for a template-backed worker those two differ on every push by
+    design (config/mode/args get baked in), which would otherwise make this
+    always report "changed" even when the template itself is untouched."""
+    pushed_hash = worker_state.get("pushed_template_hash") or worker_state.get("pushed_notebook_hash")
     if not pushed_hash:
         return None
-    notebook_abs = settings.repo_root / worker["notebook_path"]
+    notebook_abs = settings.repo_root / _source_notebook_path(worker)
     if not notebook_abs.is_file():
         return None
     try:
@@ -402,13 +452,27 @@ def _validate_notebook_path(notebook_path: str) -> Path:
 
 
 def add_worker(
-    account_name: str, worker_id: str, notebook_path: str, kernel_slug: str,
-    results_dir: str, budget_hours: Optional[float] = None,
+    account_name: str, worker_id: str, kernel_slug: str, results_dir: str,
+    budget_hours: Optional[float] = None, notebook_path: str = "", template_path: str = "",
 ) -> Dict[str, Any]:
+    """A worker is either **notebook-backed** (`notebook_path` set — the original shape: a fixed,
+    hand-authored notebook pushed verbatim every time, e.g. the existing
+    `iccit-kaggle-worker3/4.ipynb`) or **template-backed** (`notebook_path` left blank — the
+    default going forward: `push()` renders a config/mode/extra_args into a shared template,
+    settings.kaggle_default_template unless `template_path` overrides it, per-launch — see
+    LAUNCH_SPEC_MARKER / _render_launch_notebook()). The two are mutually exclusive so a worker's
+    launch behavior is never ambiguous."""
     worker_id = (worker_id or "").strip()
-    if not worker_id or not kernel_slug or not notebook_path or not results_dir:
-        raise KaggleOpsError("worker_id, notebook_path, kernel_slug and results_dir are all required")
-    _validate_notebook_path(notebook_path)
+    notebook_path, template_path = (notebook_path or "").strip(), (template_path or "").strip()
+    if not worker_id or not kernel_slug or not results_dir:
+        raise KaggleOpsError("worker_id, kernel_slug and results_dir are all required")
+    if notebook_path and template_path:
+        raise KaggleOpsError("A worker takes either notebook_path (a fixed notebook) or template_path "
+                              "(a launch template), not both")
+    if notebook_path:
+        _validate_notebook_path(notebook_path)
+    elif template_path:
+        _validate_notebook_path(template_path)  # same validation: repo-relative, must exist
 
     with _lock:
         data = _load_accounts()
@@ -419,11 +483,14 @@ def add_worker(
             raise KaggleOpsError(f"Worker '{worker_id}' already exists under '{account_name}'")
         worker = {
             "worker_id": worker_id,
-            "notebook_path": str(notebook_path),
             "kernel_slug": kernel_slug,
             "results_dir": str(results_dir),
             "budget_hours": float(budget_hours) if budget_hours else settings.kaggle_default_budget_hours,
         }
+        if notebook_path:
+            worker["notebook_path"] = notebook_path
+        if template_path:
+            worker["template_path"] = template_path
         account.setdefault("workers", []).append(worker)
         _save_accounts(data)
     return worker
@@ -513,21 +580,108 @@ def _kernel_metadata(account: Dict[str, Any], worker: Dict[str, Any], notebook_n
     }
 
 
-def push(worker_id: str) -> Dict[str, Any]:
+def _render_launch_notebook(template_abs: Path, config_path: str, mode: str, extra_args: str) -> bytes:
+    """Loads *template_abs* (nbformat JSON), finds the single cell carrying
+    LAUNCH_SPEC_MARKER, and substitutes its `__DASHBOARD_*__` placeholders
+    with real values — stdlib json/re only, no Papermill (see
+    DASHBOARD_REDESIGN_PLAN.md §2.2: dependency-minimalism is load-bearing
+    for this project, and a plain marker-cell substitution needs nothing
+    Papermill's tagged-parameter-cell convention would). Each value is
+    inserted as a Python string literal (`repr()`), so it's automatically
+    escaped against quote-breaking — the same shell-safety posture
+    tmux_runner.py already applies to CLI arguments applies here to notebook
+    source text. Returns the rendered notebook re-serialized as bytes."""
+    try:
+        notebook = json.loads(template_abs.read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        raise KaggleOpsError(f"Could not read template notebook {template_abs}: {e}")
+
+    marker_cells = [
+        c for c in notebook.get("cells", [])
+        if c.get("cell_type") == "code" and LAUNCH_SPEC_MARKER in "".join(c.get("source") or [])
+    ]
+    if len(marker_cells) != 1:
+        raise KaggleOpsError(
+            f"Template notebook {template_abs} must contain exactly one code cell with the "
+            f"'{LAUNCH_SPEC_MARKER}' marker (found {len(marker_cells)}) — see "
+            "notebooks/kaggle_worker_template.ipynb for the expected shape."
+        )
+    cell = marker_cells[0]
+    script = settings.train_script if mode == "train" else settings.eval_script
+    values = {
+        _LAUNCH_PLACEHOLDERS["config_path"]: config_path,
+        _LAUNCH_PLACEHOLDERS["mode"]: mode,
+        _LAUNCH_PLACEHOLDERS["extra_args"]: extra_args or "",
+        _LAUNCH_PLACEHOLDERS["script"]: script,
+    }
+
+    def substitute(line: str) -> str:
+        for token, real_value in values.items():
+            line = line.replace(f'"{token}"', repr(real_value))
+        return line
+
+    cell["source"] = [substitute(line) for line in cell["source"]]
+    return json.dumps(notebook, indent=1).encode()
+
+
+def push(worker_id: str, config_path: str = "", mode: str = "train", extra_args: str = "") -> Dict[str, Any]:
+    """Pushes *worker_id*'s kernel. A notebook-backed worker (`notebook_path`
+    set) is pushed verbatim — *config_path*/*mode*/*extra_args* are ignored,
+    matching the original behavior exactly. A template-backed worker (the
+    default) requires *config_path*: the launch spec is rendered into its
+    template (settings.kaggle_default_template, or `template_path` if set)
+    before push — the direct Kaggle-side counterpart of
+    `terminals.launch(config_path, mode, extra_args)`."""
     data = _load_accounts()
     account, worker = _find_worker_and_account(data, worker_id)
     if worker is None:
         raise KaggleOpsError(f"Unknown worker '{worker_id}'")
-    notebook_abs = settings.repo_root / worker["notebook_path"]
-    if not notebook_abs.is_file():
-        raise KaggleOpsError(f"Notebook not found: {worker['notebook_path']}")
+
+    notebook_path = worker.get("notebook_path")
+    if notebook_path:
+        source_abs = settings.repo_root / notebook_path
+        if not source_abs.is_file():
+            raise KaggleOpsError(f"Notebook not found: {notebook_path}")
+        push_bytes = source_abs.read_bytes()
+        push_name = source_abs.name
+    else:
+        config_path = (config_path or "").strip()
+        if not config_path:
+            raise KaggleOpsError(
+                f"Worker '{worker_id}' is template-backed — a config_path is required to push "
+                "(pick a config the same way you would to launch it on mclab)"
+            )
+        if mode not in ("train", "eval"):
+            raise KaggleOpsError("mode must be 'train' or 'eval'")
+        try:
+            cfg.read_config(config_path)  # raises if the config doesn't exist / isn't valid YAML
+            cli_config_path = cfg.repo_relative_path(config_path)  # e.g. "configs/mkunet/foo.yaml"
+        except (FileNotFoundError, ValueError) as e:
+            raise KaggleOpsError(f"Config not found: {config_path} ({e})")
+        source_abs = settings.repo_root / _source_notebook_path(worker)
+        if not source_abs.is_file():
+            raise KaggleOpsError(f"Template notebook not found: {_source_notebook_path(worker)}")
+        push_bytes = _render_launch_notebook(source_abs, cli_config_path, mode, extra_args)
+        push_name = source_abs.name
+
+    source_hash = hashlib.sha1(source_abs.read_bytes()).hexdigest()
 
     tmpdir = tempfile.mkdtemp(prefix="kaggle_push_")
     try:
-        shutil.copy(notebook_abs, Path(tmpdir) / notebook_abs.name)
-        metadata = _kernel_metadata(account, worker, notebook_abs.name)
+        (Path(tmpdir) / push_name).write_bytes(push_bytes)
+        metadata = _kernel_metadata(account, worker, push_name)
         (Path(tmpdir) / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2))
-        proc = _run_kaggle(["kernels", "push", "-p", tmpdir], account["name"], timeout=120)
+        push_args = ["kernels", "push", "-p", tmpdir]
+
+        budget_hours = worker.get("budget_hours") or settings.kaggle_default_budget_hours
+        timeout_args = ["--timeout", str(int(float(budget_hours) * 3600))]
+        proc = _run_kaggle(push_args + timeout_args, account["name"], timeout=120)
+        if proc.returncode != 0 and _looks_like_unrecognized_option(proc.stderr or proc.stdout, "--timeout"):
+            # The installed `kaggle` CLI predates the --timeout flag (confirmed present as of the
+            # official kaggle-cli's 2026 release, per DASHBOARD_REDESIGN_PLAN.md's fact-check, but
+            # never verified against whatever version is actually installed on this host) — retry
+            # without it rather than hard-failing every push over one optional enforcement flag.
+            proc = _run_kaggle(push_args, account["name"], timeout=120)
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -536,16 +690,47 @@ def push(worker_id: str) -> Dict[str, Any]:
         _update_worker_state(worker_id, {"status": "push_failed", "last_error": detail}, event="push failed")
         raise KaggleOpsError(f"Push failed for '{worker_id}': {detail}")
 
-    notebook_hash = hashlib.sha1(notebook_abs.read_bytes()).hexdigest()
+    notebook_hash = hashlib.sha1(push_bytes).hexdigest()
+    event = "pushed" if notebook_path else f"pushed — {config_path} ({mode})"
     _update_worker_state(worker_id, {
         "status": "pushed", "pushed_at": _now_iso(), "last_error": None, "over_budget": False,
-        "notified_final": False, "pushed_notebook_hash": notebook_hash,
-    }, event="pushed")
+        "notified_final": False, "pushed_notebook_hash": notebook_hash, "pushed_template_hash": source_hash,
+        "last_config_path": config_path or None, "last_mode": mode if not notebook_path else None,
+        "last_extra_args": extra_args or None,
+    }, event=event)
     warning = _concurrent_push_warning(account, worker_id)
     result = {"worker_id": worker_id, "status": "pushed"}
     if warning:
         result["concurrent_warning"] = warning
     return result
+
+
+def restart(worker_id: str) -> Dict[str, Any]:
+    """Re-pushes a template-backed worker with the config/mode/extra_args
+    from its last push — the Kaggle-side counterpart of terminals.restart()
+    (mclab's restart re-runs the same config/mode/args in a fresh tmux
+    session; this re-renders and re-pushes the same launch spec). Not
+    meaningful for a notebook-backed worker (push() already ignores
+    config_path for those) — just calls push() again with no spec, which is
+    a plain re-push, matching that worker's pre-existing behavior."""
+    data = _load_accounts()
+    _, worker = _find_worker_and_account(data, worker_id)
+    if worker is None:
+        raise KaggleOpsError(f"Unknown worker '{worker_id}'")
+    if worker.get("notebook_path"):
+        return push(worker_id)
+    state = _load_state().get(worker_id, {})
+    config_path = state.get("last_config_path")
+    if not config_path:
+        raise KaggleOpsError(f"Worker '{worker_id}' has never been pushed with a config — nothing to restart")
+    return push(worker_id, config_path, state.get("last_mode") or "train", state.get("last_extra_args") or "")
+
+
+def _looks_like_unrecognized_option(output: str, flag: str) -> bool:
+    text = (output or "").lower()
+    return flag.lower() in text and any(
+        phrase in text for phrase in ("no such option", "unrecognized", "unexpected argument", "unknown option")
+    )
 
 
 def _concurrent_push_warning(account: Dict[str, Any], worker_id: str) -> Optional[str]:
@@ -583,7 +768,7 @@ def refresh_status(worker_id: str) -> Dict[str, Any]:
         return {"worker_id": worker_id, **patch}
 
     m = STATUS_RE.search(proc.stdout)
-    kaggle_status = m.group(1) if m else "unknown"
+    kaggle_status = _normalize_kaggle_status(m.group(1)) if m else "unknown"
 
     state = _load_state()
     prior = state.get(worker_id, {})
@@ -781,8 +966,25 @@ def _run_bulk(fn, worker_ids: List[str]) -> List[Dict[str, Any]]:
     return results
 
 
+def _push_or_restart(worker_id: str) -> Dict[str, Any]:
+    """push_all()'s per-worker action: a notebook-backed worker just pushes
+    (as always); a template-backed worker re-pushes its *last* config/mode/
+    args via restart() — push() alone would fail every time here since it
+    has no config_path to work from without one being passed explicitly.
+    Raises KaggleOpsError (caught by _run_bulk) for a template-backed worker
+    that's never been pushed yet — "push all" bulk-repeats known launches,
+    it doesn't guess a first one."""
+    data = _load_accounts()
+    _, worker = _find_worker_and_account(data, worker_id)
+    if worker is None:
+        raise KaggleOpsError(f"Unknown worker '{worker_id}'")
+    if worker.get("notebook_path"):
+        return push(worker_id)
+    return restart(worker_id)
+
+
 def push_all() -> List[Dict[str, Any]]:
-    return _run_bulk(push, _all_worker_ids())
+    return _run_bulk(_push_or_restart, _all_worker_ids())
 
 
 def refresh_all() -> List[Dict[str, Any]]:
@@ -845,22 +1047,26 @@ def import_registry(payload: Dict[str, Any]) -> Dict[str, Any]:
                 if _find_worker(account, worker_id) is not None:
                     skipped_workers.append({"account": name, "worker_id": worker_id, "reason": "already exists"})
                     continue
-                required = {"notebook_path", "kernel_slug", "results_dir"}
+                required = {"kernel_slug", "results_dir"}  # notebook_path/template_path are both optional
                 if not required.issubset(w):
                     skipped_workers.append({"account": name, "worker_id": worker_id, "reason": "missing fields"})
                     continue
-                try:
-                    _validate_notebook_path(w["notebook_path"])
-                except KaggleOpsError as e:
-                    skipped_workers.append({"account": name, "worker_id": worker_id, "reason": str(e)})
-                    continue
-                account.setdefault("workers", []).append({
+                source_field = "notebook_path" if w.get("notebook_path") else ("template_path" if w.get("template_path") else None)
+                if source_field:
+                    try:
+                        _validate_notebook_path(w[source_field])
+                    except KaggleOpsError as e:
+                        skipped_workers.append({"account": name, "worker_id": worker_id, "reason": str(e)})
+                        continue
+                new_worker = {
                     "worker_id": worker_id,
-                    "notebook_path": w["notebook_path"],
                     "kernel_slug": w["kernel_slug"],
                     "results_dir": w["results_dir"],
                     "budget_hours": w.get("budget_hours") or settings.kaggle_default_budget_hours,
-                })
+                }
+                if source_field:
+                    new_worker[source_field] = w[source_field]
+                account.setdefault("workers", []).append(new_worker)
                 added.append({"account": name, "worker_id": worker_id})
         if added:
             _save_accounts(data)

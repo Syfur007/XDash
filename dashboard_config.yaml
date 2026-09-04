@@ -90,6 +90,11 @@ kaggle_executable: "kaggle"
 kaggle_push_concurrency: 3        # max concurrent push/status/download calls across accounts
 kaggle_default_budget_hours: 9.5  # session-length guardrail fallback when a worker has none set
 
+# Shared launch-template notebook a template-backed worker (the default — no notebook_path set)
+# renders config_path/mode/extra_args into before every push, unless it has its own
+# template_path override. Repo-relative. See notebooks/kaggle_worker_template.ipynb.
+kaggle_default_template: "notebooks/kaggle_worker_template.ipynb"
+
 # The background poller (backend/kaggle.py's ensure_kaggle_worker_started/
 # _tick) checks any pushed-but-not-yet-final worker on this cadence, in
 # seconds — it's what fires the webhook below and drives chained auto-push
