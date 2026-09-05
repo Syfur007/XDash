@@ -1,12 +1,21 @@
 # =============================================================================
-# Experiment Dashboard — settings
+# Experiment Dashboard — repo profile: segpriors
 # =============================================================================
-# Everything the dashboard needs to know about the repo it lives in.
-# Edit `repo_root` if you move this folder somewhere else; every other path
-# below is resolved relative to it, so the whole `exp_dashboard/` directory
-# can be copied into (or out of) any repo that follows the same layout.
+# One of XDash/repos/*.yaml — a named profile the dashboard can switch to at
+# runtime (MULTI_REPO_PLAN.md §3). `repo_root` below is resolved relative to
+# *this file's own directory* (XDash/repos/), not to XDash's root, so one
+# shared XDash checkout can drive several sibling repos without per-repo
+# clones.
 
-repo_root: ".."               # path to the repo root, relative to this file
+display_name: "segpriors"
+
+repo_root: "../../segpriors"  # path to the repo root, relative to this file
+
+# Manifest/ledger directory shape ledger.py expects (MULTI_REPO_PLAN.md §2):
+# "legacy" = artifacts/runs/<run_id>/manifest.json, artifacts/ledger/*.csv
+# (this repo's shape). "experiments" = the newer outputs/experiments/<id>/
+# nested layout (dissert's shape) — see repos/dissert.yaml.
+manifest_layout: "legacy"
 
 configs_dir: "configs"        # where .yaml / .yml experiment configs live
 logs_dir: "logs"              # where train.py / eval.py write their log files

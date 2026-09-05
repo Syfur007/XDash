@@ -7,9 +7,9 @@ stable dependency chain (no pydantic version-matching issues), which matters
 for older environments (this was written targeting Python 3.8).
 
 This file, plus everything under backend/ and static/, is the entire
-subsystem. It reads dashboard_config.yaml to find the host repo's
-configs/logs/runs directories, so it can be copied into any repo that
-follows the same layout and removed again without leaving a trace.
+subsystem. It reads repos/<profile>.yaml (MULTI_REPO_PLAN.md) to find a
+host repo's configs/logs/runs directories — one deployment can drive
+several sibling repos, switched at runtime via /api/repos/active.
 """
 from __future__ import annotations
 
@@ -36,6 +36,7 @@ from backend import datasets_info
 from backend import kaggle as kaggle_ops
 from backend import notifications
 from backend import run_notes
+from backend import repos as repos_ops
 from backend import runners as runner_registry
 from backend.runners.base import ACTIVE_STATUSES, LaunchSpec, RunnerCapabilityError
 from backend import assignments
@@ -871,10 +872,35 @@ def api_tb_stop():
     return jsonify(tb.stop())
 
 
+# --------------------------------------------------------------------------- repos (MULTI_REPO_PLAN.md Phases 1/2/4)
+@app.route("/api/repos", methods=["GET"])
+def api_list_repos():
+    return jsonify({"repos": repos_ops.list_profiles(), "active": settings.profile_name})
+
+
+@app.route("/api/repos/active", methods=["POST"])
+def api_set_active_repo():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(repos_ops.set_active_profile(body.get("profile", "")))
+    except repos_ops.RepoProfileError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/repos/sessions", methods=["GET"])
+def api_repo_sessions():
+    """Every tmux + Kaggle session across every profile, each tagged with its
+    owning repo — Terminals/Runs/Scheduler/Kaggle stay visible regardless of
+    which profile is active (MULTI_REPO_PLAN.md §6 option B)."""
+    return jsonify({"sessions": repos_ops.list_global_sessions()})
+
+
 # --------------------------------------------------------------------------- system
 @app.route("/api/system", methods=["GET"])
 def api_system():
     return jsonify({
+        "profile_name": settings.profile_name,
+        "display_name": settings.display_name,
         "repo_root": str(settings.repo_root),
         "configs_dir": str(settings.configs_dir),
         "logs_dir": str(settings.logs_dir),
@@ -882,6 +908,7 @@ def api_system():
         "plots_dir": str(settings.plots_dir),
         "reports_dir": str(settings.reports_dir),
         "artifacts_dir": str(settings.artifacts_dir),
+        "manifest_layout": settings.manifest_layout,
         "poll_interval_ms": settings.poll_interval_ms,
         "tensorboard_port": settings.tensorboard_port,
         "env_activate_cmd": settings.env_activate_cmd,
@@ -904,7 +931,8 @@ def _warn_if_exposed():
             "and several of them\n"
             "  (Terminals, Monitors, Scheduler) can run arbitrary shell commands on this "
             "machine.\n"
-            "  Set api_token in dashboard_config.yaml before exposing this beyond localhost.\n",
+            "  Set api_token in repos/<profile>.yaml (whichever profile loads first) before "
+            "exposing this beyond localhost.\n",
             file=sys.stderr,
         )
 

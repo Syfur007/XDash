@@ -1,13 +1,16 @@
-data/terminals_state.json
-data/monitors.json
-data/scheduler.json
-data/dashboard_logs/
-data/kaggle_state.json
-data/kaggle_accounts.json
-data/kaggle_accounts/
-data/kaggle_notifications.json
-data/run_notes.json
-data/assignments.json
+# Runtime state, namespaced per repo profile (MULTI_REPO_PLAN.md §5):
+# data/<profile_name>/terminals_state.json, etc.
+data/*/terminals_state.json
+data/*/monitors.json
+data/*/scheduler.json
+data/*/dashboard_logs/
+data/*/kaggle_state.json
+data/*/kaggle_accounts.json
+data/*/kaggle_accounts/
+data/*/kaggle_notifications.json
+data/*/run_notes.json
+data/*/assignments.json
+data/_active_repo.json
 __pycache__/
 *.pyc
 .venv/

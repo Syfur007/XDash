@@ -547,7 +547,7 @@ def _run_kaggle(args: List[str], account_name: str, timeout: Optional[float] = N
     except FileNotFoundError:
         raise KaggleOpsError(
             f"'{settings.kaggle_executable}' was not found on PATH. Set kaggle_executable in "
-            "dashboard_config.yaml to wherever it's installed."
+            f"repos/{settings.profile_name}.yaml to wherever it's installed."
         )
     except subprocess.TimeoutExpired:
         raise KaggleOpsError(f"kaggle {' '.join(args)} timed out after {timeout}s")

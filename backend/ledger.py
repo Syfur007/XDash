@@ -35,6 +35,26 @@ def list_ledger_rows(table: str) -> List[Dict[str, str]]:
 
 
 def _iter_manifest_paths():
+    """Yields every manifest.json on disk, in whichever shape this profile's
+    manifest_layout uses (MULTI_REPO_PLAN.md §2/§3):
+      "legacy"      artifacts/runs/<run_id>/manifest.json
+      "experiments" outputs/experiments/<experiment_id>/checkpoints/
+                    [fold{N}/]manifest.json — the directory manifest.json
+                    sits in is no longer named after run_id, so callers must
+                    key off the manifest's own run_id field, not p.parent.name.
+    """
+    if settings.manifest_layout == "experiments":
+        base = settings.experiments_dir
+        if not base.is_dir():
+            return
+        seen = set()
+        for pattern in ("*/checkpoints/manifest.json", "*/checkpoints/fold*/manifest.json"):
+            for p in sorted(base.glob(pattern)):
+                if p.is_file() and p not in seen:
+                    seen.add(p)
+                    yield p
+        return
+
     if not settings.runs_artifacts_dir.is_dir():
         return
     for p in sorted(settings.runs_artifacts_dir.glob("*/manifest.json")):
@@ -53,8 +73,20 @@ def get_run(run_id: str) -> Optional[Dict[str, Any]]:
     """One run's manifest, joined with its Runs-ledger row if one exists
     (the ledger row carries a couple of fields — best_metric, monitor_metric
     — the manifest itself doesn't record)."""
-    p = settings.runs_artifacts_dir / run_id / "manifest.json"
-    manifest = _load_manifest(p) if p.is_file() else None
+    manifest = None
+    if settings.manifest_layout == "legacy":
+        # Fast path: the legacy layout names the manifest's own directory
+        # after run_id, so this skips scanning every manifest on disk.
+        p = settings.runs_artifacts_dir / run_id / "manifest.json"
+        manifest = _load_manifest(p) if p.is_file() else None
+    if manifest is None:
+        # "experiments" layout (and a legacy fast-path miss) both fall back
+        # to a scan, matched by the manifest's own run_id field.
+        for p in _iter_manifest_paths():
+            candidate = _load_manifest(p)
+            if candidate and (candidate.get("run_id") or p.parent.name) == run_id:
+                manifest = candidate
+                break
     if manifest is None:
         return None
     ledger_row = next((r for r in list_ledger_rows("runs") if r.get("run_id") == run_id), None)

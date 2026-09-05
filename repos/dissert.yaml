@@ -1,0 +1,111 @@
+# =============================================================================
+# Experiment Dashboard — repo profile: dissert
+# =============================================================================
+# One of XDash/repos/*.yaml — a named profile the dashboard can switch to at
+# runtime (MULTI_REPO_PLAN.md §3). `repo_root` below is resolved relative to
+# *this file's own directory* (XDash/repos/), not to XDash's root.
+#
+# Built from scratch against dissert's OUTPUT_LAYOUT.md (the nested,
+# experiment-first layout, commit fec2a9a) — deliberately not reusing the old
+# uncommitted dashboard_config.yaml edit this checkout carried before the
+# multi-repo refactor, which predates that layout and pointed at the stale
+# flat outputs/{logs,runs,checkpoints,artifacts} dirs.
+
+display_name: "dissert"
+
+repo_root: "../../dissert"    # path to the repo root, relative to this file
+
+configs_dir: "configs"        # where .yaml / .yml experiment configs live
+
+# dissert's whole outputs/ tree is nested per experiment_id
+# ("<experiment_name>-s<seed>") rather than split by artifact type, so
+# logs_dir/runs_dir/plots_dir/reports_dir all point at the same root —
+# each reader below finds what it needs by walking or by content, not by a
+# type-specific subpath (MULTI_REPO_PLAN.md §2):
+#   - reports.py finds report.json files by content ("metrics" key), so
+#     nested outputs/experiments/*/eval/report.json is found the same way
+#     flat logs/*/report.json is.
+#   - tensorboard_manager.py just execs `tensorboard --logdir <runs_dir>`,
+#     which already recursively discovers nested run subdirectories.
+#   - history.py's tree walk will also surface .pth/checkpoint files as inert
+#     "binary" entries under this root — harmless noise, not a blocker
+#     (MULTI_REPO_PLAN.md §2's optional Phase 6 polish item).
+logs_dir: "outputs/experiments"
+runs_dir: "outputs/experiments"
+checkpoints_dir: "outputs/experiments"
+plots_dir: "outputs/experiments"
+reports_dir: "outputs/experiments"
+
+# Ledger lives at outputs/ledger/ — a sibling of outputs/experiments/, NOT
+# nested under an "artifacts" dir the way segpriors' is. ledger_dir is its
+# own independently-configurable key precisely so this doesn't need an
+# artifacts_dir concept that doesn't exist in this layout (MULTI_REPO_PLAN.md
+# §2/§3). artifacts_dir itself is left at its harmless default (unused by
+# anything when manifest_layout is "experiments").
+ledger_dir: "outputs/ledger"
+
+# manifest.json lives at outputs/experiments/<experiment_id>/checkpoints/
+# [fold{N}/]manifest.json — a different shape from segpriors' flat
+# artifacts/runs/<run_id>/manifest.json glob. This is the one discriminator
+# ledger.py branches on (MULTI_REPO_PLAN.md §2/§3).
+manifest_layout: "experiments"
+
+python_executable: "python"   # interpreter used to launch train.py / eval.py
+
+# KNOWN GAP (MULTI_REPO_PLAN.md §7): dissert's train.py has no --seed flag
+# and never calls orchestration.runner.run_sweep, so a dashboard launch
+# through bare train.py runs fine but writes no manifest.json/ledger row —
+# the Runs/Ledger tabs stay empty for dissert launches until dissert grows
+# its own run_iccit_sweep.py-equivalent wrapper (segpriors' scripts/
+# run_iccit_sweep.py is the template). That wrapper is also the fix for the
+# 3-seeds x {train,eval} = 6-sessions-per-experiment problem — see
+# ~/Workspace/dissert/SESSION_GROUPING_PLAN.md. Point train_script/
+# eval_script at that wrapper once it exists instead of the bare scripts
+# below; no XDash-side change is needed to adopt it, since the dashboard
+# only ever knows "run {train_script} --config PATH", never how many seeds
+# that invocation covers internally.
+train_script: "train.py"
+eval_script: "eval.py"
+
+bridge_python_executable: ""
+
+# dissert's eval.py --ensemble means fold-ensemble (across K-fold splits),
+# not seed-ensemble — verify this is the intended default before reusing
+# segpriors' own eval_default_args verbatim; left empty here since dissert's
+# eval.py flag set hasn't been confirmed to need it by default.
+eval_default_args: []
+
+env_activate_cmd: "conda activate thesis"
+
+# Left unset: defaults to "xdash-dissert" (MULTI_REPO_PLAN.md §5), distinct
+# from segpriors' "xdash" prefix so sessions from either profile never
+# collide even though the two repos share a lot of config-name vocabulary.
+# tmux_session_prefix: "xdash-dissert"
+tmux_pane_width: 500
+tmux_pane_height: 50
+tmux_history_limit: 100000
+
+# server_host/server_port/api_token are deployment-level, not per-profile —
+# whatever the first-loaded profile at process start declares wins for the
+# life of the process; a later `switch to dissert` never rebinds the socket
+# or the auth token (MULTI_REPO_PLAN.md §4). Left here only for
+# documentation/standalone-use; the running server won't re-read these on a
+# switch.
+server_host: "127.0.0.1"
+server_port: 6070
+
+tensorboard_port: 6006
+tensorboard_host: "127.0.0.1"
+
+api_token: ""
+
+poll_interval_ms: 2000
+
+scheduler_max_concurrent_limit: 8
+scheduler_max_queue_size: 200
+
+kaggle_executable: "kaggle"
+kaggle_push_concurrency: 3
+kaggle_default_budget_hours: 9.5
+kaggle_poll_interval_seconds: 180
+kaggle_webhook_url: ""
