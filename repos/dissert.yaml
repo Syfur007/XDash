@@ -52,20 +52,19 @@ manifest_layout: "experiments"
 
 python_executable: "python"   # interpreter used to launch train.py / eval.py
 
-# KNOWN GAP (MULTI_REPO_PLAN.md §7): dissert's train.py has no --seed flag
-# and never calls orchestration.runner.run_sweep, so a dashboard launch
-# through bare train.py runs fine but writes no manifest.json/ledger row —
-# the Runs/Ledger tabs stay empty for dissert launches until dissert grows
-# its own run_iccit_sweep.py-equivalent wrapper (segpriors' scripts/
-# run_iccit_sweep.py is the template). That wrapper is also the fix for the
-# 3-seeds x {train,eval} = 6-sessions-per-experiment problem — see
-# ~/Workspace/dissert/SESSION_GROUPING_PLAN.md. Point train_script/
-# eval_script at that wrapper once it exists instead of the bare scripts
-# below; no XDash-side change is needed to adopt it, since the dashboard
-# only ever knows "run {train_script} --config PATH", never how many seeds
-# that invocation covers internally.
+# Corrected 2026-09 (EXPERIMENT_AUTOMATION_PLAN.md §2.1): dissert's own
+# train.py DOES take a seed directly — `--seed N` (single) or `--seeds N…`
+# (mutually exclusive), see dissert/train.py's parse_args() — unlike
+# segpriors, which needs its scripts/run_iccit_sweep.py wrapper because bare
+# train.py has no --seed flag at all. No wrapper is required here; the
+# previous version of this comment claimed otherwise and was wrong.
 train_script: "train.py"
 eval_script: "eval.py"
+
+# Format string for passing a seed on the command line — see
+# backend/config.py's Settings.seed_arg. dissert's train.py takes a single
+# seed via --seed.
+seed_arg: "--seed {seed}"
 
 bridge_python_executable: ""
 

@@ -24,6 +24,20 @@ REPOS_DIR = DASHBOARD_DIR / "repos"
 # back up on, instead of defaulting to whichever profile sorts first.
 ACTIVE_REPO_FILE = DASHBOARD_DIR / "data" / "_active_repo.json"
 
+# System-wide Kaggle registry. A Kaggle account is a property of the person,
+# not of the repo: the same account can host kernels for several repos, and —
+# the reason this scope has to exist rather than just being convenient — its
+# weekly GPU quota is one real number shared across all of them. Registering
+# the same account separately under two profiles would store its credentials
+# twice and give each profile a partial view of that one quota, so both would
+# under-count it and any quota gate built on them would be wrong.
+#
+# Sibling to ACTIVE_REPO_FILE, deliberately outside every data/<profile>/
+# subtree. Per-repo accounts still live at the Settings paths below; the two
+# scopes are merged for reads (backend/kaggle.py).
+SYSTEM_KAGGLE_ACCOUNTS_FILE = DASHBOARD_DIR / "data" / "kaggle_accounts.json"
+SYSTEM_KAGGLE_CREDS_DIR = DASHBOARD_DIR / "data" / "kaggle_accounts"
+
 
 def list_profile_names() -> List[str]:
     if not REPOS_DIR.is_dir():
@@ -92,6 +106,18 @@ class Settings:
         self.eval_script = raw.get("eval_script", "eval.py")
         self.eval_default_args = raw.get("eval_default_args", []) or []
 
+        # A format string for passing a seed on the command line — e.g.
+        # "--seed {seed}" or "--seeds {seed}". The two repos spell this
+        # differently (dissert's train.py takes --seed/--seeds directly;
+        # segpriors' bare train.py has neither, only its
+        # scripts/run_iccit_sweep.py wrapper's --seeds), so nothing in the
+        # dispatcher may hardcode either spelling — every seed-bearing
+        # extra_args string is built by formatting this template
+        # (EXPERIMENT_AUTOMATION_PLAN.md §2.1). Left blank when unset: a
+        # profile that hasn't declared a seed flag simply can't be given one
+        # by the batch dispatcher, rather than the dispatcher guessing.
+        self.seed_arg = (raw.get("seed_arg") or "").strip()
+
         # Where the orchestration layer writes run manifests/ledger. Two
         # layouts are supported (MULTI_REPO_PLAN.md §2/§3):
         #   "legacy"      artifacts/runs/<run_id>/manifest.json, artifacts/ledger/*.csv
@@ -157,6 +183,14 @@ class Settings:
         self.kaggle_executable = raw.get("kaggle_executable", "kaggle")
         self.kaggle_push_concurrency = max(1, int(raw.get("kaggle_push_concurrency", 3)))
         self.kaggle_default_budget_hours = float(raw.get("kaggle_default_budget_hours", 9.5))
+        # Fallback weekly GPU-hour quota for any account that hasn't set its
+        # own weekly_budget_hours (backend/kaggle.py's set_weekly_budget()).
+        # A budget is a property of the Kaggle account/tier, not of this
+        # repo — this is only ever a default for an account that hasn't been
+        # told its real one yet. Kaggle's free tier is commonly ~30 GPU-hrs/
+        # week; left generous-but-finite so a newly registered account isn't
+        # silently gated to 0 before anyone has configured it.
+        self.kaggle_default_weekly_budget_hours = float(raw.get("kaggle_default_weekly_budget_hours", 30.0))
         self.kaggle_poll_interval_seconds = int(raw.get("kaggle_poll_interval_seconds", 180))
         self.kaggle_webhook_url = (raw.get("kaggle_webhook_url") or "").strip()
         # Shared launch-template notebook a template-backed worker renders config/mode/extra_args

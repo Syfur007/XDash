@@ -11,6 +11,13 @@ data/*/kaggle_notifications.json
 data/*/run_notes.json
 data/*/assignments.json
 data/_active_repo.json
+
+# System-wide (cross-profile) Kaggle registry — a Kaggle account belongs to a
+# person, not a repo, so these live outside any data/<profile>/ subtree. The
+# data/*/ patterns above are one level deep and would NOT cover them, and
+# data/kaggle_accounts/<name>/ holds real credentials.
+data/kaggle_accounts.json
+data/kaggle_accounts/
 __pycache__/
 *.pyc
 .venv/

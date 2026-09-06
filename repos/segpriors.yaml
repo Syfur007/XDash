@@ -41,6 +41,12 @@ python_executable: "python"   # interpreter used to launch train.py / eval.py
 train_script: "scripts/run_iccit_sweep.py"
 eval_script: "scripts/eval_iccit_sweep.py"
 
+# Format string for passing a seed on the command line — see
+# backend/config.py's Settings.seed_arg. --seeds takes nargs="+", but a
+# single value works fine as a one-element list — this pins one seed per
+# batch row rather than the wrapper's own default multi-seed sweep.
+seed_arg: "--seeds {seed}"
+
 # Interpreter used for "bridge" calls into the host repo's own code — schema-aware
 # config validation, model-registry introspection, and similar features that need
 # the host repo's actual dependencies (pydantic, torch, ...) importable, which the

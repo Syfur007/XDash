@@ -210,6 +210,9 @@ function renderKaggleAccounts() {
             <div class="kaggle-card-sub">${escapeHtml(a.kaggle_username || "–")} · ${workerCount} worker${workerCount === 1 ? "" : "s"}</div>
           </div>
           <div class="kaggle-cred-chips">
+            <span class="kaggle-chip on" title="${a.scope === "system"
+              ? "System-wide: available under every repo profile, with one shared set of credentials and one weekly quota."
+              : "Registered for this repo only — not visible under other repo profiles."}">${a.scope === "system" ? "system" : "this repo"}</span>
             <span class="kaggle-chip ${a.has_legacy_key ? "on" : ""}" title="Classic username/key pair stored">key</span>
             <span class="kaggle-chip ${a.has_api_token ? "on" : ""}" title="New-format API token stored">token</span>
           </div>
@@ -546,7 +549,7 @@ function renderKaggleWorkers() {
     // an mclab launch — see DASHBOARD_REDESIGN_PLAN.md §2.2. Notebook-backed (legacy,
     // notebook_path set): the notebook already decides what it runs, so Push stays one-click.
     const templateBacked = !w.notebook_path;
-    const lastSpec = w.last_config_path ? `<div class="kaggle-card-sub" title="Last pushed">last: ${escapeHtml(w.last_config_path)} (${escapeHtml(w.last_mode || "train")})</div>` : "";
+    const lastSpec = w.last_config_path ? `<div class="kaggle-card-sub" title="Last pushed">last: ${escapeHtml(w.last_config_path)}</div>` : "";
     const pushFormOpen = state.kagglePushFormOpen.has(w.worker_id);
     const pushFormHtml = templateBacked && pushFormOpen ? `
       <div class="scheduler-add-form" style="padding:10px 0 4px; flex-wrap:wrap;">
@@ -554,15 +557,8 @@ function renderKaggleWorkers() {
           <label>Config</label>
           <select id="kaggle-push-config-${cssEscapeAttr(w.worker_id)}"><option value="">— pick a config —</option></select>
         </div>
-        <div class="field">
-          <label>Mode</label>
-          <select id="kaggle-push-mode-${cssEscapeAttr(w.worker_id)}">
-            <option value="train">train.py</option>
-            <option value="eval">eval.py</option>
-          </select>
-        </div>
-        <div class="field grow">
-          <label>Extra args</label>
+        <div class="field grow" title="Runs train then eval sequentially inside this one kernel — there is no separate train-only or eval-only push.">
+          <label>Extra args (applied to both stages)</label>
           <input class="text-input grow" id="kaggle-push-args-${cssEscapeAttr(w.worker_id)}" placeholder="--epochs 10" />
         </div>
         <button class="btn btn-sm btn-primary" data-action="submit-push-worker" data-id="${escapeHtml(w.worker_id)}">Push ▸</button>
@@ -633,10 +629,11 @@ async function addKaggleAccount() {
   const username = document.getElementById("kaggle-new-account-username").value.trim();
   const key = document.getElementById("kaggle-new-account-key").value.trim();
   const api_token = document.getElementById("kaggle-new-account-token").value.trim();
+  const scope = document.getElementById("kaggle-new-account-scope").value;
   if (!name || !username) { toast("Account name and Kaggle username are required", "err"); return; }
   if (!key && !api_token) { toast("Provide a classic API key, an API token, or both", "err"); return; }
   try {
-    await api("/api/kaggle/accounts", { method: "POST", body: JSON.stringify({ name, username, key, api_token }) });
+    await api("/api/kaggle/accounts", { method: "POST", body: JSON.stringify({ name, username, key, api_token, scope }) });
     toast(`Account '${name}' added`, "ok");
     ["kaggle-new-account-name", "kaggle-new-account-username", "kaggle-new-account-key", "kaggle-new-account-token"]
       .forEach((id) => (document.getElementById(id).value = ""));
@@ -767,10 +764,9 @@ function pushKaggleWorker(workerId) {
 async function submitKagglePushForm(workerId) {
   const safeId = cssEscapeAttr(workerId);
   const config_path = document.getElementById(`kaggle-push-config-${safeId}`).value;
-  const mode = document.getElementById(`kaggle-push-mode-${safeId}`).value;
   const extra_args = document.getElementById(`kaggle-push-args-${safeId}`).value.trim();
   if (!config_path) { toast("Pick a config first", "err"); return; }
-  const ok = await doKagglePush(workerId, { config_path, mode, extra_args });
+  const ok = await doKagglePush(workerId, { config_path, extra_args });
   if (ok) state.kagglePushFormOpen.delete(workerId);
 }
 

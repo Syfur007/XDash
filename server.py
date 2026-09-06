@@ -473,6 +473,7 @@ def api_kaggle_add_account():
     try:
         return jsonify(kaggle_ops.add_account(
             body.get("name", ""), body.get("username", ""), body.get("key", ""), body.get("api_token", ""),
+            scope=body.get("scope") or kaggle_ops.SCOPE_REPO,
         ))
     except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
@@ -547,12 +548,14 @@ def api_kaggle_remove_worker(name, worker_id):
 
 @app.route("/api/kaggle/workers/<worker_id>/push", methods=["POST"])
 def api_kaggle_push(worker_id):
-    # config_path/mode/extra_args are only required for a template-backed worker (push() ignores
+    # config_path/extra_args are only required for a template-backed worker (push() ignores
     # them for a notebook-backed one) — see backend/kaggle.py's add_worker()/push() docstrings.
+    # No "mode": a template-backed push always runs train then eval inside one kernel
+    # (EXPERIMENT_AUTOMATION_PLAN.md §2.4).
     body = request.get_json(silent=True) or {}
     try:
         return jsonify(kaggle_ops.push(
-            worker_id, body.get("config_path", ""), body.get("mode", "train"), body.get("extra_args", ""),
+            worker_id, body.get("config_path", ""), body.get("extra_args", ""),
         ))
     except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
@@ -603,6 +606,16 @@ def api_kaggle_set_auto_chain(name):
     try:
         return jsonify(kaggle_ops.set_auto_chain(name, bool(body.get("enabled"))))
     except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/kaggle/accounts/<name>/weekly_budget", methods=["POST"])
+def api_kaggle_set_weekly_budget(name):
+    body = request.get_json(silent=True) or {}
+    hours = body.get("hours")
+    try:
+        return jsonify(kaggle_ops.set_weekly_budget(name, float(hours) if hours is not None else None))
+    except (kaggle_ops.KaggleOpsError, TypeError, ValueError) as e:
         return err(str(e), 400)
 
 

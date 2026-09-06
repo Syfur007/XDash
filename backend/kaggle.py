@@ -33,6 +33,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -46,7 +47,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .config import settings
+from .config import settings, Settings, SYSTEM_KAGGLE_ACCOUNTS_FILE, SYSTEM_KAGGLE_CREDS_DIR
 from . import configs as cfg
 from . import notifications as notif
 
@@ -85,7 +86,6 @@ HISTORY_LIMIT = 50  # per-worker event log cap in kaggle_state.json — a rollin
 LAUNCH_SPEC_MARKER = "# DASHBOARD:LAUNCH_SPEC"
 _LAUNCH_PLACEHOLDERS = {
     "config_path": "__DASHBOARD_CONFIG_PATH__",
-    "mode": "__DASHBOARD_MODE__",
     "extra_args": "__DASHBOARD_EXTRA_ARGS__",
     # Resolved server-side from settings.train_script/eval_script, never hardcoded in the
     # template — a deployment may point these at a wrapper (e.g. this study's own
@@ -94,7 +94,19 @@ _LAUNCH_PLACEHOLDERS = {
     # directly. Mirrors tmux_runner.build_launch_command()'s own settings.train_script /
     # settings.eval_script choice exactly, so a Kaggle-launched run and an mclab-launched run
     # of the same config actually run the *same command* — not just a structurally similar one.
-    "script": "__DASHBOARD_SCRIPT__",
+    #
+    # No "mode" placeholder (EXPERIMENT_AUTOMATION_PLAN.md §2.4): a Kaggle push covers the
+    # whole experiment, train then eval, inside one kernel execution — there is no second push
+    # to chain a separate eval half onto the way scheduler.add_item(mode="both") chains two
+    # local tmux sessions. Both scripts are always resolved and always run.
+    "train_script": "__DASHBOARD_TRAIN_SCRIPT__",
+    "eval_script": "__DASHBOARD_EVAL_SCRIPT__",
+    # settings.eval_default_args, space-joined and shell-quoted — mirrors terminals.py's own
+    # `extra_flags = eval_default_args if mode == "eval" else []` merge into
+    # tmux_runner.build_launch_command() exactly, so a Kaggle-run eval gets the same flags
+    # (e.g. segpriors' --ensemble) a local eval of the same config always gets. Applied only
+    # to the eval command, never the train one.
+    "eval_extra_flags": "__DASHBOARD_EVAL_EXTRA_FLAGS__",
 }
 
 # Mirrors orchestration/ledger.py's RUNS_FIELDS in the host repo exactly —
@@ -117,19 +129,94 @@ def _now_iso() -> str:
 
 
 # --------------------------------------------------------------------------- storage
-def _load_accounts() -> Dict[str, Any]:
-    if not settings.kaggle_accounts_file.exists():
+# Two scopes (see config.SYSTEM_KAGGLE_ACCOUNTS_FILE for why the system one
+# has to exist): "system" accounts are shared by every repo profile, "repo"
+# accounts belong to the active profile alone.
+#
+# The split runs along account/worker, not account alone: an *account* is a
+# person's Kaggle login — credentials and one weekly quota — while a *worker*
+# is a kernel running a specific repo's code, with a repo-relative
+# results_dir, its own kernel_slug and (per the automation plan §2.5) its own
+# attached datasets. So a system-wide account carries workers for several
+# profiles, tagged with which profile each belongs to.
+#
+# _load_accounts() hides that: it returns the merged list with each account's
+# `workers` already filtered to the active profile, so every existing caller
+# (push, list_accounts, _tick, _find_worker_and_account, ...) keeps reading
+# `account["workers"]` and means the same thing it always did.
+SCOPE_SYSTEM = "system"
+SCOPE_REPO = "repo"
+
+
+def _scope_paths(scope: str):
+    if scope == SCOPE_SYSTEM:
+        return SYSTEM_KAGGLE_ACCOUNTS_FILE, SYSTEM_KAGGLE_CREDS_DIR
+    return settings.kaggle_accounts_file, settings.kaggle_creds_dir
+
+
+def _load_scope(scope: str) -> Dict[str, Any]:
+    path, _ = _scope_paths(scope)
+    if not path.exists():
         return {"accounts": []}
     try:
-        data = json.loads(settings.kaggle_accounts_file.read_text())
+        data = json.loads(path.read_text())
     except Exception:
         return {"accounts": []}
     data.setdefault("accounts", [])
     return data
 
 
+def _save_scope(scope: str, data: Dict[str, Any]) -> None:
+    path, _ = _scope_paths(scope)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2))
+
+
+def _load_accounts() -> Dict[str, Any]:
+    """Merged, active-profile view of both scopes. Each account gains a
+    "scope" key; a system account's workers are filtered to those tagged for
+    the active profile (an untagged worker is treated as this profile's, so
+    a registry written before this split keeps working)."""
+    profile = settings.profile_name
+    merged: List[Dict[str, Any]] = []
+    for account in _load_scope(SCOPE_SYSTEM)["accounts"]:
+        view = dict(account, scope=SCOPE_SYSTEM)
+        view["workers"] = [
+            w for w in account.get("workers", [])
+            if w.get("profile", profile) == profile
+        ]
+        merged.append(view)
+    for account in _load_scope(SCOPE_REPO)["accounts"]:
+        merged.append(dict(account, scope=SCOPE_REPO))
+    return {"accounts": merged}
+
+
 def _save_accounts(data: Dict[str, Any]) -> None:
-    settings.kaggle_accounts_file.write_text(json.dumps(data, indent=2))
+    """Routes each account in a merged view back to the store it came from.
+    For a system account only the active profile's workers are replaced —
+    other profiles' workers are read from disk and preserved, since the view
+    handed to the caller never contained them."""
+    profile = settings.profile_name
+    system_out: List[Dict[str, Any]] = []
+    repo_out: List[Dict[str, Any]] = []
+    stored_system = {a["name"]: a for a in _load_scope(SCOPE_SYSTEM)["accounts"]}
+
+    for view in data["accounts"]:
+        record = {k: v for k, v in view.items() if k != "scope"}
+        if view.get("scope") == SCOPE_SYSTEM:
+            others = [
+                w for w in stored_system.get(view["name"], {}).get("workers", [])
+                if w.get("profile", profile) != profile
+            ]
+            record["workers"] = others + [
+                dict(w, profile=profile) for w in view.get("workers", [])
+            ]
+            system_out.append(record)
+        else:
+            repo_out.append(record)
+
+    _save_scope(SCOPE_SYSTEM, {"accounts": system_out})
+    _save_scope(SCOPE_REPO, {"accounts": repo_out})
 
 
 def _load_state() -> Dict[str, Any]:
@@ -219,8 +306,19 @@ def _validate_access_token(raw_token: str) -> str:
     return token
 
 
+def _account_scope(name: str) -> str:
+    """Which store holds *name*. Names are unique across both scopes
+    (add_account refuses a cross-scope collision), so resolving by name alone
+    is unambiguous — which keeps _run_kaggle(args, account_name) and every
+    one of its call sites unchanged."""
+    if any(a["name"] == name for a in _load_scope(SCOPE_SYSTEM)["accounts"]):
+        return SCOPE_SYSTEM
+    return SCOPE_REPO
+
+
 def _creds_dir(name: str) -> Path:
-    return settings.kaggle_creds_dir / name
+    _, creds_root = _scope_paths(_account_scope(name))
+    return creds_root / name
 
 
 def _source_notebook_path(worker: Dict[str, Any]) -> str:
@@ -237,7 +335,7 @@ def _notebook_changed(worker: Dict[str, Any], worker_state: Dict[str, Any]) -> O
     `pushed_template_hash` (the source file's own hash), not
     `pushed_notebook_hash` (the exact, possibly-rendered bytes actually
     pushed) — for a template-backed worker those two differ on every push by
-    design (config/mode/args get baked in), which would otherwise make this
+    design (config/extra_args get baked in), which would otherwise make this
     always report "changed" even when the template itself is untouched."""
     pushed_hash = worker_state.get("pushed_template_hash") or worker_state.get("pushed_notebook_hash")
     if not pushed_hash:
@@ -269,6 +367,7 @@ def list_accounts() -> List[Dict[str, Any]]:
         result.append({
             "name": account["name"],
             "kaggle_username": account.get("kaggle_username"),
+            "scope": account.get("scope", SCOPE_REPO),
             "has_legacy_key": (creds_dir / CREDS_FILENAME).is_file(),
             "has_api_token": (creds_dir / TOKEN_FILENAME).is_file(),
             "auto_chain": bool(account.get("auto_chain")),
@@ -295,10 +394,18 @@ def set_auto_chain(name: str, enabled: bool) -> Dict[str, Any]:
 
 def add_account(
     name: str, username: str = "", key: str = "", api_token: str = "",
+    scope: str = SCOPE_REPO,
 ) -> Dict[str, Any]:
+    """*scope* "system" registers the account for every repo profile (one set
+    of credentials, one quota); "repo" (the default) keeps it to the active
+    profile. A name may exist in only one scope — an account visible twice
+    under one label would be ambiguous everywhere it's referenced by name,
+    including credential lookup."""
     name = (name or "").strip()
     if not name:
         raise KaggleOpsError("Missing account name")
+    if scope not in (SCOPE_SYSTEM, SCOPE_REPO):
+        raise KaggleOpsError(f"scope must be '{SCOPE_SYSTEM}' or '{SCOPE_REPO}', got {scope!r}")
     username, key, api_token = (username or ""), (key or ""), (api_token or "")
 
     # Gate legacy validation on `key` alone, not `username` — username is
@@ -318,15 +425,18 @@ def add_account(
         data = _load_accounts()
         if _find_account(data, name) is not None:
             raise KaggleOpsError(f"Account '{name}' already exists")
-        creds_dir = _creds_dir(name)
+        _, creds_root = _scope_paths(scope)
+        creds_dir = creds_root / name
         creds_dir.mkdir(parents=True, exist_ok=True)
         if legacy:
             _write_secret(creds_dir / CREDS_FILENAME, json.dumps(legacy))
         if token:
             _write_secret(creds_dir / TOKEN_FILENAME, token)
-        data["accounts"].append({"name": name, "kaggle_username": resolved_username, "workers": []})
+        data["accounts"].append({
+            "name": name, "kaggle_username": resolved_username, "workers": [], "scope": scope,
+        })
         _save_accounts(data)
-    return {"name": name, "kaggle_username": resolved_username}
+    return {"name": name, "kaggle_username": resolved_username, "scope": scope}
 
 
 def _write_secret(path: Path, text: str) -> None:
@@ -458,7 +568,7 @@ def add_worker(
     """A worker is either **notebook-backed** (`notebook_path` set — the original shape: a fixed,
     hand-authored notebook pushed verbatim every time, e.g. the existing
     `iccit-kaggle-worker3/4.ipynb`) or **template-backed** (`notebook_path` left blank — the
-    default going forward: `push()` renders a config/mode/extra_args into a shared template,
+    default going forward: `push()` renders a config/extra_args into a shared template,
     settings.kaggle_default_template unless `template_path` overrides it, per-launch — see
     LAUNCH_SPEC_MARKER / _render_launch_notebook()). The two are mutually exclusive so a worker's
     launch behavior is never ambiguous."""
@@ -580,7 +690,7 @@ def _kernel_metadata(account: Dict[str, Any], worker: Dict[str, Any], notebook_n
     }
 
 
-def _render_launch_notebook(template_abs: Path, config_path: str, mode: str, extra_args: str) -> bytes:
+def _render_launch_notebook(template_abs: Path, config_path: str, extra_args: str) -> bytes:
     """Loads *template_abs* (nbformat JSON), finds the single cell carrying
     LAUNCH_SPEC_MARKER, and substitutes its `__DASHBOARD_*__` placeholders
     with real values — stdlib json/re only, no Papermill (see
@@ -589,8 +699,15 @@ def _render_launch_notebook(template_abs: Path, config_path: str, mode: str, ext
     Papermill's tagged-parameter-cell convention would). Each value is
     inserted as a Python string literal (`repr()`), so it's automatically
     escaped against quote-breaking — the same shell-safety posture
-    tmux_runner.py already applies to CLI arguments applies here to notebook
-    source text. Returns the rendered notebook re-serialized as bytes."""
+    tmux_runner.py already applies to CLI arguments applies here to
+    notebook source text. Returns the rendered notebook re-serialized as
+    bytes.
+
+    No *mode* parameter (EXPERIMENT_AUTOMATION_PLAN.md §2.4): both
+    train_script and eval_script are always resolved and substituted, since
+    one push now runs both stages inside a single kernel execution — see the
+    runner cell's own train-then-eval sequencing in
+    notebooks/kaggle_worker_template.ipynb."""
     try:
         notebook = json.loads(template_abs.read_text())
     except (OSError, json.JSONDecodeError) as e:
@@ -607,12 +724,15 @@ def _render_launch_notebook(template_abs: Path, config_path: str, mode: str, ext
             "notebooks/kaggle_worker_template.ipynb for the expected shape."
         )
     cell = marker_cells[0]
-    script = settings.train_script if mode == "train" else settings.eval_script
     values = {
         _LAUNCH_PLACEHOLDERS["config_path"]: config_path,
-        _LAUNCH_PLACEHOLDERS["mode"]: mode,
         _LAUNCH_PLACEHOLDERS["extra_args"]: extra_args or "",
-        _LAUNCH_PLACEHOLDERS["script"]: script,
+        _LAUNCH_PLACEHOLDERS["train_script"]: settings.train_script,
+        _LAUNCH_PLACEHOLDERS["eval_script"]: settings.eval_script,
+        # Joined into one shell-quoted string, same shape as EXTRA_ARGS, so the template's
+        # runner cell treats both identically (shlex.split before use) rather than needing
+        # a second, list-shaped substitution convention just for this one field.
+        _LAUNCH_PLACEHOLDERS["eval_extra_flags"]: " ".join(shlex.quote(a) for a in settings.eval_default_args),
     }
 
     def substitute(line: str) -> str:
@@ -624,14 +744,15 @@ def _render_launch_notebook(template_abs: Path, config_path: str, mode: str, ext
     return json.dumps(notebook, indent=1).encode()
 
 
-def push(worker_id: str, config_path: str = "", mode: str = "train", extra_args: str = "") -> Dict[str, Any]:
+def push(worker_id: str, config_path: str = "", extra_args: str = "") -> Dict[str, Any]:
     """Pushes *worker_id*'s kernel. A notebook-backed worker (`notebook_path`
-    set) is pushed verbatim — *config_path*/*mode*/*extra_args* are ignored,
+    set) is pushed verbatim — *config_path*/*extra_args* are ignored,
     matching the original behavior exactly. A template-backed worker (the
     default) requires *config_path*: the launch spec is rendered into its
     template (settings.kaggle_default_template, or `template_path` if set)
-    before push — the direct Kaggle-side counterpart of
-    `terminals.launch(config_path, mode, extra_args)`."""
+    before push, running train then eval sequentially inside the one kernel
+    (EXPERIMENT_AUTOMATION_PLAN.md §2.4) — no *mode* parameter, since a
+    template-backed push is never a train-only or eval-only affair."""
     data = _load_accounts()
     account, worker = _find_worker_and_account(data, worker_id)
     if worker is None:
@@ -651,8 +772,6 @@ def push(worker_id: str, config_path: str = "", mode: str = "train", extra_args:
                 f"Worker '{worker_id}' is template-backed — a config_path is required to push "
                 "(pick a config the same way you would to launch it on mclab)"
             )
-        if mode not in ("train", "eval"):
-            raise KaggleOpsError("mode must be 'train' or 'eval'")
         try:
             cfg.read_config(config_path)  # raises if the config doesn't exist / isn't valid YAML
             cli_config_path = cfg.repo_relative_path(config_path)  # e.g. "configs/mkunet/foo.yaml"
@@ -661,7 +780,7 @@ def push(worker_id: str, config_path: str = "", mode: str = "train", extra_args:
         source_abs = settings.repo_root / _source_notebook_path(worker)
         if not source_abs.is_file():
             raise KaggleOpsError(f"Template notebook not found: {_source_notebook_path(worker)}")
-        push_bytes = _render_launch_notebook(source_abs, cli_config_path, mode, extra_args)
+        push_bytes = _render_launch_notebook(source_abs, cli_config_path, extra_args)
         push_name = source_abs.name
 
     source_hash = hashlib.sha1(source_abs.read_bytes()).hexdigest()
@@ -691,11 +810,11 @@ def push(worker_id: str, config_path: str = "", mode: str = "train", extra_args:
         raise KaggleOpsError(f"Push failed for '{worker_id}': {detail}")
 
     notebook_hash = hashlib.sha1(push_bytes).hexdigest()
-    event = "pushed" if notebook_path else f"pushed — {config_path} ({mode})"
+    event = "pushed" if notebook_path else f"pushed — {config_path}"
     _update_worker_state(worker_id, {
         "status": "pushed", "pushed_at": _now_iso(), "last_error": None, "over_budget": False,
         "notified_final": False, "pushed_notebook_hash": notebook_hash, "pushed_template_hash": source_hash,
-        "last_config_path": config_path or None, "last_mode": mode if not notebook_path else None,
+        "last_config_path": config_path or None,
         "last_extra_args": extra_args or None,
     }, event=event)
     warning = _concurrent_push_warning(account, worker_id)
@@ -706,13 +825,13 @@ def push(worker_id: str, config_path: str = "", mode: str = "train", extra_args:
 
 
 def restart(worker_id: str) -> Dict[str, Any]:
-    """Re-pushes a template-backed worker with the config/mode/extra_args
-    from its last push — the Kaggle-side counterpart of terminals.restart()
-    (mclab's restart re-runs the same config/mode/args in a fresh tmux
-    session; this re-renders and re-pushes the same launch spec). Not
-    meaningful for a notebook-backed worker (push() already ignores
-    config_path for those) — just calls push() again with no spec, which is
-    a plain re-push, matching that worker's pre-existing behavior."""
+    """Re-pushes a template-backed worker with the config/extra_args from
+    its last push — the Kaggle-side counterpart of terminals.restart()
+    (mclab's restart re-runs the same config/args in a fresh tmux session;
+    this re-renders and re-pushes the same launch spec). Not meaningful for
+    a notebook-backed worker (push() already ignores config_path for those)
+    — just calls push() again with no spec, which is a plain re-push,
+    matching that worker's pre-existing behavior."""
     data = _load_accounts()
     _, worker = _find_worker_and_account(data, worker_id)
     if worker is None:
@@ -723,7 +842,7 @@ def restart(worker_id: str) -> Dict[str, Any]:
     config_path = state.get("last_config_path")
     if not config_path:
         raise KaggleOpsError(f"Worker '{worker_id}' has never been pushed with a config — nothing to restart")
-    return push(worker_id, config_path, state.get("last_mode") or "train", state.get("last_extra_args") or "")
+    return push(worker_id, config_path, state.get("last_extra_args") or "")
 
 
 def _looks_like_unrecognized_option(output: str, flag: str) -> bool:
@@ -789,34 +908,93 @@ def refresh_status(worker_id: str) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- download + ledger
-def register_ledger(results_dir: Path) -> List[str]:
-    """Copies each newly-downloaded run's manifest.json into the host repo's
-    own artifacts/runs/<run_id>/ and appends its row into artifacts/ledger/
-    runs.csv — mirroring orchestration/manifest.py's atomic-write style and
-    orchestration/ledger.py's RUNS_FIELDS exactly, stdlib-only (no import of
-    that package, same as backend/ledger.py's read side). Idempotent: a
-    run_id already present with status 'done' in the host repo's own
-    runs.csv is skipped. Returns the run_ids newly registered."""
+def _iter_downloaded_manifests(results_dir: Path):
+    """Yields (manifest_path, run_id) for every manifest.json under a
+    downloaded worker's results_dir, in whichever shape this profile's
+    manifest_layout uses — mirrors backend/ledger.py's own
+    _iter_manifest_paths() exactly, since the two must agree on where a
+    manifest lives or a Kaggle-downloaded run becomes invisible to the Runs/
+    Ledger tabs even after registration succeeds."""
+    if settings.manifest_layout == "experiments":
+        base = results_dir / "outputs" / "experiments"
+        if not base.is_dir():
+            return
+        seen = set()
+        for pattern in ("*/checkpoints/manifest.json", "*/checkpoints/fold*/manifest.json"):
+            for p in sorted(base.glob(pattern)):
+                if p.is_file() and p not in seen:
+                    seen.add(p)
+                    try:
+                        manifest = json.loads(p.read_text())
+                    except Exception:
+                        continue
+                    run_id = manifest.get("run_id")
+                    if run_id:
+                        yield p, run_id, manifest
+        return
+
     manifests_dir = results_dir / "artifacts" / "runs"
     if not manifests_dir.is_dir():
+        return
+    for p in sorted(manifests_dir.glob("*/manifest.json")):
+        if not p.is_file():
+            continue
+        try:
+            manifest = json.loads(p.read_text())
+        except Exception:
+            continue
+        run_id = manifest.get("run_id") or p.parent.name
+        yield p, run_id, manifest
+
+
+def _downloaded_ledger_rows(results_dir: Path) -> Dict[str, Dict[str, str]]:
+    """The downloaded worker's own runs.csv, keyed by run_id — same two
+    layouts as _iter_downloaded_manifests(), since ledger_dir sits at a
+    different place relative to the manifests in each (nested under
+    artifacts/ in "legacy", a sibling of experiments/ in "experiments")."""
+    if settings.manifest_layout == "experiments":
+        src_runs_csv = results_dir / "outputs" / "ledger" / "runs.csv"
+    else:
+        src_runs_csv = results_dir / "artifacts" / "ledger" / "runs.csv"
+    if not src_runs_csv.is_file():
+        return {}
+    with open(src_runs_csv, newline="") as f:
+        return {row.get("run_id"): row for row in csv.DictReader(f)}
+
+
+def register_ledger(results_dir: Path) -> List[str]:
+    """Copies each newly-downloaded run's manifest.json into the host repo's
+    own ledger/manifest layout and appends its row into
+    settings.ledger_dir/runs.csv — mirroring orchestration/manifest.py's
+    atomic-write style and orchestration/ledger.py's RUNS_FIELDS exactly,
+    stdlib-only (no import of that package, same as backend/ledger.py's read
+    side). Branches on settings.manifest_layout exactly as backend/ledger.py
+    does on the read side (EXPERIMENT_AUTOMATION_PLAN.md §2.2) — the earlier,
+    legacy-only version of this function silently registered nothing at all
+    under manifest_layout: "experiments" (dissert), since
+    results_dir/artifacts/runs/ never exists there.
+
+    Idempotent by run_id, regardless of status (not just "done" — a run
+    previously registered as failed/interrupted is not re-appended on a
+    later download of the same worker, which the old status=="done"-only
+    check let happen). A resumed run's own status transition — the same
+    run_id going from "interrupted" to "done" across two chained Kaggle legs
+    — needs its row *updated*, not skipped; that is leg-chaining's problem
+    (EXPERIMENT_AUTOMATION_PLAN.md §8.2), not this function's, and isn't
+    handled here. Returns the run_ids newly registered."""
+    src_rows_by_id = _downloaded_ledger_rows(results_dir)
+    if not src_rows_by_id:
         return []
 
-    src_runs_csv = results_dir / "artifacts" / "ledger" / "runs.csv"
-    src_rows_by_id: Dict[str, Dict[str, str]] = {}
-    if src_runs_csv.is_file():
-        with open(src_runs_csv, newline="") as f:
-            src_rows_by_id = {row.get("run_id"): row for row in csv.DictReader(f)}
-
-    dest_ledger_dir = settings.artifacts_dir / "ledger"
+    dest_ledger_dir = settings.ledger_dir
     dest_runs_csv = dest_ledger_dir / "runs.csv"
-    dest_runs_dir = settings.runs_artifacts_dir
 
     newly_registered: List[str] = []
     with _ledger_lock:
-        done_ids = set()
+        known_ids = set()
         if dest_runs_csv.is_file():
             with open(dest_runs_csv, newline="") as f:
-                done_ids = {row.get("run_id") for row in csv.DictReader(f) if row.get("status") == "done"}
+                known_ids = {row.get("run_id") for row in csv.DictReader(f)}
 
         dest_ledger_dir.mkdir(parents=True, exist_ok=True)
         is_new_csv = not dest_runs_csv.is_file()
@@ -824,19 +1002,23 @@ def register_ledger(results_dir: Path) -> List[str]:
             writer = csv.DictWriter(f, fieldnames=RUNS_FIELDS)
             if is_new_csv:
                 writer.writeheader()
-            for manifest_path in sorted(manifests_dir.glob("*/manifest.json")):
-                try:
-                    manifest = json.loads(manifest_path.read_text())
-                except Exception:
-                    continue
-                run_id = manifest.get("run_id") or manifest_path.parent.name
-                if run_id in done_ids:
+            for manifest_path, run_id, manifest in _iter_downloaded_manifests(results_dir):
+                if not run_id or run_id in known_ids:
                     continue
                 row = src_rows_by_id.get(run_id)
                 if row is None:
                     continue
 
-                dest_manifest_path = dest_runs_dir / run_id / "manifest.json"
+                if settings.manifest_layout == "experiments":
+                    # Mirror the source path's own tail (…/<experiment_id>/checkpoints/[fold*/]manifest.json)
+                    # under settings.experiments_dir — this layout doesn't name a manifest's
+                    # directory after run_id at all, so there's no run_id-keyed dest path to
+                    # target the way the legacy branch below has.
+                    rel = manifest_path.relative_to(results_dir / "outputs" / "experiments")
+                    dest_manifest_path = settings.experiments_dir / rel
+                else:
+                    dest_manifest_path = settings.runs_artifacts_dir / run_id / "manifest.json"
+
                 dest_manifest_path.parent.mkdir(parents=True, exist_ok=True)
                 tmp_path = dest_manifest_path.with_suffix(".json.tmp")
                 tmp_path.write_text(json.dumps(manifest, indent=2, sort_keys=True, default=str))
@@ -888,39 +1070,137 @@ def download(worker_id: str) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- quota estimate
+_profile_snapshot_cache: Dict[str, Optional[Settings]] = {}
+
+
+def _profile_snapshot(profile_name: str) -> Optional[Settings]:
+    """Read-only Settings(name) for any profile, without disturbing the
+    active one — the same snapshot trick backend/repos.py uses, never
+    mutating the shared singleton, so it's safe to call from any thread.
+    Needed for a system-scoped account: its usage/quota must be resolved
+    against *every* profile it has workers in, each of which may have its
+    own repo_root and manifest_layout. Cached: profiles are files on disk
+    that don't change while the server runs, and usage_history() is called
+    per account per list_accounts() render (and, once the dispatcher lands,
+    per dispatch tick)."""
+    if profile_name not in _profile_snapshot_cache:
+        try:
+            _profile_snapshot_cache[profile_name] = Settings(profile_name)
+        except Exception:
+            _profile_snapshot_cache[profile_name] = None
+    return _profile_snapshot_cache[profile_name]
+
+
+def _iter_extracted_manifests(base_dir: Path, manifest_layout: str):
+    """Yields (manifest_path, run_id, manifest) for every manifest.json
+    under *base_dir* in the given manifest_layout shape. Shared by
+    register_ledger()'s helpers (base_dir = a temp Kaggle-download
+    extraction root, always the active profile's own layout) and
+    usage_history() (base_dir = repo_root/worker.results_dir — wherever a
+    worker's own past downloads were unpacked, which for a system-scoped
+    account may belong to a profile that isn't the active one). Mirrors
+    backend/ledger.py's _iter_manifest_paths() exactly, parameterized
+    instead of reading the active settings singleton, since it must be
+    called against another profile's manifest_layout too."""
+    if manifest_layout == "experiments":
+        base = base_dir / "outputs" / "experiments"
+        if not base.is_dir():
+            return
+        seen = set()
+        for pattern in ("*/checkpoints/manifest.json", "*/checkpoints/fold*/manifest.json"):
+            for p in sorted(base.glob(pattern)):
+                if p.is_file() and p not in seen:
+                    seen.add(p)
+                    try:
+                        manifest = json.loads(p.read_text())
+                    except Exception:
+                        continue
+                    run_id = manifest.get("run_id")
+                    if run_id:
+                        yield p, run_id, manifest
+        return
+
+    manifests_dir = base_dir / "artifacts" / "runs"
+    if not manifests_dir.is_dir():
+        return
+    for p in sorted(manifests_dir.glob("*/manifest.json")):
+        if not p.is_file():
+            continue
+        try:
+            manifest = json.loads(p.read_text())
+        except Exception:
+            continue
+        run_id = manifest.get("run_id") or p.parent.name
+        yield p, run_id, manifest
+
+
 def _utc_week_start(ref: Optional[datetime] = None) -> datetime:
     now = ref or datetime.now(timezone.utc)
     monday = now - timedelta(days=now.weekday())
     return monday.replace(hour=0, minute=0, second=0, microsecond=0)
 
 
-def usage_history(account_name: str, weeks: int = 6) -> List[Dict[str, Any]]:
+# usage_history() walks every worker's results dir per call, and gets called
+# once per account per list_accounts() render — a per-account TTL cache keeps
+# that a bounded cost instead of a full filesystem scan on every poll.
+_USAGE_CACHE_TTL_SECONDS = 20.0
+_usage_cache: Dict[str, tuple] = {}  # account_name -> (monotonic_time, result)
+
+
+def _usage_history_uncached(account_name: str, weeks: int) -> List[Dict[str, Any]]:
     """Self-tracked GPU-hours per UTC week for *account_name*'s past *weeks*
     weeks (oldest first, current week last), summed from this account's own
-    downloaded run manifests in a single pass over each worker's results
-    dir. NOT Kaggle's authoritative quota figure — Kaggle exposes no API for
-    that (only a logged-in browser session sees the real number on the
-    account's Usage page), so this is presented as an estimate throughout,
-    and can drift from it (e.g. kernels run outside this dashboard aren't
-    counted)."""
-    data = _load_accounts()
-    account = _find_account(data, account_name)
+    downloaded run manifests. NOT Kaggle's authoritative quota figure —
+    Kaggle exposes no API for that (only a logged-in browser session sees
+    the real number on the account's Usage page), so this is presented as
+    an estimate throughout, and can drift from it (e.g. kernels run outside
+    this dashboard aren't counted).
+
+    A system-scoped account is summed across **every** profile it has
+    workers in, not just the active one: Kaggle meters one weekly quota per
+    account regardless of which repo a kernel was running, so a per-profile
+    total would under-count it and any gate built on that number would let
+    the dispatcher over-commit the account.
+
+    The current week's bucket also includes an **in-flight reservation**:
+    for each of this account's workers currently IN_PROGRESS_STATUSES, add
+    min(elapsed_hours, budget_hours). Without this, a kernel that has been
+    running for hours counts as 0 until it finishes and is downloaded, so a
+    gate built on the bare completed-runs total would keep waving through
+    pushes against an account that is, in reality, already near its cap."""
     this_week_start = _utc_week_start()
     buckets = [this_week_start - timedelta(weeks=n) for n in range(weeks - 1, -1, -1)]
     totals = {b: 0.0 for b in buckets}
+
+    account = _find_account(_load_accounts(), account_name)
     if account is None:
         return [{"week_start": b.isoformat(), "hours": 0.0} for b in buckets]
 
-    earliest = buckets[0]
-    for worker in account.get("workers", []):
-        manifests_dir = (settings.repo_root / worker["results_dir"] / "artifacts" / "runs").resolve()
-        if not manifests_dir.is_dir():
-            continue
-        for manifest_path in manifests_dir.glob("*/manifest.json"):
-            try:
-                manifest = json.loads(manifest_path.read_text())
-            except Exception:
+    # (worker, repo_root, manifest_layout, state) tuples. A repo-scoped
+    # account only ever has workers under the active profile; a system one
+    # resolves each worker against its own profile's snapshot, since
+    # results_dir/manifest_layout/kaggle_state_file are all repo-relative or
+    # per-profile.
+    scoped: List[tuple] = []
+    if account.get("scope") == SCOPE_SYSTEM:
+        stored = next(
+            (a for a in _load_scope(SCOPE_SYSTEM)["accounts"] if a["name"] == account_name), {}
+        )
+        for worker in stored.get("workers", []):
+            snap = _profile_snapshot(worker.get("profile", settings.profile_name))
+            if snap is None:
                 continue
+            state = _load_state() if snap.profile_name == settings.profile_name else _read_state_file(snap.kaggle_state_file)
+            scoped.append((worker, snap.repo_root, snap.manifest_layout, state))
+    else:
+        state = _load_state()
+        scoped = [(w, settings.repo_root, settings.manifest_layout, state) for w in account.get("workers", [])]
+
+    earliest = buckets[0]
+    now = datetime.now(timezone.utc)
+    for worker, repo_root, manifest_layout, state in scoped:
+        base_dir = (repo_root / worker["results_dir"]).resolve()
+        for _p, _run_id, manifest in _iter_extracted_manifests(base_dir, manifest_layout):
             start_time, gpu_hours = manifest.get("start_time"), manifest.get("gpu_hours")
             if not start_time or not gpu_hours:
                 continue
@@ -933,16 +1213,84 @@ def usage_history(account_name: str, weeks: int = 6) -> List[Dict[str, Any]]:
             bucket = _utc_week_start(started)
             if bucket in totals:
                 totals[bucket] += float(gpu_hours)
+
+        w_state = state.get(worker["worker_id"], {})
+        if w_state.get("status") in IN_PROGRESS_STATUSES and w_state.get("pushed_at"):
+            try:
+                pushed_at = datetime.fromisoformat(w_state["pushed_at"])
+            except ValueError:
+                continue
+            elapsed_hours = (now - pushed_at).total_seconds() / 3600.0
+            budget_hours = float(worker.get("budget_hours") or settings.kaggle_default_budget_hours)
+            totals[this_week_start] += min(elapsed_hours, budget_hours)
+
     return [{"week_start": b.isoformat(), "hours": round(totals[b], 2)} for b in buckets]
 
 
+def _read_state_file(path: Path) -> Dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except Exception:
+        return {}
+
+
+def usage_history(account_name: str, weeks: int = 6) -> List[Dict[str, Any]]:
+    """Cached wrapper over _usage_history_uncached() — see its docstring for
+    what this computes. Cache key includes *weeks* since callers ask for
+    different window sizes (estimate_usage() wants 1, the sparkline wants
+    the default 6)."""
+    cache_key = f"{account_name}:{weeks}"
+    now = time.monotonic()
+    cached = _usage_cache.get(cache_key)
+    if cached is not None and (now - cached[0]) < _USAGE_CACHE_TTL_SECONDS:
+        return cached[1]
+    result = _usage_history_uncached(account_name, weeks)
+    _usage_cache[cache_key] = (now, result)
+    return result
+
+
 def estimate_usage(account_name: str) -> Dict[str, Any]:
-    """This-week slice of usage_history() — kept as its own function since
-    it's the one number shown outside the sparkline (account card stat
-    tile, summary strip)."""
+    """This-week slice of usage_history() (including the in-flight
+    reservation), plus the account's configured weekly budget so a caller
+    can render/gate on remaining headroom without a second lookup."""
     history = usage_history(account_name, weeks=1)
     current = history[-1]
-    return {"hours_this_week": current["hours"], "week_start": current["week_start"]}
+    budget = _weekly_budget_hours(account_name)
+    return {
+        "hours_this_week": current["hours"],
+        "week_start": current["week_start"],
+        "weekly_budget_hours": budget,
+        "remaining_hours": (round(budget - current["hours"], 2) if budget is not None else None),
+    }
+
+
+def _weekly_budget_hours(account_name: str) -> Optional[float]:
+    account = _find_account(_load_accounts(), account_name)
+    if account is None:
+        return None
+    if account.get("weekly_budget_hours") is not None:
+        return float(account["weekly_budget_hours"])
+    return settings.kaggle_default_weekly_budget_hours
+
+
+def set_weekly_budget(name: str, hours: Optional[float]) -> Dict[str, Any]:
+    """Sets (or, with hours=None, clears back to the profile default) an
+    account's own weekly GPU-hour budget — a property of the Kaggle
+    account/tier, not of whichever repo happens to be active, so it lives on
+    the account record in whichever scope (system/repo) that account is
+    already registered under, not in a repo profile's YAML."""
+    with _lock:
+        data = _load_accounts()
+        account = _find_account(data, name)
+        if account is None:
+            raise KaggleOpsError(f"Unknown account '{name}'")
+        account["weekly_budget_hours"] = float(hours) if hours is not None else None
+        _save_accounts(data)
+    _usage_cache.pop(f"{name}:1", None)
+    _usage_cache.pop(f"{name}:6", None)
+    return {"name": name, "weekly_budget_hours": account["weekly_budget_hours"]}
 
 
 # --------------------------------------------------------------------------- bulk / fleet ops
@@ -968,8 +1316,8 @@ def _run_bulk(fn, worker_ids: List[str]) -> List[Dict[str, Any]]:
 
 def _push_or_restart(worker_id: str) -> Dict[str, Any]:
     """push_all()'s per-worker action: a notebook-backed worker just pushes
-    (as always); a template-backed worker re-pushes its *last* config/mode/
-    args via restart() — push() alone would fail every time here since it
+    (as always); a template-backed worker re-pushes its *last* config/
+    extra_args via restart() — push() alone would fail every time here since it
     has no config_path to work from without one being passed explicitly.
     Raises KaggleOpsError (caught by _run_bulk) for a template-backed worker
     that's never been pushed yet — "push all" bulk-repeats known launches,

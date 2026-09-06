@@ -491,6 +491,13 @@
             <label>API token (optional if a classic key is given above)</label>
             <input class="text-input grow" id="kaggle-new-account-token" type="password" placeholder="paste the new-format token" autocomplete="off" />
           </div>
+          <div class="field">
+            <label>Availability</label>
+            <select id="kaggle-new-account-scope" title="A Kaggle account's credentials and weekly GPU quota belong to the account itself, not to a repo — register it system-wide unless it should only ever serve this repo.">
+              <option value="system">System-wide — every repo</option>
+              <option value="repo" selected>This repo only</option>
+            </select>
+          </div>
           <button class="btn btn-primary" id="btn-kaggle-add-account">Add account</button>
         </div>
       </div>
