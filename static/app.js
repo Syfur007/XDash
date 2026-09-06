@@ -60,6 +60,7 @@ function radarAxisValue(metrics, key) {
 
 const state = {
   system: null,
+  repos: [],
   pollFailStreak: { terminals: 0, monitors: 0, scheduler: 0 },
   pollStale: false,
   configs: [],
@@ -260,7 +261,7 @@ function switchView(view) {
   if (view === "history" && !state.historyTree.length) loadHistory();
   if (view === "data") loadDataView();
   if (view === "runners") { loadMonitors(); refreshTensorboardStatus(); loadKaggle(); loadRunnersOverview(); }
-  if (view === "experiments") loadExperimentsKaggleActive();
+  if (view === "experiments") { loadExperimentsKaggleActive(); loadExperimentsOtherRepos(); }
   if (view === "assignments" && !state.assignmentsLoaded) loadAssignments();
   if (view === "overview") loadOverview();
 }
@@ -311,6 +312,78 @@ async function loadSystem() {
   document.getElementById("reports-dir-label").textContent = state.system.reports_dir;
   document.getElementById("footer-env").textContent = state.system.env_activate_cmd || "(none configured)";
   document.getElementById("footer-tmux-warning").classList.toggle("hidden", !!state.system.tmux_available);
+}
+
+// ------------------------------------------------------------- repo switcher
+// MULTI_REPO_PLAN.md §8: one control to pick which repo *new* launches
+// target (terminal, scheduler item, Kaggle push) — every repo's own
+// sessions stay visible regardless (§6 option B), this only changes where
+// the next launch goes.
+async function loadRepos() {
+  try {
+    const data = await api("/api/repos");
+    state.repos = data.repos;
+    renderRepoSwitcher(data.active);
+  } catch (e) {
+    // Non-fatal: an older single-profile deployment or a transient error
+    // just leaves the switcher empty — everything else still works.
+  }
+}
+
+function renderRepoSwitcher(activeId) {
+  const sel = document.getElementById("repo-switcher");
+  if (!sel || !state.repos.length) return;
+  sel.innerHTML = state.repos.map((r) => {
+    const label = r.repo_root_exists ? r.display_name : `${r.display_name} (missing)`;
+    return `<option value="${escapeHtml(r.id)}" ${r.id === activeId ? "selected" : ""}>${escapeHtml(label)}</option>`;
+  }).join("");
+}
+
+async function switchRepo(profileId) {
+  const previous = state.system ? state.system.profile_name : null;
+  if (!profileId || profileId === previous) return;
+  const target = state.repos.find((r) => r.id === profileId);
+
+  const confirmed = await showConfirm(
+    "Switch active repo?",
+    `Switch to "${target ? target.display_name : profileId}"? New launches (terminal, scheduler item, Kaggle push) will target it — sessions already running under any repo stay visible in Terminals.`
+  );
+  if (!confirmed) { renderRepoSwitcher(previous); return; }
+
+  try {
+    await api("/api/repos/active", { method: "POST", body: JSON.stringify({ profile: profileId }) });
+  } catch (e) {
+    toast("Couldn't switch repo: " + e.message, "err");
+    renderRepoSwitcher(previous);
+    return;
+  }
+
+  // Discard everything tied to the old profile rather than let it show
+  // stale-profile data under new-profile chrome (MULTI_REPO_PLAN.md §8):
+  // an open config editor buffer is the one that could otherwise silently
+  // save onto the wrong repo, so it's closed outright, not just refreshed.
+  closeConfigEditor();
+  state.selectedTerminal = null;
+  state.reportGroups = [];
+  state.historyTree = [];
+  state.assignmentsLoaded = false;
+  state.assignmentConfigsLoaded = false;
+  state.runTargetsLoaded = false;
+  state.schedulerConfigsLoaded = false;
+  state.schedulerTemplatesLoaded = false;
+  state.kaggleConfigsLoaded = false;
+
+  const currentView = document.querySelector(".nav-item.active")?.dataset.view || "overview";
+
+  await loadSystem();
+  await loadRepos();
+  await loadTerminals();
+  await loadMonitors();
+  await loadScheduler();
+  await loadConfigs();
+  switchView(currentView); // re-enters the current tab so its own (now-unguarded) load fires
+
+  toast(`Switched to ${state.system.display_name}`);
 }
 
 // ============================================================================
@@ -379,6 +452,24 @@ function renderConfigTree() {
   body.innerHTML = html || `<div class="empty-state">No configs match "${escapeHtml(state.configFilter)}"</div>`;
   countEl.textContent = filter ? `${shown} / ${total}` : `${total} file${total === 1 ? "" : "s"}`;
   body.querySelectorAll(".config-item").forEach((el) => el.addEventListener("click", () => selectConfig(el.dataset.path)));
+}
+
+function closeConfigEditor() {
+  state.selectedConfigPath = null;
+  state.editor = null;
+  state.editorDirty = false;
+  state.resolvedConfigVisible = false;
+  document.getElementById("editor-path").textContent = "No config selected";
+  document.getElementById("editor-status").textContent = "";
+  document.getElementById("editor-body").innerHTML = `<div class="empty-state">Select a config on the left to view and edit it.</div>`;
+  document.getElementById("editor-body").classList.remove("hidden");
+  document.getElementById("resolved-config-body").classList.add("hidden");
+  document.getElementById("resolved-config-body").innerHTML = "";
+  document.getElementById("run-bar").style.display = "none";
+  document.getElementById("btn-save-config").disabled = true;
+  document.getElementById("btn-toggle-resolved").disabled = true;
+  document.getElementById("btn-toggle-resolved").textContent = "Show resolved";
+  renderConfigTree();
 }
 
 async function selectConfig(path) {
@@ -1406,13 +1497,6 @@ async function populateSchedulerConfigSelect() {
       }
     }
   } catch (e) {}
-}
-
-// Finds a config's own path by exact path match — used to prefill Add to
-// schedule with a known-good path (retry/duplicate/template already have
-// one), no re-fetch needed since populateSchedulerConfigSelect() cached it.
-function schedulerConfigExists(configPath) {
-  return state.schedulerConfigGroups.some((g) => g.configs.some((c) => c.path === configPath));
 }
 
 function renderScheduler() {
@@ -2529,6 +2613,8 @@ function initButtons() {
   document.getElementById("btn-tb-start").addEventListener("click", startTensorboard);
   document.getElementById("btn-tb-stop").addEventListener("click", stopTensorboard);
 
+  document.getElementById("repo-switcher").addEventListener("change", (e) => switchRepo(e.target.value));
+
   window.addEventListener("beforeunload", (e) => {
     if (state.editorDirty) { e.preventDefault(); e.returnValue = ""; }
   });
@@ -2538,6 +2624,7 @@ async function boot() {
   initNav();
   initButtons();
   await loadSystem();
+  await loadRepos();
   // Terminals and reports load before configs so the Configs tab's coverage
   // dot (has this been run? does it have a report?) is correct on its very
   // first paint, instead of only becoming accurate after a poll tick or a

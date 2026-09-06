@@ -31,8 +31,15 @@ plots_dir: "logs"             # where eval.py writes plots/overlays/images — b
 artifacts_dir: "artifacts"
 
 python_executable: "python"   # interpreter used to launch train.py / eval.py
-train_script: "train.py"
-eval_script: "eval.py"
+
+# Thin CLI wrappers around orchestration.runner.run_sweep (scripts/), not bare
+# train.py/eval.py: bare train.py has no --seed flag and never calls run_sweep,
+# so a dashboard launch through it is seed-less and writes no manifest.json/
+# ledger row — the Runs/Ledger tabs stay empty for anything launched that way.
+# These wrappers loop the pre-registered seeds internally, so one dashboard
+# launch is still one experiment cell (train_script writes N manifested runs).
+train_script: "scripts/run_iccit_sweep.py"
+eval_script: "scripts/eval_iccit_sweep.py"
 
 # Interpreter used for "bridge" calls into the host repo's own code — schema-aware
 # config validation, model-registry introspection, and similar features that need
@@ -41,8 +48,12 @@ eval_script: "eval.py"
 # blank to reuse python_executable above (the common case: one env runs everything).
 bridge_python_executable: ""
 
-# Extra flags always appended to eval runs (besides --config)
-eval_default_args: ["--ensemble"]
+# Left empty: scripts/eval_iccit_sweep.py's argparse only defines
+# --config/--seeds/--no-vis, so an unrecognized --ensemble flag here would
+# make every eval launch fail immediately. (--ensemble was also only ever
+# about K-Fold ensembling, which this study's run_sweep folds=(None,) call
+# path never uses anyway.)
+eval_default_args: []
 
 # ---------------------------------------------------------------------------
 # Every experiment is run inside its own tmux session, exactly like you'd run

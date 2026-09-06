@@ -43,6 +43,46 @@ async function loadExperimentsKaggleActive() {
   ).join("");
 }
 
+// Cross-repo visibility (MULTI_REPO_PLAN.md §6 option B): switching the
+// active repo never hides another repo's live work, so this reads the
+// backend's own cross-profile session list (backend/repos.py) rather than
+// /api/terminals or /api/kaggle/accounts, both of which are scoped to
+// whichever profile is currently active. Read-only glance, same spirit as
+// loadExperimentsKaggleActive() above — full control over another repo's
+// session still requires switching to it first.
+async function loadExperimentsOtherRepos() {
+  const body = document.getElementById("experiments-other-repos-body");
+  if (!body) return;
+  let data;
+  try {
+    data = await api("/api/repos/sessions");
+  } catch (e) {
+    return; // leave whatever was last rendered rather than blanking it on a transient poll failure
+  }
+  const activeProfile = state.system ? state.system.profile_name : null;
+  const others = (data.sessions || []).filter((s) => s.profile && s.profile !== activeProfile);
+  if (!others.length) {
+    body.innerHTML = `<div class="empty-state">Nothing running under any other repo right now.</div>`;
+    return;
+  }
+  body.innerHTML = others.map((s) => {
+    const sub = s.kind === "kaggle" ? (s.account || "kaggle") : (s.config_path || "unmanaged session");
+    return `
+    <div class="entity-card">
+      <div class="entity-card-accent ${statusBadgeClass(s.status)}"></div>
+      <div class="entity-card-body">
+        <div class="entity-card-title" title="${escapeHtml(s.label)}">${escapeHtml(s.label)}
+          <span class="mode-tag" title="repo profile">${escapeHtml(s.profile)}</span>
+        </div>
+        <div class="entity-card-sub" title="${escapeHtml(sub)}">${escapeHtml(sub)}${s.mode ? " · " + escapeHtml(s.mode) : ""}</div>
+        <div class="entity-card-footer">
+          <span class="entity-card-status">${renderStatusBadge(s.status)}</span>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
 function initExperimentsSubtabs() {
   initSubtabStrip("experiments-subtabs", (key) => {
     if (key === "runs" && !state.runGroups.length) loadRuns();

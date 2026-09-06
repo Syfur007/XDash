@@ -63,6 +63,7 @@
 
     <div class="sidebar-footer" id="sidebar-footer">
       <div><b>repo</b></div>
+      <select class="text-input" id="repo-switcher" style="width:100%; font-size:11px; padding:3px 6px; margin:2px 0 4px;" title="Switch which repo new launches target — sessions from every repo stay visible"></select>
       <div id="footer-repo">…</div>
       <div style="margin-top:8px;"><b>env activate</b></div>
       <div id="footer-env">…</div>
@@ -236,6 +237,13 @@
         <div class="panel" style="margin-bottom:16px;">
           <div class="panel-header"><span>Also running on Kaggle</span></div>
           <div class="kaggle-grid" id="experiments-kaggle-active-body" style="padding:12px 16px;">
+            <div class="empty-state">Loading…</div>
+          </div>
+        </div>
+
+        <div class="panel" style="margin-bottom:16px;">
+          <div class="panel-header"><span>Also running under other repos</span></div>
+          <div class="kaggle-grid" id="experiments-other-repos-body" style="padding:12px 16px;">
             <div class="empty-state">Loading…</div>
           </div>
         </div>
