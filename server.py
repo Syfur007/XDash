@@ -534,6 +534,7 @@ def api_kaggle_add_worker(name):
             body.get("budget_hours"),
             body.get("notebook_path", ""),
             body.get("template_path", ""),
+            body.get("dataset_sources") or [],
         ))
     except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
@@ -544,6 +545,15 @@ def api_kaggle_remove_worker(name, worker_id):
     if not kaggle_ops.remove_worker(name, worker_id):
         return err("Worker not found", 404)
     return jsonify({"removed": True})
+
+
+@app.route("/api/kaggle/accounts/<name>/workers/<worker_id>/datasets", methods=["POST"])
+def api_kaggle_set_worker_datasets(name, worker_id):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(kaggle_ops.set_worker_datasets(name, worker_id, body.get("dataset_sources") or []))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
 
 
 @app.route("/api/kaggle/workers/<worker_id>/push", methods=["POST"])

@@ -561,9 +561,27 @@ def _validate_notebook_path(notebook_path: str) -> Path:
     return notebook_abs
 
 
+# {username}/{slug} or {username}/{slug}/{version} — mirrors the installed kaggle CLI's own
+# validate_dataset_string() exactly (kaggle/api/kaggle_api_extended.py), so a malformed entry is
+# rejected here with a clear message instead of surfacing as a less legible failure from
+# `kaggle kernels push` itself (EXPERIMENT_AUTOMATION_PLAN.md §2.5).
+def _validate_dataset_source(source: str) -> str:
+    source = (source or "").strip()
+    if not source:
+        raise KaggleOpsError("Dataset source may not be empty")
+    parts = source.split("/")
+    if len(parts) < 2 or len(parts) > 3 or not parts[0] or not parts[1]:
+        raise KaggleOpsError(
+            f"Invalid dataset source {source!r} — expected '{{username}}/{{dataset-slug}}' or "
+            "'{username}/{dataset-slug}/{version}'"
+        )
+    return source
+
+
 def add_worker(
     account_name: str, worker_id: str, kernel_slug: str, results_dir: str,
     budget_hours: Optional[float] = None, notebook_path: str = "", template_path: str = "",
+    dataset_sources: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """A worker is either **notebook-backed** (`notebook_path` set — the original shape: a fixed,
     hand-authored notebook pushed verbatim every time, e.g. the existing
@@ -571,7 +589,18 @@ def add_worker(
     default going forward: `push()` renders a config/extra_args into a shared template,
     settings.kaggle_default_template unless `template_path` overrides it, per-launch — see
     LAUNCH_SPEC_MARKER / _render_launch_notebook()). The two are mutually exclusive so a worker's
-    launch behavior is never ambiguous."""
+    launch behavior is never ambiguous.
+
+    *dataset_sources* (EXPERIMENT_AUTOMATION_PLAN.md §2.5) is the list of Kaggle datasets
+    (`{username}/{slug}` strings) this worker's pushed kernel declares in kernel-metadata.json —
+    previously hardcoded to `[]` in _kernel_metadata(), which meant every push produced a kernel
+    with no data attached at all. A worker's template still asserts at runtime that the config's
+    dataset shows up under /kaggle/input/ (see the launch template's own dataset-attach cell) —
+    this only controls what Kaggle attaches *for* the kernel, not whether a given config's
+    dataset happens to be among what's listed here. NOT YET verified whether pushing overwrites
+    a dataset a human attached by hand through the Kaggle web UI (kernel-metadata.json is
+    declarative, so that's the expectation, but confirm with one real push before relying on
+    manual attachment as a fallback)."""
     worker_id = (worker_id or "").strip()
     notebook_path, template_path = (notebook_path or "").strip(), (template_path or "").strip()
     if not worker_id or not kernel_slug or not results_dir:
@@ -583,6 +612,7 @@ def add_worker(
         _validate_notebook_path(notebook_path)
     elif template_path:
         _validate_notebook_path(template_path)  # same validation: repo-relative, must exist
+    dataset_sources = [_validate_dataset_source(s) for s in (dataset_sources or [])]
 
     with _lock:
         data = _load_accounts()
@@ -596,6 +626,7 @@ def add_worker(
             "kernel_slug": kernel_slug,
             "results_dir": str(results_dir),
             "budget_hours": float(budget_hours) if budget_hours else settings.kaggle_default_budget_hours,
+            "dataset_sources": dataset_sources,
         }
         if notebook_path:
             worker["notebook_path"] = notebook_path
@@ -604,6 +635,25 @@ def add_worker(
         account.setdefault("workers", []).append(worker)
         _save_accounts(data)
     return worker
+
+
+def set_worker_datasets(account_name: str, worker_id: str, dataset_sources: List[str]) -> Dict[str, Any]:
+    """Replaces a worker's dataset_sources wholesale — the data a config needs changes over a
+    worker's life (it's reused across many pushes/configs), so this needs to be editable without
+    deleting and re-adding the worker, which would also lose its budget_hours/kernel_slug/state
+    history for no reason."""
+    dataset_sources = [_validate_dataset_source(s) for s in (dataset_sources or [])]
+    with _lock:
+        data = _load_accounts()
+        account = _find_account(data, account_name)
+        if account is None:
+            raise KaggleOpsError(f"Unknown account '{account_name}'")
+        worker = _find_worker(account, worker_id)
+        if worker is None:
+            raise KaggleOpsError(f"Unknown worker '{worker_id}'")
+        worker["dataset_sources"] = dataset_sources
+        _save_accounts(data)
+    return {"worker_id": worker_id, "dataset_sources": dataset_sources}
 
 
 def remove_worker(account_name: str, worker_id: str) -> bool:
@@ -684,7 +734,10 @@ def _kernel_metadata(account: Dict[str, Any], worker: Dict[str, Any], notebook_n
         "enable_gpu": True,
         "enable_internet": True,
         "keywords": [],
-        "dataset_sources": [],
+        # Previously hardcoded to [] (EXPERIMENT_AUTOMATION_PLAN.md §2.5) — every push produced
+        # a kernel with no data attached, which the launch template's own dataset-attach cell
+        # then failed on. Now sourced from the worker record (set_worker_datasets()/add_worker()).
+        "dataset_sources": list(worker.get("dataset_sources") or []),
         "competition_sources": [],
         "kernel_sources": [],
     }
@@ -1406,11 +1459,17 @@ def import_registry(payload: Dict[str, Any]) -> Dict[str, Any]:
                     except KaggleOpsError as e:
                         skipped_workers.append({"account": name, "worker_id": worker_id, "reason": str(e)})
                         continue
+                try:
+                    incoming_datasets = [_validate_dataset_source(s) for s in (w.get("dataset_sources") or [])]
+                except KaggleOpsError as e:
+                    skipped_workers.append({"account": name, "worker_id": worker_id, "reason": str(e)})
+                    continue
                 new_worker = {
                     "worker_id": worker_id,
                     "kernel_slug": w["kernel_slug"],
                     "results_dir": w["results_dir"],
                     "budget_hours": w.get("budget_hours") or settings.kaggle_default_budget_hours,
+                    "dataset_sources": incoming_datasets,
                 }
                 if source_field:
                     new_worker[source_field] = w[source_field]

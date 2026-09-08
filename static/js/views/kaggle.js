@@ -29,6 +29,7 @@ state.kaggleNotifEditOpen = new Set(); // channel keys with their edit form open
 // worker (has notebook_path — e.g. the pre-existing iccit-kaggle-worker3/4.ipynb) keeps the
 // original one-click Push button, unchanged.
 state.kagglePushFormOpen = new Set();   // worker_ids with the inline push form expanded
+state.kaggleDatasetFormOpen = new Set(); // worker_ids with the inline dataset-sources edit form expanded
 state.kaggleConfigGroups = [];          // GET /api/configs, cached lazily the first time a push form opens
 state.kaggleConfigsLoaded = false;
 
@@ -550,6 +551,20 @@ function renderKaggleWorkers() {
     // notebook_path set): the notebook already decides what it runs, so Push stays one-click.
     const templateBacked = !w.notebook_path;
     const lastSpec = w.last_config_path ? `<div class="kaggle-card-sub" title="Last pushed">last: ${escapeHtml(w.last_config_path)}</div>` : "";
+    const datasetSources = w.dataset_sources || [];
+    const datasetsSummary = datasetSources.length
+      ? `<div class="kaggle-card-sub" title="Kaggle datasets attached to this worker's kernel on every push">datasets: ${escapeHtml(datasetSources.join(", "))}</div>`
+      : `<div class="kaggle-card-sub" style="color:var(--red)" title="No datasets attached — a template-backed push will fail at the launch template's own dataset probe">no datasets attached</div>`;
+    const datasetFormOpen = state.kaggleDatasetFormOpen.has(w.worker_id);
+    const datasetFormHtml = templateBacked && datasetFormOpen ? `
+      <div class="scheduler-add-form" style="padding:10px 0 4px; flex-wrap:wrap;">
+        <div class="field grow" title="Kaggle datasets this worker's pushed kernel declares, as username/dataset-slug, comma-separated.">
+          <label>Dataset sources (comma-separated username/slug)</label>
+          <input class="text-input grow" id="kaggle-datasets-input-${cssEscapeAttr(w.worker_id)}" value="${escapeHtml(datasetSources.join(", "))}" placeholder="syfur007/clinicdb-images" />
+        </div>
+        <button class="btn btn-sm btn-primary" data-action="submit-datasets-worker" data-id="${escapeHtml(w.worker_id)}" data-account="${escapeHtml(w.account_name)}">Save</button>
+        <button class="btn btn-sm btn-ghost" data-action="cancel-datasets-worker" data-id="${escapeHtml(w.worker_id)}">Cancel</button>
+      </div>` : "";
     const pushFormOpen = state.kagglePushFormOpen.has(w.worker_id);
     const pushFormHtml = templateBacked && pushFormOpen ? `
       <div class="scheduler-add-form" style="padding:10px 0 4px; flex-wrap:wrap;">
@@ -572,6 +587,7 @@ function renderKaggleWorkers() {
             <div class="kaggle-card-title">${escapeHtml(w.worker_id)}</div>
             <div class="kaggle-card-sub">${escapeHtml(w.account_name)} · ${escapeHtml(w.kernel_slug)} ${templateBacked ? '· <span title="Renders a config into the shared/override template on push">template-backed</span>' : '· <span title="Pushes a fixed notebook verbatim">notebook-backed</span>'}</div>
             ${lastSpec}
+            ${templateBacked ? datasetsSummary : ""}
           </div>
           <div>${renderStatusBadge(status)} ${overBudgetBadge} ${notebookChangedBadge}</div>
         </div>
@@ -590,12 +606,14 @@ function renderKaggleWorkers() {
         ${errorHtml}
         ${historyHtml}
         ${pushFormHtml}
+        ${datasetFormHtml}
 
         <div class="kaggle-card-footer">
           <button class="btn btn-sm btn-ghost" data-action="push-worker" data-id="${escapeHtml(w.worker_id)}">Push</button>
-          ${w.last_config_path ? `<button class="btn btn-sm btn-ghost" data-action="restart-worker" data-id="${escapeHtml(w.worker_id)}" title="Re-push with the same config/mode/args as last time">Restart</button>` : ""}
+          ${w.last_config_path ? `<button class="btn btn-sm btn-ghost" data-action="restart-worker" data-id="${escapeHtml(w.worker_id)}" title="Re-push with the same config/extra_args as last time">Restart</button>` : ""}
           <button class="btn btn-sm btn-ghost" data-action="refresh-worker" data-id="${escapeHtml(w.worker_id)}">Refresh</button>
           <button class="btn btn-sm btn-ghost" data-action="download-worker" data-id="${escapeHtml(w.worker_id)}">Download</button>
+          ${templateBacked ? `<button class="btn btn-sm btn-ghost" data-action="toggle-datasets-worker" data-id="${escapeHtml(w.worker_id)}">${datasetFormOpen ? "Cancel" : "Edit datasets"}</button>` : ""}
           <button class="btn btn-sm btn-ghost" data-action="toggle-history" data-id="${escapeHtml(w.worker_id)}">${historyOpen ? "Hide history" : "History"}</button>
           <button class="btn btn-sm btn-danger" data-action="remove-worker" data-id="${escapeHtml(w.worker_id)}" data-account="${escapeHtml(w.account_name)}">Remove</button>
         </div>
@@ -619,6 +637,13 @@ function renderKaggleWorkers() {
       else if (action === "remove-worker") removeKaggleWorker(btn.dataset.account, id);
       else if (action === "toggle-history") toggleKaggleWorkerHistory(id);
       else if (action === "retry-worker") retryKaggleAction(id);
+      else if (action === "toggle-datasets-worker") {
+        if (state.kaggleDatasetFormOpen.has(id)) state.kaggleDatasetFormOpen.delete(id);
+        else state.kaggleDatasetFormOpen.add(id);
+        renderKaggleWorkers();
+      }
+      else if (action === "submit-datasets-worker") submitKaggleDatasetsForm(btn.dataset.account, id);
+      else if (action === "cancel-datasets-worker") { state.kaggleDatasetFormOpen.delete(id); renderKaggleWorkers(); }
     });
   });
 }
@@ -711,6 +736,8 @@ async function addKaggleWorker() {
   const kernel_slug = document.getElementById("kaggle-new-worker-slug").value.trim();
   const results_dir = document.getElementById("kaggle-new-worker-results").value.trim();
   const budgetRaw = document.getElementById("kaggle-new-worker-budget").value.trim();
+  const dataset_sources = document.getElementById("kaggle-new-worker-datasets").value
+    .split(",").map((s) => s.trim()).filter(Boolean);
   if (!account_name || !worker_id || !kernel_slug || !results_dir) {
     toast("Account, worker id, kernel slug and results dir are all required", "err");
     return;
@@ -719,12 +746,12 @@ async function addKaggleWorker() {
     toast("Set either a fixed notebook path or a template override, not both", "err");
     return;
   }
-  const body = { worker_id, kernel_slug, results_dir, notebook_path, template_path };
+  const body = { worker_id, kernel_slug, results_dir, notebook_path, template_path, dataset_sources };
   if (budgetRaw) body.budget_hours = parseFloat(budgetRaw);
   try {
     await api(`/api/kaggle/accounts/${encodeURIComponent(account_name)}/workers`, { method: "POST", body: JSON.stringify(body) });
     toast(`Worker '${worker_id}' added`, "ok");
-    ["kaggle-new-worker-id", "kaggle-new-worker-notebook", "kaggle-new-worker-template", "kaggle-new-worker-slug", "kaggle-new-worker-results", "kaggle-new-worker-budget"]
+    ["kaggle-new-worker-id", "kaggle-new-worker-notebook", "kaggle-new-worker-template", "kaggle-new-worker-slug", "kaggle-new-worker-results", "kaggle-new-worker-budget", "kaggle-new-worker-datasets"]
       .forEach((id) => (document.getElementById(id).value = ""));
     toggleKaggleAddForm("kaggle-add-worker-form", "btn-kaggle-toggle-add-worker", "+ Add worker", "Cancel");
     loadKaggle();
@@ -759,6 +786,23 @@ function pushKaggleWorker(workerId) {
   }
   state.kagglePushFormOpen.add(workerId);
   renderKaggleWorkers();
+}
+
+async function submitKaggleDatasetsForm(accountName, workerId) {
+  const safeId = cssEscapeAttr(workerId);
+  const dataset_sources = document.getElementById(`kaggle-datasets-input-${safeId}`).value
+    .split(",").map((s) => s.trim()).filter(Boolean);
+  try {
+    await api(
+      `/api/kaggle/accounts/${encodeURIComponent(accountName)}/workers/${encodeURIComponent(workerId)}/datasets`,
+      { method: "POST", body: JSON.stringify({ dataset_sources }) },
+    );
+    toast(`Updated datasets for '${workerId}'`, "ok");
+    state.kaggleDatasetFormOpen.delete(workerId);
+    loadKaggle();
+  } catch (e) {
+    toast("Couldn't update datasets: " + e.message, "err");
+  }
 }
 
 async function submitKagglePushForm(workerId) {

@@ -539,6 +539,10 @@
             <label>Fixed notebook path (repo-relative, optional — legacy)</label>
             <input class="text-input grow" id="kaggle-new-worker-notebook" placeholder="leave blank unless this worker pushes one specific hand-authored notebook, not a per-launch config" />
           </div>
+          <div class="field grow" title="Kaggle datasets attached to every kernel this worker pushes, as username/dataset-slug, comma-separated. Without at least one, a template-backed push has no data attached and fails at the template's own dataset probe.">
+            <label>Dataset sources (comma-separated username/slug)</label>
+            <input class="text-input grow" id="kaggle-new-worker-datasets" placeholder="syfur007/clinicdb-images, syfur007/busi-images" />
+          </div>
           <button class="btn btn-primary" id="btn-kaggle-add-worker">Add worker</button>
         </div>
       </div>
