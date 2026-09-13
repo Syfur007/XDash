@@ -191,6 +191,13 @@ class Settings:
         # week; left generous-but-finite so a newly registered account isn't
         # silently gated to 0 before anyone has configured it.
         self.kaggle_default_weekly_budget_hours = float(raw.get("kaggle_default_weekly_budget_hours", 30.0))
+
+        # Tier-3 fallback for backend/estimates.py's est_hours() — used only when a config has
+        # never run before (no measured history) and either declares no training.epochs or its
+        # composed model+dataset has no prior run to derive a per-epoch rate from either. A
+        # coarse guess, deliberately generous rather than tight, since underestimating is what
+        # causes a Kaggle push to get killed mid-run at its session limit.
+        self.est_hours_default = float(raw.get("est_hours_default", 6.0))
         self.kaggle_poll_interval_seconds = int(raw.get("kaggle_poll_interval_seconds", 180))
         self.kaggle_webhook_url = (raw.get("kaggle_webhook_url") or "").strip()
         # Shared launch-template notebook a template-backed worker renders config/mode/extra_args
@@ -214,6 +221,11 @@ class Settings:
         self.scheduler_file = self.state_dir / "scheduler.json"
         self.run_notes_file = self.state_dir / "run_notes.json"
         self.assignments_file = self.state_dir / "assignments.json"
+        # Batch metadata (name/state/started_at) for backend/batch_runner.py — the rows
+        # themselves live in assignments.json (EXPERIMENT_AUTOMATION_PLAN.md §3/§4);
+        # per-profile like every other state file here, so a batch started under one repo
+        # never becomes visible/actionable from another.
+        self.batches_file = self.state_dir / "batches.json"
         self.dashboard_log_dir = self.state_dir / "dashboard_logs"
         self.dashboard_log_dir.mkdir(parents=True, exist_ok=True)
 

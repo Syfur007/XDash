@@ -620,6 +620,20 @@ async function populateRunTargetSelect() {
   } catch (e) { /* mclab-only select still works fine */ }
 }
 
+// A Kaggle push always runs train then eval sequentially inside one kernel now
+// (EXPERIMENT_AUTOMATION_PLAN.md §2.4) — there's no per-push mode choice for it the way
+// mclab's terminals.launch() still has. Grey the selector out rather than removing it, so
+// switching back to mclab restores the choice without re-rendering the whole run bar.
+function updateRunModeAvailability() {
+  const target = document.getElementById("run-target-select").value || "local";
+  const modeSelect = document.getElementById("run-mode");
+  const isKaggle = target.startsWith("kaggle:");
+  modeSelect.disabled = isKaggle;
+  modeSelect.title = isKaggle
+    ? "A Kaggle push always runs train then eval sequentially inside one kernel — there is no separate train-only or eval-only push."
+    : "";
+}
+
 async function runConfig() {
   if (!state.selectedConfigPath) return;
   if (state.editorDirty && !(await showConfirm("Launch anyway?", "You have unsaved edits. Launch the last saved version anyway?"))) return;
@@ -2578,6 +2592,7 @@ function initButtons() {
   document.getElementById("btn-save-config").addEventListener("click", saveConfig);
   document.getElementById("btn-toggle-resolved").addEventListener("click", toggleResolvedConfig);
   document.getElementById("btn-run").addEventListener("click", runConfig);
+  document.getElementById("run-target-select").addEventListener("change", updateRunModeAvailability);
   document.getElementById("config-filter").addEventListener("input", (e) => { state.configFilter = e.target.value; renderConfigTree(); });
   document.getElementById("report-filter").addEventListener("input", (e) => { state.reportFilter = e.target.value; renderReportList(); });
   document.getElementById("terminal-filter").addEventListener("input", (e) => { state.terminalFilter = e.target.value; renderTerminalList(); });

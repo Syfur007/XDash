@@ -50,7 +50,10 @@ def _to_unit(account_name: str, w: Dict[str, Any]) -> RunUnit:
         status=_STATUS_MAP.get(raw_status, "unknown"),
         raw_status=raw_status,
         config_path=w.get("last_config_path"),
-        mode=w.get("last_mode"),
+        # No mode: a Kaggle push runs train then eval together now, so there's no longer a
+        # single mode to report (EXPERIMENT_AUTOMATION_PLAN.md §2.4) — worker state stopped
+        # carrying last_mode when push() dropped the parameter.
+        mode=None,
         extra={
             "kernel_slug": w.get("kernel_slug"),
             "over_budget": w.get("over_budget", False),
@@ -87,7 +90,12 @@ class KaggleRunner(Runner):
     def launch(self, spec: LaunchSpec) -> RunUnit:
         if not spec.target:
             raise ValueError("KaggleRunner.launch() needs spec.target set to a worker_id")
-        push_result = kaggle_backend.push(spec.target, spec.config_path, spec.mode, spec.extra_args)
+        # No spec.mode: a template-backed push always runs train then eval sequentially
+        # inside one kernel now (EXPERIMENT_AUTOMATION_PLAN.md §2.4) — kaggle_backend.push()
+        # lost its mode parameter entirely, so LaunchSpec.mode is simply not forwarded here
+        # (it's still meaningful for LocalRunner, whose terminals.launch() keeps train/eval/
+        # both as real choices).
+        push_result = kaggle_backend.push(spec.target, spec.config_path, spec.extra_args)
         unit = self._unit_for(spec.target)
         if push_result.get("concurrent_warning"):
             unit.extra["concurrent_warning"] = push_result["concurrent_warning"]
@@ -130,7 +138,6 @@ class KaggleRunner(Runner):
                 "budget_metered": True,
                 "hours_this_week": account.get("usage_estimate", {}).get("hours_this_week"),
                 "usage_history": account.get("usage_history"),
-                "auto_chain": account.get("auto_chain", False),
             },
         )
 

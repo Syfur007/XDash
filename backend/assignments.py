@@ -66,6 +66,7 @@ def list_rows() -> List[Dict[str, Any]]:
 def add_row(
     config_path: str, seed: Optional[Any] = None, runner_id: str = "",
     status: str = "planned", notes: str = "", block: str = "", extra: Optional[Dict[str, Any]] = None,
+    batch_name: Optional[str] = None, pool: Optional[str] = None,
 ) -> Dict[str, Any]:
     config_path = (config_path or "").strip()
     if not config_path:
@@ -79,6 +80,13 @@ def add_row(
         "status": (status or "planned").strip() or "planned",
         "notes": (notes or "").strip(),
         "extra": extra or {},
+        # Batch-automation fields (EXPERIMENT_AUTOMATION_PLAN.md §3). None/0/None for a
+        # hand-added row — these only mean something once a batch dispatcher owns the row.
+        "batch_name": batch_name,
+        "pool": pool,               # "either" | "local_only" | "kaggle_only", or None if not batch-owned
+        "attempt_count": 0,
+        "unit_ref": None,           # {"train_item_id","eval_item_id"} (local) or {"account","worker_id"} (kaggle)
+        "blocked_reason": None,     # set when status == "blocked" (§4.1 Rule 6) — why no resource fit this tick
         "updated_at": _now(),
     }
     with _lock:
@@ -88,8 +96,48 @@ def add_row(
     return row
 
 
+def bulk_add(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Inserts many rows under a single lock acquisition — what a sweep-spec
+    loader uses to expand configs x seeds into rows (EXPERIMENT_AUTOMATION_PLAN.md
+    §3) without N separate lock/load/save cycles for a large sweep. Each
+    entry takes the same fields as add_row()'s kwargs, as a dict; config_path
+    is the only required one. Returns the created rows in the same order."""
+    created: List[Dict[str, Any]] = []
+    with _lock:
+        rows = _load()
+        for entry in entries:
+            config_path = (entry.get("config_path") or "").strip()
+            if not config_path:
+                raise AssignmentError("Every bulk_add entry requires config_path")
+            seed = entry.get("seed")
+            row = {
+                "row_id": uuid.uuid4().hex[:10],
+                "config_path": config_path,
+                "seed": seed if seed not in ("", None) else None,
+                "block": (entry.get("block") or "").strip(),
+                "runner_id": (entry.get("runner_id") or "").strip(),
+                "status": (entry.get("status") or "pending").strip() or "pending",
+                "notes": (entry.get("notes") or "").strip(),
+                "extra": entry.get("extra") or {},
+                "batch_name": entry.get("batch_name"),
+                "pool": entry.get("pool"),
+                "attempt_count": 0,
+                "unit_ref": None,
+                "blocked_reason": None,
+                "updated_at": _now(),
+            }
+            rows.append(row)
+            created.append(row)
+        if created:
+            _save(rows)
+    return created
+
+
 def update_row(row_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
-    editable = {"config_path", "seed", "block", "runner_id", "status", "notes"}
+    editable = {
+        "config_path", "seed", "block", "runner_id", "status", "notes",
+        "batch_name", "pool", "attempt_count", "unit_ref", "blocked_reason",
+    }
     with _lock:
         rows = _load()
         row = next((r for r in rows if r["row_id"] == row_id), None)
@@ -98,7 +146,36 @@ def update_row(row_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
         for key, value in (patch or {}).items():
             if key not in editable:
                 continue
-            row[key] = value.strip() if isinstance(value, str) and key != "notes" else value
+            row[key] = value.strip() if isinstance(value, str) and key not in ("notes",) else value
+        row["updated_at"] = _now()
+        _save(rows)
+    return row
+
+
+def claim_row(row_id: str, patch: Dict[str, Any], expected_status: str = "pending") -> Optional[Dict[str, Any]]:
+    """Atomic compare-and-swap: applies *patch* to *row_id* only if its
+    current status is still *expected_status*, returning the updated row —
+    or None if it isn't (already claimed by a concurrent caller, cancelled,
+    etc.), doing nothing in that case.
+
+    This is the primitive the batch dispatcher's slot handout needs
+    (EXPERIMENT_AUTOMATION_PLAN.md §4's "claiming is atomic"), refined from
+    that section's original "claim_next(pool)" sketch: §4.1's greedy policy
+    scores *every* pending row (feasibility, then longest-first) to pick
+    which one to dispatch next, which needs the full row list up front
+    (list_rows()) — a single-call "claim the next pending row in a pool"
+    can't express that ordering. So the dispatcher does its own scoring over
+    list_rows(), then calls claim_row(row_id, ...) on whichever row it
+    picked; the compare-and-swap here is what stops two racing callers (the
+    dispatch tick and a concurrent one, or two ticks in flight) from both
+    successfully claiming the same row — the loser gets None back and moves
+    on to its next-best candidate rather than double-dispatching."""
+    with _lock:
+        rows = _load()
+        row = next((r for r in rows if r["row_id"] == row_id), None)
+        if row is None or row.get("status") != expected_status:
+            return None
+        row.update(patch)
         row["updated_at"] = _now()
         _save(rows)
     return row

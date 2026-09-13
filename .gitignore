@@ -10,6 +10,7 @@ data/*/kaggle_accounts/
 data/*/kaggle_notifications.json
 data/*/run_notes.json
 data/*/assignments.json
+data/*/batches.json
 data/_active_repo.json
 
 # System-wide (cross-profile) Kaggle registry — a Kaggle account belongs to a

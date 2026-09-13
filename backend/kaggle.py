@@ -370,26 +370,11 @@ def list_accounts() -> List[Dict[str, Any]]:
             "scope": account.get("scope", SCOPE_REPO),
             "has_legacy_key": (creds_dir / CREDS_FILENAME).is_file(),
             "has_api_token": (creds_dir / TOKEN_FILENAME).is_file(),
-            "auto_chain": bool(account.get("auto_chain")),
             "workers": workers,
             "usage_estimate": estimate_usage(account["name"]),
             "usage_history": usage_history(account["name"]),
         })
     return result
-
-
-def set_auto_chain(name: str, enabled: bool) -> Dict[str, Any]:
-    """Toggles whether the background poller (see ensure_kaggle_worker_started
-    / _tick below) automatically pushes this account's next not-yet-pushed
-    worker once the current one reaches a final status."""
-    with _lock:
-        data = _load_accounts()
-        account = _find_account(data, name)
-        if account is None:
-            raise KaggleOpsError(f"Unknown account '{name}'")
-        account["auto_chain"] = bool(enabled)
-        _save_accounts(data)
-    return {"name": name, "auto_chain": bool(enabled)}
 
 
 def add_account(
@@ -1510,23 +1495,6 @@ def _send_webhook(text: str) -> None:
         pass
 
 
-def _next_chain_worker(account: Dict[str, Any], just_finished_id: str) -> Optional[str]:
-    """The next worker in *account*'s own list order that's never been
-    pushed at all. Deliberately not "the next one after just_finished_id" —
-    order in the stored list is the only ordering this module has, and
-    skipping straight to "first never-attempted" is simpler and doesn't
-    depend on just_finished_id's position. Never re-chains into a worker
-    that failed before — a chain silently retrying a broken push forever is
-    worse than requiring a human to look at it once."""
-    state = _load_state()
-    for w in account.get("workers", []):
-        if w["worker_id"] == just_finished_id:
-            continue
-        if "status" not in state.get(w["worker_id"], {}):
-            return w["worker_id"]
-    return None
-
-
 def _tick() -> None:
     data = _load_accounts()
     state = _load_state()
@@ -1548,14 +1516,13 @@ def _tick() -> None:
             notif.send_all(f"Kaggle worker '{worker_id}' ({account['name']}) is now {new_status}.")
             _send_webhook(f"Kaggle worker '{worker_id}' ({account['name']}) is now {new_status}.")
 
-            if account.get("auto_chain"):
-                next_id = _next_chain_worker(account, worker_id)
-                if next_id:
-                    try:
-                        push(next_id)
-                        _update_worker_state(next_id, {}, event=f"auto-pushed (chained after {worker_id})")
-                    except KaggleOpsError as e:
-                        _update_worker_state(next_id, {}, event=f"auto-push failed: {e}")
+            # Batch-dispatcher completion hook (EXPERIMENT_AUTOMATION_PLAN.md §4). Lazy import:
+            # batch_runner imports this module to call push(), so a top-level import here would
+            # be circular; not held under any lock at this point in _tick() (each call above
+            # already acquired and released _lock independently), so no deadlock risk calling
+            # back into batch_runner's own locking (assignments._lock) from here.
+            from . import batch_runner
+            batch_runner.on_kaggle_unit_finished(worker_id, new_status)
 
 
 def _poll_loop() -> None:

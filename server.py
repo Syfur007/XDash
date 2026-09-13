@@ -610,13 +610,6 @@ def api_kaggle_download_all():
     return jsonify({"results": kaggle_ops.download_all()})
 
 
-@app.route("/api/kaggle/accounts/<name>/auto_chain", methods=["POST"])
-def api_kaggle_set_auto_chain(name):
-    body = request.get_json(silent=True) or {}
-    try:
-        return jsonify(kaggle_ops.set_auto_chain(name, bool(body.get("enabled"))))
-    except kaggle_ops.KaggleOpsError as e:
-        return err(str(e), 400)
 
 
 @app.route("/api/kaggle/accounts/<name>/weekly_budget", methods=["POST"])

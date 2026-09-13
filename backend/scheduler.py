@@ -215,11 +215,14 @@ def reorder_pending(ordered_ids: List[str]):
         _save(data)
 
 
-def _total_epochs(config_path: str) -> Optional[int]:
+def total_epochs(config_path: str) -> Optional[int]:
     """Best-effort epoch count for the progress bar/ETA — configs vary in
     whether they even set this, so a missing/malformed value just means no
     progress bar rather than an error (see IMPLEMENTATION_PLAN.md's
-    "degrade honestly" principle)."""
+    "degrade honestly" principle). Public (not module-private) because
+    backend/estimates.py's est_hours() also needs it, for the same "does
+    this config declare an epoch count" question
+    (EXPERIMENT_AUTOMATION_PLAN.md §4.1)."""
     try:
         parsed = cfg.read_config(config_path)["parsed"] or {}
         epochs = (parsed.get("training") or {}).get("epochs")
@@ -250,7 +253,7 @@ def list_items() -> Dict[str, Any]:
             term = terminals.get_terminal(item["session_name"])
             if term:
                 item["latest_metrics"] = term.get("latest_metrics")
-            item["total_epochs"] = _total_epochs(item["config_path"])
+            item["total_epochs"] = total_epochs(item["config_path"])
             item["log_tail"] = _log_tail(item["session_name"])
     return {
         "items": items,

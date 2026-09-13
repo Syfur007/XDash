@@ -227,11 +227,6 @@ function renderKaggleAccounts() {
           ${renderKaggleSparkline(a.usage_history)}
         </div>
 
-        <div class="kaggle-auto-chain-row" title="When on, the background poller automatically pushes this account's next never-pushed worker once the current one reaches a final status.">
-          <button class="toggle-switch ${a.auto_chain ? "on" : ""}" data-action="toggle-auto-chain" data-account="${escapeHtml(a.name)}"><span class="toggle-knob"></span></button>
-          <span>Auto-chain next worker</span>
-        </div>
-
         ${credEditOpen ? renderKaggleCredentialForm(a) : ""}
 
         <div class="kaggle-card-footer">
@@ -256,7 +251,6 @@ function renderKaggleAccounts() {
       else if (action === "edit-name") toggleKaggleNameEdit(account, true);
       else if (action === "cancel-name") toggleKaggleNameEdit(account, false);
       else if (action === "save-name") saveKaggleAccountName(account);
-      else if (action === "toggle-auto-chain") toggleKaggleAutoChain(account, !btn.classList.contains("on"));
     });
   });
 }
@@ -407,17 +401,6 @@ async function testKaggleNotification(channel) {
     toast(`Test message sent via ${c.label} — check it arrived`, "ok");
   } catch (e) {
     toast(`${c.label} test failed: ${e.message}`, "err");
-  }
-}
-
-async function toggleKaggleAutoChain(name, enabled) {
-  try {
-    await api(`/api/kaggle/accounts/${encodeURIComponent(name)}/auto_chain`, {
-      method: "POST", body: JSON.stringify({ enabled }),
-    });
-    loadKaggle();
-  } catch (e) {
-    toast("Couldn't update auto-chain: " + e.message, "err");
   }
 }
 
