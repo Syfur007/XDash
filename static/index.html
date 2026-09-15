@@ -35,6 +35,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 9v11"/></svg>
         Configs
       </div>
+      <div class="nav-item" data-view="templates">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h5"/><path d="M16 19v2"/></svg>
+        Templates
+      </div>
       <div class="nav-item" data-view="experiments">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M8 9l3 3-3 3M13 15h3"/></svg>
         Experiments
@@ -125,6 +129,21 @@
         <div id="overview-activity-body" style="padding:6px 16px 16px;">
           <div class="empty-state">Loading…</div>
         </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- Templates view -->
+    <section class="view" id="view-templates">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Templates</div>
+          <div class="view-sub">Notebook launch templates available to Kaggle workers and their current validation state.</div>
+        </div>
+        <button class="btn btn-ghost" id="btn-refresh-templates">Refresh</button>
+      </div>
+      <div class="panel">
+        <div class="panel-header"><span>Notebook templates</span><span id="template-count"></span></div>
+        <div class="template-list" id="template-list-body"><div class="empty-state">Loading…</div></div>
       </div>
     </section>
 
@@ -529,7 +548,7 @@
           </div>
           <div class="field grow">
             <label>Results dir (repo-relative)</label>
-            <input class="text-input grow" id="kaggle-new-worker-results" placeholder="results/worker1" />
+            <div class="path-input"><input class="text-input grow" id="kaggle-new-worker-results" placeholder="results/worker1" /><button class="btn btn-sm btn-ghost" data-path-picker="kaggle-new-worker-results" data-path-kind="directory" title="Choose a repo directory">Browse</button></div>
           </div>
           <div class="field">
             <label>Budget (hours)</label>
@@ -537,11 +556,11 @@
           </div>
           <div class="field grow">
             <label>Template override (repo-relative, optional)</label>
-            <input class="text-input grow" id="kaggle-new-worker-template" placeholder="leave blank to use the default launch template" />
+            <div class="path-input"><input class="text-input grow" id="kaggle-new-worker-template" placeholder="leave blank to use the default launch template" /><button class="btn btn-sm btn-ghost" data-path-picker="kaggle-new-worker-template" title="Choose a notebook">Browse</button></div>
           </div>
           <div class="field grow">
             <label>Fixed notebook path (repo-relative, optional — legacy)</label>
-            <input class="text-input grow" id="kaggle-new-worker-notebook" placeholder="leave blank unless this worker pushes one specific hand-authored notebook, not a per-launch config" />
+            <div class="path-input"><input class="text-input grow" id="kaggle-new-worker-notebook" placeholder="leave blank unless this worker pushes one specific hand-authored notebook, not a per-launch config" /><button class="btn btn-sm btn-ghost" data-path-picker="kaggle-new-worker-notebook" title="Choose a notebook">Browse</button></div>
           </div>
           <div class="field grow" title="Kaggle datasets attached to every kernel this worker pushes, as username/dataset-slug, comma-separated. Without at least one, a template-backed push has no data attached and fails at the template's own dataset probe.">
             <label>Dataset sources (comma-separated username/slug)</label>
@@ -780,6 +799,15 @@
 </div>
 
 <div class="toast-stack" id="toast-stack"></div>
+
+<div class="modal-backdrop hidden" id="path-picker-backdrop">
+  <div class="modal path-picker-modal">
+    <div class="modal-title">Choose a repository path</div>
+    <input class="text-input" id="path-picker-filter" placeholder="Filter paths…" autocomplete="off" />
+    <div class="path-picker-list" id="path-picker-list"><div class="empty-state">Loading…</div></div>
+    <div class="modal-actions"><button class="btn btn-ghost" id="path-picker-cancel">Cancel</button></div>
+  </div>
+</div>
 
 <div class="modal-backdrop hidden" id="confirm-backdrop">
   <div class="modal">

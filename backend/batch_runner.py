@@ -440,6 +440,19 @@ def _dispatch_tick_locked() -> None:
             local_free -= 1
         else:
             account, worker = target[1]
+            if (row.get("run_mode") or "fresh") == "resume":
+                validation = kaggle_backend.validate_resume_state(worker["worker_id"], {
+                    "resume_from_worker_id": row.get("resume_from_worker_id", ""),
+                    "resume_from_run_id": row.get("resume_from_run_id", ""),
+                    "resume_from_results_dir": row.get("resume_from_results_dir", ""),
+                    "resume_from_manifest_path": row.get("resume_from_manifest_path", ""),
+                    "config_path": row.get("config_path", ""),
+                    "chain_id": row.get("chain_id", ""),
+                })
+                if not validation["ok"]:
+                    reason = "resume-invalid: " + "; ".join(validation["reasons"])
+                    asg.claim_row(row["row_id"], {"status": "blocked", "blocked_reason": reason[:300]}, expected_status=row["status"])
+                    continue
             claimed = asg.claim_row(
                 row["row_id"],
                 {

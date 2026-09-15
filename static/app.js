@@ -242,6 +242,8 @@ function initNav() {
   });
   document.getElementById("btn-hamburger").addEventListener("click", toggleSidebar);
   document.getElementById("sidebar-backdrop").addEventListener("click", closeSidebar);
+  initPathPickers();
+  document.getElementById("btn-refresh-templates")?.addEventListener("click", loadTemplates);
   document.getElementById("btn-refresh-settings")?.addEventListener("click", async () => {
     try {
       await Promise.all([loadSystem(), loadRepos()]);
@@ -249,6 +251,54 @@ function initNav() {
       toast("Settings refreshed", "ok");
     } catch (e) { toast("Couldn't refresh settings: " + e.message, "err"); }
   });
+}
+
+const pathPickerState = { targetId: null, kind: "file", paths: [] };
+
+function initPathPickers() {
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-path-picker]");
+    if (!button) return;
+    event.preventDefault();
+    openPathPicker(button.dataset.pathPicker, button.dataset.pathKind || "file");
+  });
+  document.getElementById("path-picker-cancel")?.addEventListener("click", closePathPicker);
+  document.getElementById("path-picker-backdrop")?.addEventListener("click", (event) => {
+    if (event.target.id === "path-picker-backdrop") closePathPicker();
+  });
+  document.getElementById("path-picker-filter")?.addEventListener("input", renderPathPicker);
+}
+
+async function openPathPicker(targetId, kind) {
+  pathPickerState.targetId = targetId;
+  pathPickerState.kind = kind;
+  document.getElementById("path-picker-backdrop").classList.remove("hidden");
+  document.getElementById("path-picker-filter").value = "";
+  document.getElementById("path-picker-list").innerHTML = `<div class="empty-state">Loading…</div>`;
+  try {
+    const data = await api(`/api/paths?scope=repo&kind=${encodeURIComponent(kind)}`);
+    pathPickerState.paths = data.paths || [];
+    renderPathPicker();
+  } catch (e) {
+    document.getElementById("path-picker-list").innerHTML = `<div class="empty-state">Couldn't load paths: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderPathPicker() {
+  const list = document.getElementById("path-picker-list");
+  const filter = (document.getElementById("path-picker-filter").value || "").trim().toLowerCase();
+  const paths = pathPickerState.paths.filter((item) => !filter || item.path.toLowerCase().includes(filter));
+  list.innerHTML = paths.length ? paths.map((item) => `<button class="path-picker-item" data-path-value="${escapeHtml(item.path)}"><span>${escapeHtml(item.name)}</span><small>${escapeHtml(item.path)}</small></button>`).join("") : `<div class="empty-state">No matching paths.</div>`;
+  list.querySelectorAll("[data-path-value]").forEach((button) => button.addEventListener("click", () => {
+    const input = document.getElementById(pathPickerState.targetId);
+    if (input) input.value = button.dataset.pathValue;
+    closePathPicker();
+  }));
+}
+
+function closePathPicker() {
+  document.getElementById("path-picker-backdrop")?.classList.add("hidden");
+  pathPickerState.targetId = null;
 }
 
 function toggleSidebar() {
@@ -271,7 +321,20 @@ function switchView(view) {
   if (view === "experiments") { loadExperimentsKaggleActive(); loadExperimentsOtherRepos(); }
   if (view === "assignments" && !state.assignmentsLoaded) loadAssignments();
   if (view === "settings") renderSettings();
+  if (view === "templates") loadTemplates();
   if (view === "overview") loadOverview();
+}
+
+async function loadTemplates() {
+  const body = document.getElementById("template-list-body");
+  if (!body) return;
+  body.innerHTML = `<div class="empty-state">Loading…</div>`;
+  try {
+    const data = await api("/api/templates");
+    const templates = data.templates || [];
+    document.getElementById("template-count").textContent = `${templates.length} template${templates.length === 1 ? "" : "s"}`;
+    body.innerHTML = templates.length ? templates.map((template) => `<div class="template-row"><div class="template-main"><strong>${escapeHtml(template.path)}</strong><div class="settings-profile-path">${template.exists ? `${template.size.toLocaleString()} bytes` : "missing"}</div></div><span class="badge ${template.exists ? template.is_default ? "green" : "slate" : "red"}">${template.is_default ? "default" : template.exists ? "available" : "missing"}</span><div class="template-workers">${template.linked_workers.length ? template.linked_workers.map((worker) => `<span class="badge slate">${escapeHtml(worker.account)} · ${escapeHtml(worker.worker_id)}</span>`).join("") : "<span class=\"settings-profile-path\">No linked workers</span>"}</div></div>`).join("") : `<div class="empty-state">No notebook templates found.</div>`;
+  } catch (e) { body.innerHTML = `<div class="empty-state">Couldn't load templates: ${escapeHtml(e.message)}</div>`; }
 }
 
 function renderSettings() {

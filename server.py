@@ -41,6 +41,8 @@ from backend import runners as runner_registry
 from backend.runners.base import ACTIVE_STATUSES, LaunchSpec, RunnerCapabilityError
 from backend import assignments
 from backend import batch_runner
+from backend import paths
+from backend import templates
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -102,6 +104,19 @@ def _guard_mutating_requests():
 @app.route("/api/configs", methods=["GET"])
 def api_list_configs():
     return jsonify({"groups": cfg.list_configs()})
+
+
+@app.route("/api/paths", methods=["GET"])
+def api_list_paths():
+    try:
+        return jsonify({"paths": paths.list_paths(request.args.get("scope", "repo"), request.args.get("kind", "file"))})
+    except ValueError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/templates", methods=["GET"])
+def api_list_templates():
+    return jsonify({"templates": templates.list_templates()})
 
 
 @app.route("/api/config", methods=["GET"])
@@ -611,6 +626,14 @@ def api_kaggle_validate_resume(worker_id):
         return jsonify(kaggle_ops.validate_resume_state(worker_id, body))
     except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
+
+
+@app.route("/api/kaggle/workers/<worker_id>/resume/history", methods=["GET"])
+def api_kaggle_resume_history(worker_id):
+    try:
+        return jsonify({"worker_id": worker_id, "history": kaggle_ops.worker_resume_history(worker_id)})
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 404)
 
 
 @app.route("/api/kaggle/workers/<worker_id>/status", methods=["POST"])

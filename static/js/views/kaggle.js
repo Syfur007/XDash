@@ -571,8 +571,10 @@ function renderKaggleWorkers() {
       <div class="scheduler-add-form" style="padding:10px 0 4px; flex-wrap:wrap;">
         <div class="field grow"><label>Source worker id</label><input class="text-input grow" id="kaggle-resume-worker-${cssEscapeAttr(w.worker_id)}" placeholder="source-worker" /></div>
         <div class="field grow"><label>Source run id</label><input class="text-input grow" id="kaggle-resume-run-${cssEscapeAttr(w.worker_id)}" placeholder="run-123" /></div>
-        <div class="field grow"><label>Results dir</label><input class="text-input grow" id="kaggle-resume-dir-${cssEscapeAttr(w.worker_id)}" placeholder="results/source_worker" /></div>
-        <div class="field grow"><label>Manifest path</label><input class="text-input grow" id="kaggle-resume-manifest-${cssEscapeAttr(w.worker_id)}" placeholder="results/source_worker/manifest.json" /></div>
+        <div class="field grow"><label>Results dir</label><div class="path-input"><input class="text-input grow" id="kaggle-resume-dir-${cssEscapeAttr(w.worker_id)}" placeholder="results/source_worker" /><button class="btn btn-sm btn-ghost" data-path-picker="kaggle-resume-dir-${cssEscapeAttr(w.worker_id)}" data-path-kind="directory" title="Choose source results directory">Browse</button></div></div>
+        <div class="field grow"><label>Manifest path</label><div class="path-input"><input class="text-input grow" id="kaggle-resume-manifest-${cssEscapeAttr(w.worker_id)}" placeholder="results/source_worker/manifest.json" /><button class="btn btn-sm btn-ghost" data-path-picker="kaggle-resume-manifest-${cssEscapeAttr(w.worker_id)}" title="Choose source manifest">Browse</button></div></div>
+        <div class="field grow"><label>Config</label><input class="text-input grow" id="kaggle-resume-config-${cssEscapeAttr(w.worker_id)}" value="${escapeHtml(w.last_config_path || "")}" placeholder="configs/experiment.yaml" /></div>
+        <div class="field"><label>Chain</label><input class="text-input" id="kaggle-resume-chain-${cssEscapeAttr(w.worker_id)}" value="${escapeHtml(w.chain_id || "")}" placeholder="worker:0" /></div>
         <button class="btn btn-sm btn-primary" data-action="submit-resume-worker" data-id="${escapeHtml(w.worker_id)}">Start resumed run</button>
         <button class="btn btn-sm btn-ghost" data-action="cancel-resume-worker" data-id="${escapeHtml(w.worker_id)}">Cancel</button>
       </div>` : "";
@@ -829,6 +831,8 @@ async function submitKaggleResumeForm(workerId) {
   const resume_from_run_id = document.getElementById(`kaggle-resume-run-${safeId}`)?.value.trim() || "";
   const resume_from_results_dir = document.getElementById(`kaggle-resume-dir-${safeId}`)?.value.trim() || "";
   const resume_from_manifest_path = document.getElementById(`kaggle-resume-manifest-${safeId}`)?.value.trim() || "";
+  const config_path = document.getElementById(`kaggle-resume-config-${safeId}`)?.value.trim() || "";
+  const chain_id = document.getElementById(`kaggle-resume-chain-${safeId}`)?.value.trim() || "";
   if (!resume_from_run_id || !resume_from_results_dir) {
     toast("Source run id and results dir are required for a resumed launch", "err");
     return;
@@ -839,6 +843,8 @@ async function submitKaggleResumeForm(workerId) {
       resume_from_run_id,
       resume_from_results_dir,
       resume_from_manifest_path,
+      config_path,
+      chain_id,
     }) });
     state.kaggleResumeFormOpen.delete(workerId);
     toast(result.run_mode === "resume" ? `Resumed '${workerId}' from ${resume_from_run_id}` : `Pushed '${workerId}'`, "ok");

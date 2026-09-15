@@ -385,6 +385,19 @@ def list_accounts() -> List[Dict[str, Any]]:
     return result
 
 
+def worker_resume_history(worker_id: str) -> List[Dict[str, Any]]:
+    """Return lineage-related state events for one worker, newest first."""
+    data = _load_accounts()
+    _, worker = _find_worker_and_account(data, worker_id)
+    if worker is None:
+        raise KaggleOpsError(f"Unknown worker '{worker_id}'")
+    history = _load_state().get(worker_id, {}).get("history", [])
+    return [event for event in reversed(history) if any(
+        marker in (event.get("event") or "").lower()
+        for marker in ("resume", "push", "complete", "error")
+    )]
+
+
 def add_account(
     name: str, username: str = "", key: str = "", api_token: str = "",
     scope: str = SCOPE_REPO,
@@ -854,6 +867,8 @@ def validate_resume_state(worker_id: str, resume_info: Optional[Dict[str, Any]] 
     source_run = (info.get("resume_from_run_id") or "").strip()
     results_dir = (info.get("resume_from_results_dir") or "").strip()
     manifest_path = (info.get("resume_from_manifest_path") or "").strip()
+    expected_config = (info.get("config_path") or "").strip()
+    expected_chain = (info.get("chain_id") or "").strip()
     ok = True
     reasons: List[str] = []
 
@@ -881,6 +896,7 @@ def validate_resume_state(worker_id: str, resume_info: Optional[Dict[str, Any]] 
         elif not resolved.exists():
             ok = False
             reasons.append(f"resume_from_results_dir does not exist: {results_dir}")
+    resolved_manifest: Optional[Path] = None
     if manifest_path:
         resolved_manifest = (settings.repo_root / manifest_path).resolve()
         repo_root = settings.repo_root.resolve()
@@ -890,6 +906,25 @@ def validate_resume_state(worker_id: str, resume_info: Optional[Dict[str, Any]] 
         elif not resolved_manifest.is_file():
             ok = False
             reasons.append(f"resume_from_manifest_path does not exist: {manifest_path}")
+        else:
+            try:
+                manifest = json.loads(resolved_manifest.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                ok = False
+                reasons.append(f"resume manifest is not valid JSON: {exc}")
+            else:
+                manifest_run = str(manifest.get("run_id") or "").strip()
+                manifest_config = str(manifest.get("config_path") or "").strip()
+                manifest_chain = str(manifest.get("chain_id") or "").strip()
+                if manifest_run and manifest_run != source_run:
+                    ok = False
+                    reasons.append(f"resume manifest run_id mismatch: expected {source_run}, found {manifest_run}")
+                if expected_config and manifest_config and manifest_config != expected_config:
+                    ok = False
+                    reasons.append(f"resume manifest config mismatch: expected {expected_config}, found {manifest_config}")
+                if expected_chain and manifest_chain and manifest_chain != expected_chain:
+                    ok = False
+                    reasons.append(f"resume manifest chain mismatch: expected {expected_chain}, found {manifest_chain}")
     return {"worker_id": worker_id, "ok": ok, "reasons": reasons, "resume_from_worker_id": source_worker, "resume_from_run_id": source_run}
 
 
@@ -913,6 +948,8 @@ def resume_worker(
         "resume_from_run_id": (from_run_id or "").strip(),
         "resume_from_results_dir": (source_dir or "").strip(),
         "resume_from_manifest_path": (manifest_path or "").strip(),
+        "config_path": (config_path or "").strip(),
+        "chain_id": (chain_id or "").strip(),
     }
     validation = validate_resume_state(worker_id, info)
     if not validation["ok"]:
@@ -969,6 +1006,8 @@ def push(worker_id: str, config_path: str = "", extra_args: str = "",
     if worker is None:
         raise KaggleOpsError(f"Unknown worker '{worker_id}'")
 
+    staged_resume_dir: Optional[Path] = None
+    staged_resume_manifest: Optional[Path] = None
     resolved_mode = _normalize_run_mode(run_mode or (worker.get("run_mode") or _load_state().get(worker_id, {}).get("run_mode") or "fresh"))
     if resolved_mode == "resume":
         resume_info = {
@@ -976,13 +1015,23 @@ def push(worker_id: str, config_path: str = "", extra_args: str = "",
             "resume_from_run_id": (resume_from_run_id or worker.get("resume_from_run_id") or _load_state().get(worker_id, {}).get("resume_from_run_id") or "").strip(),
             "resume_from_results_dir": (resume_from_results_dir or worker.get("resume_from_results_dir") or _load_state().get(worker_id, {}).get("resume_from_results_dir") or "").strip(),
             "resume_from_manifest_path": (resume_from_manifest_path or worker.get("resume_from_manifest_path") or _load_state().get(worker_id, {}).get("resume_from_manifest_path") or "").strip(),
+            "config_path": (config_path or "").strip(),
+            "chain_id": (chain_id or "").strip(),
         }
         validation = validate_resume_state(worker_id, resume_info)
         if not validation["ok"]:
             raise KaggleOpsError("Resume validation failed: " + "; ".join(validation["reasons"]))
+        staged_resume_dir = (settings.repo_root / resume_info["resume_from_results_dir"]).resolve()
+        if resume_info["resume_from_manifest_path"]:
+            staged_resume_manifest = (settings.repo_root / resume_info["resume_from_manifest_path"]).resolve()
 
     notebook_path = worker.get("notebook_path")
     if notebook_path:
+        if resolved_mode == "resume":
+            raise KaggleOpsError(
+                f"Worker '{worker_id}' is fixed-notebook backed and cannot receive the dashboard "
+                "resume contract; use a template-backed worker for resumed runs."
+            )
         source_abs = settings.repo_root / notebook_path
         if not source_abs.is_file():
             raise KaggleOpsError(f"Notebook not found: {notebook_path}")
@@ -1006,6 +1055,10 @@ def push(worker_id: str, config_path: str = "", extra_args: str = "",
         state = _load_state().get(worker_id, {})
         version = version_index if version_index is not None else int(state.get("version_index") or 0)
         chain = chain_id or state.get("chain_id") or worker.get("chain_id") or f"{worker_id}:{version}"
+        rendered_resume_dir = "/kaggle/working/resume_source" if staged_resume_dir else ""
+        rendered_resume_manifest = ""
+        if staged_resume_manifest:
+            rendered_resume_manifest = "/kaggle/working/resume_source/manifest.json"
         push_bytes = _render_launch_notebook(
             source_abs,
             cli_config_path,
@@ -1013,8 +1066,8 @@ def push(worker_id: str, config_path: str = "", extra_args: str = "",
             run_mode=resolved_mode,
             resume_from_worker_id=resume_from_worker_id or state.get("resume_from_worker_id") or "",
             resume_from_run_id=resume_from_run_id or state.get("resume_from_run_id") or "",
-            resume_from_results_dir=resume_from_results_dir or state.get("resume_from_results_dir") or "",
-            resume_from_manifest_path=resume_from_manifest_path or state.get("resume_from_manifest_path") or "",
+            resume_from_results_dir=rendered_resume_dir or resume_from_results_dir or state.get("resume_from_results_dir") or "",
+            resume_from_manifest_path=rendered_resume_manifest or resume_from_manifest_path or state.get("resume_from_manifest_path") or "",
             chain_id=chain,
             version_index=version,
         )
@@ -1024,6 +1077,11 @@ def push(worker_id: str, config_path: str = "", extra_args: str = "",
 
     tmpdir = tempfile.mkdtemp(prefix="kaggle_push_")
     try:
+        if staged_resume_dir:
+            target = Path(tmpdir) / "resume_source"
+            shutil.copytree(staged_resume_dir, target)
+            if staged_resume_manifest:
+                shutil.copy2(staged_resume_manifest, target / "manifest.json")
         (Path(tmpdir) / push_name).write_bytes(push_bytes)
         metadata = _kernel_metadata(account, worker, push_name)
         (Path(tmpdir) / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2))
