@@ -1,3 +1,13 @@
+.batch-group { border-top: 1px solid var(--border); padding-top: 12px; margin-top: 12px; }
+.batch-group:first-child { border-top: 0; margin-top: 0; }
+.batch-group-head { display: flex; justify-content: space-between; gap: 12px; align-items: center; flex-wrap: wrap; }
+.batch-counts, .batch-card-meta, .batch-card-foot { color: var(--text-muted); font-size: 11px; margin-left: 8px; }
+.batch-card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; margin-top: 10px; }
+.batch-card { border: 1px solid var(--border); padding: 11px; background: var(--panel-2); }
+.batch-card-head { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; }
+.batch-card-head strong { overflow-wrap: anywhere; font-size: 12px; }
+.batch-stages { display: flex; gap: 6px; margin: 10px 0; }
+.batch-card-foot { margin: 0; overflow-wrap: anywhere; }
 /* ==========================================================================
    Experiment Console — design tokens
    A lab-instrumentation reading: deep ink panels, hairline dividers, amber
@@ -169,6 +179,21 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   word-break: break-all;
 }
 .sidebar-footer b{ color: var(--text-muted); font-weight:600; }
+
+/* ---------------------------------------------------------------- settings */
+.settings-grid{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+.settings-panel{ min-width:0; }
+.settings-list{ margin:0; padding:8px 16px 12px; }
+.settings-list > div{ display:grid; grid-template-columns:minmax(110px,.35fr) minmax(0,1fr); gap:16px; padding:8px 0; border-bottom:1px solid var(--border-soft); }
+.settings-list > div:last-child{ border-bottom:0; }
+.settings-list dt{ color:var(--text-muted); font-size:12px; }
+.settings-list dd{ margin:0; color:var(--text); font-family:var(--mono); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.settings-profile-list{ padding:8px 16px 12px; }
+.settings-profile-row{ display:flex; align-items:center; gap:12px; padding:11px 0; border-bottom:1px solid var(--border-soft); }
+.settings-profile-row:last-child{ border-bottom:0; }
+.settings-profile-row > div:first-child{ flex:1; min-width:0; }
+.settings-profile-path{ color:var(--text-faint); font-family:var(--mono); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:3px; }
+@media (max-width:700px){ .settings-grid{ grid-template-columns:1fr; } .settings-profile-row{ align-items:flex-start; flex-wrap:wrap; } }
 
 /* ---------------------------------------------------------------- topbar (telemetry strip) */
 .topbar{

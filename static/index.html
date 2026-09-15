@@ -59,6 +59,10 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
         Data
       </div>
+      <div class="nav-item" data-view="settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4"/><circle cx="12" cy="12" r="4"/></svg>
+        Settings
+      </div>
     </nav>
 
     <div class="sidebar-footer" id="sidebar-footer">
@@ -568,6 +572,15 @@
         <button class="btn btn-ghost" id="btn-refresh-assignments">Refresh</button>
       </div>
 
+      <div class="panel" id="batch-panel">
+        <div class="panel-header"><span>Batches</span><span id="batch-count"></span></div>
+        <div class="scheduler-add-form" style="flex-wrap:wrap;">
+          <div class="field grow"><label>Sweep YAML</label><textarea class="text-input" id="batch-spec-input" rows="5" placeholder="name: iccit-ablation\nconfigs:\n  - path: configs/example.yaml\n    seeds: [0, 1]\npool: either\nmax_retries: 1"></textarea></div>
+          <button class="btn btn-primary" id="btn-start-batch">Start batch</button>
+        </div>
+        <div id="batch-status-body" style="padding:0 16px 16px;"></div>
+      </div>
+
       <div class="panel">
         <div class="panel-header"><span id="assignment-form-title">Add / edit assignment</span></div>
         <div class="scheduler-add-form" style="flex-wrap:wrap;">
@@ -744,6 +757,22 @@
         <div style="padding:0 16px 16px; overflow:auto;">
           <table class="compare-table" id="test-evals-table" style="width:100%;"></table>
         </div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- Settings view -->
+    <section class="view" id="view-settings">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Settings</div>
+          <div class="view-sub">Active repo profile, launch paths, runtime defaults, and deployment health.</div>
+        </div>
+        <button class="btn btn-ghost" id="btn-refresh-settings">Refresh</button>
+      </div>
+      <div class="settings-grid" id="settings-summary-body"><div class="empty-state">Loading…</div></div>
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-header"><span>Repo profiles</span><span id="settings-profile-count"></span></div>
+        <div class="settings-profile-list" id="settings-profile-body"><div class="empty-state">Loading…</div></div>
       </div>
     </section>
 

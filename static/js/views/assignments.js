@@ -17,6 +17,8 @@ state.assignmentEditingId = null; // row_id being edited, or null = the form add
 state.assignmentConfigGroups = [];
 state.assignmentConfigsLoaded = false;
 state.assignmentRunners = [];
+state.batchRows = [];
+state.batchRecords = [];
 
 async function loadAssignments() {
   state.assignmentsLoaded = true;
@@ -34,6 +36,75 @@ async function loadAssignments() {
   }
   renderAssignmentRunnerOptions();
   renderAssignments();
+  loadBatchPanel();
+}
+
+async function loadBatchPanel() {
+  try {
+    const [batchData, assignmentData] = await Promise.all([api("/api/batches"), api("/api/assignments")]);
+    state.batchRecords = batchData.batches || [];
+    state.batchRows = assignmentData.rows || [];
+    renderBatchPanel();
+  } catch (e) { toast("Couldn't load batches: " + e.message, "err"); }
+}
+
+function batchStatusCounts(name) {
+  const rows = state.batchRows.filter((r) => r.batch_name === name);
+  return {
+    done: rows.filter((r) => r.status === "done").length,
+    failed: rows.filter((r) => r.status === "failed").length,
+    pending: rows.filter((r) => ["pending", "blocked"].includes(r.status)).length,
+    inflight: rows.filter((r) => ["dispatching", "local-queued", "kaggle-pushed"].includes(r.status)).length,
+  };
+}
+
+function renderBatchCard(row, batch) {
+  const ref = row.unit_ref || {};
+  const runner = ref.account ? `Kaggle · ${ref.account} · ${ref.worker_id || "worker"}` : (row.runner_id || "Local");
+  const local = ref.train_item_id || ref.eval_item_id;
+  const progress = local
+    ? `<div class="batch-stages"><span class="badge slate">Train ${escapeHtml(ref.train_status || "queued")}</span><span class="badge slate">Eval ${escapeHtml(ref.eval_status || "queued")}</span></div>`
+    : `<div class="batch-stages"><span class="badge slate">${escapeHtml(ref.status || row.status)}</span></div>`;
+  return `<article class="batch-card"><div class="batch-card-head"><strong>${escapeHtml(row.config_path)}</strong><span class="badge ${row.status === "failed" ? "red" : row.status === "done" ? "green" : "slate"}">${escapeHtml(row.status)}</span></div><div class="batch-card-meta">Seed ${row.seed ?? "—"} · ${escapeHtml(runner)}</div>${progress}<div class="batch-card-foot">Attempt ${row.attempt_count || 0}/${(batch.max_retries || 0) + 1}${row.blocked_reason ? ` · ${escapeHtml(row.blocked_reason)}` : ""} · ${escapeHtml(timeAgo(row.updated_at))}</div></article>`;
+}
+
+function renderBatchPanel() {
+  const count = document.getElementById("batch-count");
+  const body = document.getElementById("batch-status-body");
+  count.textContent = state.batchRecords.length ? `${state.batchRecords.length} batch${state.batchRecords.length === 1 ? "" : "es"}` : "";
+  if (!state.batchRecords.length) { body.innerHTML = `<div class="empty-state">No batches started.</div>`; return; }
+  body.innerHTML = state.batchRecords.map((batch) => {
+    const c = batchStatusCounts(batch.name);
+    const controls = ["running", "paused"].includes(batch.status)
+      ? `<button class="btn btn-sm btn-ghost" data-batch-action="${batch.status === "running" ? "pause" : "resume"}" data-batch-name="${escapeHtml(batch.name)}">${batch.status === "running" ? "Pause" : "Resume"}</button><button class="btn btn-sm btn-ghost" data-batch-action="cancel" data-batch-name="${escapeHtml(batch.name)}">Cancel</button>` : "";
+    const cards = state.batchRows.filter((r) => r.batch_name === batch.name).map((r) => renderBatchCard(r, batch)).join("");
+    return `<section class="batch-group"><div class="batch-group-head"><div><strong>${escapeHtml(batch.name)}</strong> <span class="badge slate">${escapeHtml(batch.status)}</span><span class="batch-counts">${c.done} done · ${c.failed} failed · ${c.pending} pending · ${c.inflight} in flight</span></div><div>${controls}</div></div><div class="batch-card-grid">${cards}</div></section>`;
+  }).join("");
+  body.querySelectorAll("[data-batch-action]").forEach((button) => button.addEventListener("click", async () => {
+    try { await api(`/api/batches/${encodeURIComponent(button.dataset.batchName)}/${button.dataset.batchAction}`, { method: "POST" }); loadBatchPanel(); }
+    catch (e) { toast("Batch action failed: " + e.message, "err"); }
+  }));
+}
+
+async function startBatchFromSpec() {
+  const input = document.getElementById("batch-spec-input");
+  try {
+    const text = (input.value || "").trim();
+    if (!text) {
+      toast("Paste a YAML sweep spec before starting a batch.", "err");
+      return;
+    }
+    const spec = window.jsyaml ? window.jsyaml.load(text) : JSON.parse(text);
+    if (!spec || typeof spec !== "object") {
+      throw new Error("The YAML did not parse to an object.");
+    }
+    await api("/api/batches/start", { method: "POST", body: JSON.stringify(spec) });
+    input.value = "";
+    toast("Batch started", "ok");
+    loadAssignments();
+  } catch (e) {
+    toast("Couldn't start batch: " + e.message, "err");
+  }
 }
 
 function renderAssignmentRunnerOptions() {
@@ -212,6 +283,7 @@ function initAssignmentsButtons() {
   document.getElementById("btn-assignment-export").addEventListener("click", exportAssignmentsCsv);
   document.getElementById("btn-refresh-assignments").addEventListener("click", loadAssignments);
   document.getElementById("assignment-config-select").addEventListener("focus", populateAssignmentConfigSelect, { once: true });
+  document.getElementById("btn-start-batch").addEventListener("click", startBatchFromSpec);
 }
 
 initAssignmentsButtons();

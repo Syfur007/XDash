@@ -67,6 +67,9 @@ def add_row(
     config_path: str, seed: Optional[Any] = None, runner_id: str = "",
     status: str = "planned", notes: str = "", block: str = "", extra: Optional[Dict[str, Any]] = None,
     batch_name: Optional[str] = None, pool: Optional[str] = None,
+    run_mode: str = "fresh", resume_from_worker_id: str = "",
+    resume_from_run_id: str = "", resume_from_results_dir: str = "",
+    resume_from_manifest_path: str = "", chain_id: str = "", version_index: Optional[int] = None,
 ) -> Dict[str, Any]:
     config_path = (config_path or "").strip()
     if not config_path:
@@ -84,6 +87,13 @@ def add_row(
         # hand-added row — these only mean something once a batch dispatcher owns the row.
         "batch_name": batch_name,
         "pool": pool,               # "either" | "local_only" | "kaggle_only", or None if not batch-owned
+        "run_mode": (run_mode or "fresh").strip() or "fresh",
+        "resume_from_worker_id": (resume_from_worker_id or "").strip(),
+        "resume_from_run_id": (resume_from_run_id or "").strip(),
+        "resume_from_results_dir": (resume_from_results_dir or "").strip(),
+        "resume_from_manifest_path": (resume_from_manifest_path or "").strip(),
+        "chain_id": (chain_id or "").strip(),
+        "version_index": version_index,
         "attempt_count": 0,
         "unit_ref": None,           # {"train_item_id","eval_item_id"} (local) or {"account","worker_id"} (kaggle)
         "blocked_reason": None,     # set when status == "blocked" (§4.1 Rule 6) — why no resource fit this tick
@@ -121,6 +131,13 @@ def bulk_add(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
                 "extra": entry.get("extra") or {},
                 "batch_name": entry.get("batch_name"),
                 "pool": entry.get("pool"),
+                "run_mode": (entry.get("run_mode") or "fresh").strip() or "fresh",
+                "resume_from_worker_id": (entry.get("resume_from_worker_id") or "").strip(),
+                "resume_from_run_id": (entry.get("resume_from_run_id") or "").strip(),
+                "resume_from_results_dir": (entry.get("resume_from_results_dir") or "").strip(),
+                "resume_from_manifest_path": (entry.get("resume_from_manifest_path") or "").strip(),
+                "chain_id": (entry.get("chain_id") or "").strip(),
+                "version_index": entry.get("version_index"),
                 "attempt_count": 0,
                 "unit_ref": None,
                 "blocked_reason": None,
@@ -137,6 +154,8 @@ def update_row(row_id: str, patch: Dict[str, Any]) -> Dict[str, Any]:
     editable = {
         "config_path", "seed", "block", "runner_id", "status", "notes",
         "batch_name", "pool", "attempt_count", "unit_ref", "blocked_reason",
+        "run_mode", "resume_from_worker_id", "resume_from_run_id", "resume_from_results_dir",
+        "resume_from_manifest_path", "chain_id", "version_index",
     }
     with _lock:
         rows = _load()

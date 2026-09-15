@@ -242,6 +242,13 @@ function initNav() {
   });
   document.getElementById("btn-hamburger").addEventListener("click", toggleSidebar);
   document.getElementById("sidebar-backdrop").addEventListener("click", closeSidebar);
+  document.getElementById("btn-refresh-settings")?.addEventListener("click", async () => {
+    try {
+      await Promise.all([loadSystem(), loadRepos()]);
+      renderSettings();
+      toast("Settings refreshed", "ok");
+    } catch (e) { toast("Couldn't refresh settings: " + e.message, "err"); }
+  });
 }
 
 function toggleSidebar() {
@@ -263,7 +270,36 @@ function switchView(view) {
   if (view === "runners") { loadMonitors(); refreshTensorboardStatus(); loadKaggle(); loadRunnersOverview(); }
   if (view === "experiments") { loadExperimentsKaggleActive(); loadExperimentsOtherRepos(); }
   if (view === "assignments" && !state.assignmentsLoaded) loadAssignments();
+  if (view === "settings") renderSettings();
   if (view === "overview") loadOverview();
+}
+
+function renderSettings() {
+  const summary = document.getElementById("settings-summary-body");
+  const profiles = document.getElementById("settings-profile-body");
+  const count = document.getElementById("settings-profile-count");
+  if (!summary || !profiles) return;
+  if (!state.system) {
+    summary.innerHTML = `<div class="empty-state">System information is unavailable.</div>`;
+    profiles.innerHTML = `<div class="empty-state">Repo profiles are unavailable.</div>`;
+    return;
+  }
+  const pathFields = [
+    ["Repo root", state.system.repo_root], ["Configs", state.system.configs_dir],
+    ["Logs", state.system.logs_dir], ["Runs", state.system.runs_dir],
+    ["Reports", state.system.reports_dir], ["Artifacts", state.system.artifacts_dir],
+  ];
+  const runtimeFields = [
+    ["Profile", state.system.display_name || state.system.profile_name],
+    ["Manifest layout", state.system.manifest_layout], ["Poll interval", `${state.system.poll_interval_ms} ms`],
+    ["TensorBoard port", state.system.tensorboard_port], ["Environment", state.system.env_activate_cmd || "not configured"],
+    ["tmux", state.system.tmux_available ? "available" : "not found"],
+  ];
+  const panel = (title, fields) => `<div class="panel settings-panel"><div class="panel-header"><span>${title}</span></div><dl class="settings-list">${fields.map(([label, value]) => `<div><dt>${escapeHtml(label)}</dt><dd title="${escapeHtml(value)}">${escapeHtml(value)}</dd></div>`).join("")}</dl></div>`;
+  summary.innerHTML = panel("Launch paths", pathFields) + panel("Runtime", runtimeFields);
+  count.textContent = `${state.repos.length} profile${state.repos.length === 1 ? "" : "s"}`;
+  profiles.innerHTML = state.repos.length ? state.repos.map((repo) => `<div class="settings-profile-row"><div><strong>${escapeHtml(repo.display_name)}</strong><div class="settings-profile-path">${escapeHtml(repo.repo_root)}</div></div><span class="badge ${repo.active ? "green" : repo.repo_root_exists ? "slate" : "red"}">${repo.active ? "active" : repo.repo_root_exists ? "available" : "missing"}</span><button class="btn btn-sm btn-ghost" data-settings-profile="${escapeHtml(repo.id)}" ${repo.active ? "disabled" : ""}>Use profile</button></div>`).join("") : `<div class="empty-state">No repo profiles configured.</div>`;
+  profiles.querySelectorAll("[data-settings-profile]").forEach((button) => button.addEventListener("click", () => switchRepo(button.dataset.settingsProfile)));
 }
 
 // ------------------------------------------------------------------ subtabs

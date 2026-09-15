@@ -87,6 +87,13 @@ LAUNCH_SPEC_MARKER = "# DASHBOARD:LAUNCH_SPEC"
 _LAUNCH_PLACEHOLDERS = {
     "config_path": "__DASHBOARD_CONFIG_PATH__",
     "extra_args": "__DASHBOARD_EXTRA_ARGS__",
+    "run_mode": "__DASHBOARD_RUN_MODE__",
+    "resume_from_worker_id": "__DASHBOARD_RESUME_FROM_WORKER_ID__",
+    "resume_from_run_id": "__DASHBOARD_RESUME_FROM_RUN_ID__",
+    "resume_from_results_dir": "__DASHBOARD_RESUME_FROM_RESULTS_DIR__",
+    "resume_from_manifest_path": "__DASHBOARD_RESUME_FROM_MANIFEST_PATH__",
+    "chain_id": "__DASHBOARD_CHAIN_ID__",
+    "version_index": "__DASHBOARD_VERSION_INDEX__",
     # Resolved server-side from settings.train_script/eval_script, never hardcoded in the
     # template — a deployment may point these at a wrapper (e.g. this study's own
     # scripts/run_iccit_sweep.py, which loops the pre-registered seeds and writes the
@@ -107,6 +114,7 @@ _LAUNCH_PLACEHOLDERS = {
     # (e.g. segpriors' --ensemble) a local eval of the same config always gets. Applied only
     # to the eval command, never the train one.
     "eval_extra_flags": "__DASHBOARD_EVAL_EXTRA_FLAGS__",
+    "max_hours": "__DASHBOARD_MAX_HOURS__",
 }
 
 # Mirrors orchestration/ledger.py's RUNS_FIELDS in the host repo exactly —
@@ -608,10 +616,15 @@ def add_worker(
             raise KaggleOpsError(f"Worker '{worker_id}' already exists under '{account_name}'")
         worker = {
             "worker_id": worker_id,
+            "account_name": account_name,
+            "profile_name": settings.profile_name,
             "kernel_slug": kernel_slug,
             "results_dir": str(results_dir),
             "budget_hours": float(budget_hours) if budget_hours else settings.kaggle_default_budget_hours,
             "dataset_sources": dataset_sources,
+            "run_mode": "fresh",
+            "chain_id": f"{worker_id}:0",
+            "version_index": 0,
         }
         if notebook_path:
             worker["notebook_path"] = notebook_path
@@ -728,7 +741,18 @@ def _kernel_metadata(account: Dict[str, Any], worker: Dict[str, Any], notebook_n
     }
 
 
-def _render_launch_notebook(template_abs: Path, config_path: str, extra_args: str) -> bytes:
+def _render_launch_notebook(
+    template_abs: Path,
+    config_path: str,
+    extra_args: str,
+    run_mode: str = "fresh",
+    resume_from_worker_id: str = "",
+    resume_from_run_id: str = "",
+    resume_from_results_dir: str = "",
+    resume_from_manifest_path: str = "",
+    chain_id: str = "",
+    version_index: Optional[int] = None,
+) -> bytes:
     """Loads *template_abs* (nbformat JSON), finds the single cell carrying
     LAUNCH_SPEC_MARKER, and substitutes its `__DASHBOARD_*__` placeholders
     with real values — stdlib json/re only, no Papermill (see
@@ -739,13 +763,7 @@ def _render_launch_notebook(template_abs: Path, config_path: str, extra_args: st
     escaped against quote-breaking — the same shell-safety posture
     tmux_runner.py already applies to CLI arguments applies here to
     notebook source text. Returns the rendered notebook re-serialized as
-    bytes.
-
-    No *mode* parameter (EXPERIMENT_AUTOMATION_PLAN.md §2.4): both
-    train_script and eval_script are always resolved and substituted, since
-    one push now runs both stages inside a single kernel execution — see the
-    runner cell's own train-then-eval sequencing in
-    notebooks/kaggle_worker_template.ipynb."""
+    bytes."""
     try:
         notebook = json.loads(template_abs.read_text())
     except (OSError, json.JSONDecodeError) as e:
@@ -765,12 +783,25 @@ def _render_launch_notebook(template_abs: Path, config_path: str, extra_args: st
     values = {
         _LAUNCH_PLACEHOLDERS["config_path"]: config_path,
         _LAUNCH_PLACEHOLDERS["extra_args"]: extra_args or "",
+        _LAUNCH_PLACEHOLDERS["run_mode"]: run_mode or "fresh",
+        _LAUNCH_PLACEHOLDERS["resume_from_worker_id"]: resume_from_worker_id or "",
+        _LAUNCH_PLACEHOLDERS["resume_from_run_id"]: resume_from_run_id or "",
+        _LAUNCH_PLACEHOLDERS["resume_from_results_dir"]: resume_from_results_dir or "",
+        _LAUNCH_PLACEHOLDERS["resume_from_manifest_path"]: resume_from_manifest_path or "",
+        _LAUNCH_PLACEHOLDERS["chain_id"]: chain_id or "",
+        _LAUNCH_PLACEHOLDERS["version_index"]: int(version_index) if version_index is not None else 0,
         _LAUNCH_PLACEHOLDERS["train_script"]: settings.train_script,
         _LAUNCH_PLACEHOLDERS["eval_script"]: settings.eval_script,
         # Joined into one shell-quoted string, same shape as EXTRA_ARGS, so the template's
         # runner cell treats both identically (shlex.split before use) rather than needing
         # a second, list-shaped substitution convention just for this one field.
         _LAUNCH_PLACEHOLDERS["eval_extra_flags"]: " ".join(shlex.quote(a) for a in settings.eval_default_args),
+        _LAUNCH_PLACEHOLDERS["max_hours"]: max(
+            0.1,
+            float(settings.kaggle_default_budget_hours)
+            - float(settings.kaggle_setup_reserve_hours)
+            - float(settings.kaggle_teardown_reserve_hours),
+        ),
     }
 
     def substitute(line: str) -> str:
@@ -782,19 +813,173 @@ def _render_launch_notebook(template_abs: Path, config_path: str, extra_args: st
     return json.dumps(notebook, indent=1).encode()
 
 
-def push(worker_id: str, config_path: str = "", extra_args: str = "") -> Dict[str, Any]:
+def _normalize_run_mode(mode: Optional[str]) -> str:
+    value = (mode or "fresh").strip().lower()
+    return value if value in {"fresh", "resume"} else "fresh"
+
+
+def mark_resume_origin(worker_id: str, run_id: str, source_dir: str = "", manifest_path: str = "") -> Dict[str, Any]:
+    run_id = (run_id or "").strip()
+    if not run_id:
+        raise KaggleOpsError("resume_from_run_id is required to mark a resume source")
+    state = _load_state()
+    rec = state.setdefault(worker_id, {})
+    rec.update({
+        "run_mode": "resume",
+        "resume_from_run_id": run_id,
+        "resume_from_results_dir": (source_dir or "").strip(),
+        "resume_from_manifest_path": (manifest_path or "").strip(),
+    })
+    _save_state(state)
+    return {"worker_id": worker_id, **rec}
+
+
+def set_run_mode(worker_id: str, mode: str) -> Dict[str, Any]:
+    mode = _normalize_run_mode(mode)
+    state = _load_state()
+    rec = state.setdefault(worker_id, {})
+    rec["run_mode"] = mode
+    if mode == "fresh":
+        rec.pop("resume_from_worker_id", None)
+        rec.pop("resume_from_run_id", None)
+        rec.pop("resume_from_results_dir", None)
+        rec.pop("resume_from_manifest_path", None)
+    _save_state(state)
+    return {"worker_id": worker_id, "run_mode": mode}
+
+
+def validate_resume_state(worker_id: str, resume_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    info = resume_info or {}
+    source_worker = (info.get("resume_from_worker_id") or "").strip()
+    source_run = (info.get("resume_from_run_id") or "").strip()
+    results_dir = (info.get("resume_from_results_dir") or "").strip()
+    manifest_path = (info.get("resume_from_manifest_path") or "").strip()
+    ok = True
+    reasons: List[str] = []
+
+    if source_worker and source_worker == worker_id:
+        ok = False
+        reasons.append("worker cannot resume from itself")
+    if source_worker:
+        data = _load_accounts()
+        _, source = _find_worker_and_account(data, source_worker)
+        if source is None:
+            ok = False
+            reasons.append(f"resume_from_worker_id does not exist: {source_worker}")
+    if not source_run:
+        ok = False
+        reasons.append("resume_from_run_id is required")
+    if not results_dir:
+        ok = False
+        reasons.append("resume_from_results_dir is required")
+    else:
+        resolved = (settings.repo_root / results_dir).resolve()
+        repo_root = settings.repo_root.resolve()
+        if repo_root not in resolved.parents and resolved != repo_root:
+            ok = False
+            reasons.append(f"resume_from_results_dir escapes repo root: {results_dir}")
+        elif not resolved.exists():
+            ok = False
+            reasons.append(f"resume_from_results_dir does not exist: {results_dir}")
+    if manifest_path:
+        resolved_manifest = (settings.repo_root / manifest_path).resolve()
+        repo_root = settings.repo_root.resolve()
+        if repo_root not in resolved_manifest.parents and resolved_manifest != repo_root:
+            ok = False
+            reasons.append(f"resume_from_manifest_path escapes repo root: {manifest_path}")
+        elif not resolved_manifest.is_file():
+            ok = False
+            reasons.append(f"resume_from_manifest_path does not exist: {manifest_path}")
+    return {"worker_id": worker_id, "ok": ok, "reasons": reasons, "resume_from_worker_id": source_worker, "resume_from_run_id": source_run}
+
+
+def resume_worker(
+    worker_id: str,
+    from_worker_id: str = "",
+    from_run_id: str = "",
+    source_dir: str = "",
+    manifest_path: str = "",
+    config_path: str = "",
+    extra_args: str = "",
+    chain_id: Optional[str] = None,
+    version_index: Optional[int] = None,
+) -> Dict[str, Any]:
+    data = _load_accounts()
+    _, worker = _find_worker_and_account(data, worker_id)
+    if worker is None:
+        raise KaggleOpsError(f"Unknown worker '{worker_id}'")
+    info = {
+        "resume_from_worker_id": (from_worker_id or "").strip(),
+        "resume_from_run_id": (from_run_id or "").strip(),
+        "resume_from_results_dir": (source_dir or "").strip(),
+        "resume_from_manifest_path": (manifest_path or "").strip(),
+    }
+    validation = validate_resume_state(worker_id, info)
+    if not validation["ok"]:
+        raise KaggleOpsError("Resume validation failed: " + "; ".join(validation["reasons"]))
+
+    state = _load_state().get(worker_id, {})
+    version = version_index if version_index is not None else int(state.get("version_index") or 0) + 1
+    chain = chain_id or state.get("chain_id") or worker.get("chain_id") or f"{worker_id}:{version}"
+    if worker.get("notebook_path"):
+        return push(
+            worker_id,
+            config_path=config_path,
+            extra_args=extra_args,
+            run_mode="resume",
+            resume_from_worker_id=info["resume_from_worker_id"],
+            resume_from_run_id=info["resume_from_run_id"],
+            resume_from_results_dir=info["resume_from_results_dir"],
+            resume_from_manifest_path=info["resume_from_manifest_path"],
+            chain_id=chain,
+            version_index=version,
+        )
+    return push(
+        worker_id,
+        config_path=config_path or state.get("last_config_path") or "",
+        extra_args=extra_args or (state.get("last_extra_args") or ""),
+        run_mode="resume",
+        resume_from_worker_id=info["resume_from_worker_id"],
+        resume_from_run_id=info["resume_from_run_id"],
+        resume_from_results_dir=info["resume_from_results_dir"],
+        resume_from_manifest_path=info["resume_from_manifest_path"],
+        chain_id=chain,
+        version_index=version,
+    )
+
+
+def push(worker_id: str, config_path: str = "", extra_args: str = "",
+         run_mode: Optional[str] = None,
+         resume_from_worker_id: str = "",
+         resume_from_run_id: str = "",
+         resume_from_results_dir: str = "",
+         resume_from_manifest_path: str = "",
+         chain_id: Optional[str] = None,
+         version_index: Optional[int] = None,
+) -> Dict[str, Any]:
     """Pushes *worker_id*'s kernel. A notebook-backed worker (`notebook_path`
     set) is pushed verbatim — *config_path*/*extra_args* are ignored,
     matching the original behavior exactly. A template-backed worker (the
     default) requires *config_path*: the launch spec is rendered into its
     template (settings.kaggle_default_template, or `template_path` if set)
     before push, running train then eval sequentially inside the one kernel
-    (EXPERIMENT_AUTOMATION_PLAN.md §2.4) — no *mode* parameter, since a
-    template-backed push is never a train-only or eval-only affair."""
+    (EXPERIMENT_AUTOMATION_PLAN.md §2.4)."""
     data = _load_accounts()
     account, worker = _find_worker_and_account(data, worker_id)
     if worker is None:
         raise KaggleOpsError(f"Unknown worker '{worker_id}'")
+
+    resolved_mode = _normalize_run_mode(run_mode or (worker.get("run_mode") or _load_state().get(worker_id, {}).get("run_mode") or "fresh"))
+    if resolved_mode == "resume":
+        resume_info = {
+            "resume_from_worker_id": (resume_from_worker_id or worker.get("resume_from_worker_id") or _load_state().get(worker_id, {}).get("resume_from_worker_id") or "").strip(),
+            "resume_from_run_id": (resume_from_run_id or worker.get("resume_from_run_id") or _load_state().get(worker_id, {}).get("resume_from_run_id") or "").strip(),
+            "resume_from_results_dir": (resume_from_results_dir or worker.get("resume_from_results_dir") or _load_state().get(worker_id, {}).get("resume_from_results_dir") or "").strip(),
+            "resume_from_manifest_path": (resume_from_manifest_path or worker.get("resume_from_manifest_path") or _load_state().get(worker_id, {}).get("resume_from_manifest_path") or "").strip(),
+        }
+        validation = validate_resume_state(worker_id, resume_info)
+        if not validation["ok"]:
+            raise KaggleOpsError("Resume validation failed: " + "; ".join(validation["reasons"]))
 
     notebook_path = worker.get("notebook_path")
     if notebook_path:
@@ -818,7 +1003,21 @@ def push(worker_id: str, config_path: str = "", extra_args: str = "") -> Dict[st
         source_abs = settings.repo_root / _source_notebook_path(worker)
         if not source_abs.is_file():
             raise KaggleOpsError(f"Template notebook not found: {_source_notebook_path(worker)}")
-        push_bytes = _render_launch_notebook(source_abs, cli_config_path, extra_args)
+        state = _load_state().get(worker_id, {})
+        version = version_index if version_index is not None else int(state.get("version_index") or 0)
+        chain = chain_id or state.get("chain_id") or worker.get("chain_id") or f"{worker_id}:{version}"
+        push_bytes = _render_launch_notebook(
+            source_abs,
+            cli_config_path,
+            extra_args,
+            run_mode=resolved_mode,
+            resume_from_worker_id=resume_from_worker_id or state.get("resume_from_worker_id") or "",
+            resume_from_run_id=resume_from_run_id or state.get("resume_from_run_id") or "",
+            resume_from_results_dir=resume_from_results_dir or state.get("resume_from_results_dir") or "",
+            resume_from_manifest_path=resume_from_manifest_path or state.get("resume_from_manifest_path") or "",
+            chain_id=chain,
+            version_index=version,
+        )
         push_name = source_abs.name
 
     source_hash = hashlib.sha1(source_abs.read_bytes()).hexdigest()
@@ -849,14 +1048,25 @@ def push(worker_id: str, config_path: str = "", extra_args: str = "") -> Dict[st
 
     notebook_hash = hashlib.sha1(push_bytes).hexdigest()
     event = "pushed" if notebook_path else f"pushed — {config_path}"
-    _update_worker_state(worker_id, {
+    state_patch = {
         "status": "pushed", "pushed_at": _now_iso(), "last_error": None, "over_budget": False,
         "notified_final": False, "pushed_notebook_hash": notebook_hash, "pushed_template_hash": source_hash,
         "last_config_path": config_path or None,
         "last_extra_args": extra_args or None,
-    }, event=event)
+        "run_mode": resolved_mode,
+        "chain_id": chain_id or _load_state().get(worker_id, {}).get("chain_id") or worker.get("chain_id") or f"{worker_id}:{int(_load_state().get(worker_id, {}).get('version_index') or 0)}",
+        "version_index": int(_load_state().get(worker_id, {}).get("version_index") or 0) + (1 if resolved_mode == "resume" else 0),
+    }
+    if resolved_mode == "resume":
+        state_patch.update({
+            "resume_from_worker_id": resume_from_worker_id or _load_state().get(worker_id, {}).get("resume_from_worker_id") or "",
+            "resume_from_run_id": resume_from_run_id or _load_state().get(worker_id, {}).get("resume_from_run_id") or "",
+            "resume_from_results_dir": resume_from_results_dir or _load_state().get(worker_id, {}).get("resume_from_results_dir") or "",
+            "resume_from_manifest_path": resume_from_manifest_path or _load_state().get(worker_id, {}).get("resume_from_manifest_path") or "",
+        })
+    _update_worker_state(worker_id, state_patch, event=event)
     warning = _concurrent_push_warning(account, worker_id)
-    result = {"worker_id": worker_id, "status": "pushed"}
+    result = {"worker_id": worker_id, "status": "pushed", "run_mode": resolved_mode}
     if warning:
         result["concurrent_warning"] = warning
     return result
@@ -1451,10 +1661,15 @@ def import_registry(payload: Dict[str, Any]) -> Dict[str, Any]:
                     continue
                 new_worker = {
                     "worker_id": worker_id,
+                    "account_name": name,
+                    "profile_name": settings.profile_name,
                     "kernel_slug": w["kernel_slug"],
                     "results_dir": w["results_dir"],
                     "budget_hours": w.get("budget_hours") or settings.kaggle_default_budget_hours,
                     "dataset_sources": incoming_datasets,
+                    "run_mode": "fresh",
+                    "chain_id": f"{worker_id}:0",
+                    "version_index": 0,
                 }
                 if source_field:
                     new_worker[source_field] = w[source_field]

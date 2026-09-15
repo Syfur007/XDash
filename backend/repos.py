@@ -32,6 +32,10 @@ class RepoProfileError(Exception):
     """Expected failure (unknown profile) — routes map this to a 4xx."""
 
 
+class RepoProfileBusyError(RepoProfileError):
+    """The active profile cannot switch while a batch is dispatching."""
+
+
 def list_profiles() -> List[Dict[str, Any]]:
     result = []
     for name in list_profile_names():
@@ -55,6 +59,14 @@ def set_active_profile(profile_name: str) -> Dict[str, Any]:
     names = list_profile_names()
     if profile_name not in names:
         raise RepoProfileError(f"Unknown repo profile '{profile_name}' (known: {', '.join(names) or 'none'})")
+    if profile_name != settings.profile_name:
+        from . import batch_runner
+        for batch in batch_runner.list_batches():
+            if batch.get("status") == "running":
+                raise RepoProfileBusyError(
+                    f"Cannot switch profiles while batch '{batch.get('name', '')}' is running; "
+                    "pause or cancel it first"
+                )
     settings.reload(profile_name)
     ACTIVE_REPO_FILE.parent.mkdir(parents=True, exist_ok=True)
     ACTIVE_REPO_FILE.write_text(json.dumps({"profile": profile_name}))

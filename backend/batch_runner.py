@@ -29,6 +29,8 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+import yaml
+
 from . import assignments as asg
 from . import estimates
 from . import kaggle as kaggle_backend
@@ -119,9 +121,18 @@ def start_batch(spec: Dict[str, Any]) -> Dict[str, Any]:
                 base_extra_args = ""
                 if seed is not None and settings.seed_arg:
                     base_extra_args = settings.seed_arg.format(seed=seed)
+                resume = entry.get("resume") or {}
+                run_mode = (entry.get("run_mode") or resume.get("run_mode") or "fresh").strip()
                 entries.append({
                     "config_path": config_path, "seed": seed, "batch_name": name, "pool": pool,
                     "extra": {"base_extra_args": base_extra_args},
+                    "run_mode": run_mode,
+                    "resume_from_worker_id": entry.get("resume_from_worker_id") or resume.get("from_worker_id", ""),
+                    "resume_from_run_id": entry.get("resume_from_run_id") or resume.get("from_run_id", ""),
+                    "resume_from_results_dir": entry.get("resume_from_results_dir") or resume.get("source_dir", ""),
+                    "resume_from_manifest_path": entry.get("resume_from_manifest_path") or resume.get("manifest_path", ""),
+                    "chain_id": entry.get("chain_id") or resume.get("chain_id", ""),
+                    "version_index": entry.get("version_index") if entry.get("version_index") is not None else resume.get("version_index"),
                 })
         if not entries:
             raise BatchError("Sweep spec expanded to zero rows")
@@ -229,7 +240,28 @@ def _local_free_slots() -> int:
 _KAGGLE_BUSY_STATUSES = kaggle_backend.IN_PROGRESS_STATUSES | {"pushed"}
 
 
-def _idle_template_workers(account: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _config_kaggle_dataset(config_path: str) -> Optional[str]:
+    """Return an explicitly declared Kaggle dataset slug for a config.
+
+    The mapping is intentionally opt-in: a local dataset root cannot reliably
+    identify an uploaded Kaggle dataset, so configs without ``kaggle_dataset``
+    remain eligible for the legacy behavior until their mapping is declared.
+    """
+    path = (settings.repo_root / config_path).resolve()
+    if settings.repo_root.resolve() not in path.parents or not path.is_file():
+        return None
+    try:
+        raw = yaml.safe_load(path.read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    dataset = raw.get("dataset") if isinstance(raw, dict) else None
+    if not isinstance(dataset, dict):
+        return None
+    value = dataset.get("kaggle_dataset")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _idle_template_workers(account: Dict[str, Any], required_dataset: Optional[str] = None) -> List[Dict[str, Any]]:
     """Workers under *account* that can take an arbitrary config_path right
     now: template-backed (notebook-backed workers ignore config_path
     entirely and always run their own fixed notebook — dispatching a batch
@@ -239,18 +271,20 @@ def _idle_template_workers(account: Dict[str, Any]) -> List[Dict[str, Any]]:
         w for w in account.get("workers", [])
         if not w.get("notebook_path")
         and (w.get("status") or "") not in _KAGGLE_BUSY_STATUSES
+        and (not required_dataset or required_dataset in (w.get("dataset_sources") or []))
     ]
 
 
-def _kaggle_candidate_accounts(est: float) -> List[Dict[str, Any]]:
+def _kaggle_candidate_accounts(est: float, config_path: str = "") -> List[Dict[str, Any]]:
     """Accounts with at least one idle template-backed worker, budget
     headroom for *est* hours this week (C3), and a per-push session cap
     that fits it too (C2 — approximated by the account's idle workers' own
     budget_hours until EXPERIMENT_AUTOMATION_PLAN.md §8.1's setup/teardown
     split lands and gives a tighter number)."""
+    required_dataset = _config_kaggle_dataset(config_path)
     out = []
     for account in kaggle_backend.list_accounts():
-        idle = _idle_template_workers(account)
+        idle = _idle_template_workers(account, required_dataset)
         if not idle:
             continue
         session_cap = max((w.get("budget_hours") or settings.kaggle_default_budget_hours) for w in idle)
@@ -272,7 +306,7 @@ def _account_last_activity(account: Dict[str, Any]) -> str:
     return max(times) if times else ""
 
 
-def _pick_kaggle_account(est: float) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+def _pick_kaggle_account(est: float, config_path: str = "") -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
     """Rule 3 — best fit, not round robin: among quota/session-cap-eligible
     accounts, the one with the LEAST remaining quota that still fits *est*.
     Round-robin draws every account down evenly and can leave several each
@@ -280,7 +314,7 @@ def _pick_kaggle_account(est: float) -> Optional[Tuple[Dict[str, Any], Dict[str,
     the partially-spent account tighter and preserves an intact block of
     quota elsewhere. Ties broken least-recently-pushed, to spread API-rate
     exposure across accounts rather than hammering the same one."""
-    candidates = _kaggle_candidate_accounts(est)
+    candidates = _kaggle_candidate_accounts(est, config_path)
     if not candidates:
         return None
 
@@ -294,7 +328,7 @@ def _pick_kaggle_account(est: float) -> Optional[Tuple[Dict[str, Any], Dict[str,
         return (remaining_key, _account_last_activity(account))
 
     best = min(candidates, key=sort_key)
-    worker = _idle_template_workers(best)[0]
+    worker = _idle_template_workers(best, _config_kaggle_dataset(config_path))[0]
     return best, worker
 
 
@@ -350,7 +384,7 @@ def _dispatch_tick_locked() -> None:
         pool = row.get("pool") or "either"
         est = est_for(row)["hours"]
         local_ok = pool != "kaggle_only"
-        kaggle_ok = pool != "local_only" and bool(_kaggle_candidate_accounts(est))
+        kaggle_ok = pool != "local_only" and bool(_kaggle_candidate_accounts(est, row.get("config_path", "")))
         count = int(local_ok) + int(kaggle_ok)
         return (count, est)
 
@@ -365,7 +399,7 @@ def _dispatch_tick_locked() -> None:
 
         target: Optional[Tuple[str, Any]] = None  # ("local", None) | ("kaggle", (account, worker))
         if pool != "local_only":
-            picked = _pick_kaggle_account(est)
+            picked = _pick_kaggle_account(est, row["config_path"])
             if picked:
                 target = ("kaggle", picked)
         if target is None and pool != "kaggle_only" and local_free > 0:
@@ -417,7 +451,16 @@ def _dispatch_tick_locked() -> None:
             if claimed is None:
                 continue
             try:
-                kaggle_backend.push(worker["worker_id"], row["config_path"], extra_args)
+                kaggle_backend.push(
+                    worker["worker_id"], row["config_path"], extra_args,
+                    run_mode=row.get("run_mode") or "fresh",
+                    resume_from_worker_id=row.get("resume_from_worker_id", ""),
+                    resume_from_run_id=row.get("resume_from_run_id", ""),
+                    resume_from_results_dir=row.get("resume_from_results_dir", ""),
+                    resume_from_manifest_path=row.get("resume_from_manifest_path", ""),
+                    chain_id=row.get("chain_id") or None,
+                    version_index=row.get("version_index"),
+                )
                 unit_ref = {"account": account["name"], "worker_id": worker["worker_id"]}
                 asg.update_row(row["row_id"], {"status": "kaggle-pushed", "unit_ref": unit_ref})
             except Exception as e:
@@ -433,7 +476,7 @@ def _requeue_or_fail(row_id: str, batch: Dict[str, Any], attempt_count: int, err
     max_retries — a row that exhausts retries stays failed and visible,
     mirroring the caution the old (now-deleted) auto_chain already
     observed about never re-chaining into a known-broken push forever."""
-    if attempt_count < batch.get("max_retries", 1):
+    if attempt_count <= batch.get("max_retries", 1):
         asg.update_row(row_id, {"status": "pending"})
     else:
         asg.update_row(row_id, {"status": "failed", "blocked_reason": error[:300]})
@@ -450,7 +493,7 @@ def _settle_finished_batches(running_batches: Dict[str, Any]) -> None:
         rows = rows_by_batch.get(name, [])
         if not rows:
             continue
-        pending_or_inflight = [r for r in rows if r["status"] in CANDIDATE_ROW_STATUSES or r["status"] in IN_FLIGHT_ROW_STATUSES]
+        pending_or_inflight = [r for r in rows if r["status"] in {"pending"} or r["status"] in IN_FLIGHT_ROW_STATUSES]
         if pending_or_inflight:
             continue
         blocked = [r for r in rows if r["status"] == "blocked"]

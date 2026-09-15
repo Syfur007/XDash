@@ -40,6 +40,7 @@ from backend import repos as repos_ops
 from backend import runners as runner_registry
 from backend.runners.base import ACTIVE_STATUSES, LaunchSpec, RunnerCapabilityError
 from backend import assignments
+from backend import batch_runner
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -47,6 +48,7 @@ app = Flask(__name__, static_folder=str(APP_DIR / "static"), static_url_path="")
 
 scheduler.ensure_worker_started()
 kaggle_ops.ensure_kaggle_worker_started()
+batch_runner.ensure_batch_worker_started()
 
 
 def err(message, code=400):
@@ -566,6 +568,10 @@ def api_kaggle_push(worker_id):
     try:
         return jsonify(kaggle_ops.push(
             worker_id, body.get("config_path", ""), body.get("extra_args", ""),
+            body.get("run_mode"), body.get("resume_from_worker_id", ""),
+            body.get("resume_from_run_id", ""), body.get("resume_from_results_dir", ""),
+            body.get("resume_from_manifest_path", ""), body.get("chain_id"),
+            body.get("version_index"),
         ))
     except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
@@ -575,6 +581,34 @@ def api_kaggle_push(worker_id):
 def api_kaggle_restart_worker(worker_id):
     try:
         return jsonify(kaggle_ops.restart(worker_id))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/kaggle/workers/<worker_id>/resume", methods=["POST"])
+def api_kaggle_resume_worker(worker_id):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(kaggle_ops.resume_worker(
+            worker_id,
+            body.get("resume_from_worker_id", ""),
+            body.get("resume_from_run_id", ""),
+            body.get("resume_from_results_dir", ""),
+            body.get("resume_from_manifest_path", ""),
+            body.get("config_path", ""),
+            body.get("extra_args", ""),
+            body.get("chain_id"),
+            body.get("version_index"),
+        ))
+    except kaggle_ops.KaggleOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/kaggle/workers/<worker_id>/resume/validate", methods=["POST"])
+def api_kaggle_validate_resume(worker_id):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(kaggle_ops.validate_resume_state(worker_id, body))
     except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
 
@@ -697,6 +731,10 @@ def api_add_assignment():
         return jsonify(assignments.add_row(
             body.get("config_path", ""), body.get("seed"), body.get("runner_id", ""),
             body.get("status", "planned"), body.get("notes", ""),
+            body.get("block", ""), body.get("extra"), body.get("batch_name"), body.get("pool"),
+            body.get("run_mode", "fresh"), body.get("resume_from_worker_id", ""),
+            body.get("resume_from_run_id", ""), body.get("resume_from_results_dir", ""),
+            body.get("resume_from_manifest_path", ""), body.get("chain_id", ""), body.get("version_index"),
         ))
     except assignments.AssignmentError as e:
         return err(str(e), 400)
@@ -730,6 +768,45 @@ def api_import_assignments_csv():
 @app.route("/api/assignments/export_csv", methods=["GET"])
 def api_export_assignments_csv():
     return app.response_class(assignments.export_csv(), mimetype="text/csv")
+
+
+# --------------------------------------------------------------------------- experiment batches
+@app.route("/api/batches", methods=["GET"])
+def api_list_batches():
+    return jsonify({"batches": batch_runner.list_batches()})
+
+
+@app.route("/api/batches/start", methods=["POST"])
+def api_start_batch():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(batch_runner.start_batch(body))
+    except batch_runner.BatchError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/batches/<name>/pause", methods=["POST"])
+def api_pause_batch(name):
+    try:
+        return jsonify(batch_runner.pause_batch(name))
+    except batch_runner.BatchError as e:
+        return err(str(e), 404)
+
+
+@app.route("/api/batches/<name>/resume", methods=["POST"])
+def api_resume_batch(name):
+    try:
+        return jsonify(batch_runner.resume_batch(name))
+    except batch_runner.BatchError as e:
+        return err(str(e), 404)
+
+
+@app.route("/api/batches/<name>/cancel", methods=["POST"])
+def api_cancel_batch(name):
+    try:
+        return jsonify(batch_runner.cancel_batch(name))
+    except batch_runner.BatchError as e:
+        return err(str(e), 404)
 
 
 # --------------------------------------------------------------------------- notifications
@@ -899,6 +976,8 @@ def api_set_active_repo():
     body = request.get_json(silent=True) or {}
     try:
         return jsonify(repos_ops.set_active_profile(body.get("profile", "")))
+    except repos_ops.RepoProfileBusyError as e:
+        return err(str(e), 409)
     except repos_ops.RepoProfileError as e:
         return err(str(e), 400)
 
