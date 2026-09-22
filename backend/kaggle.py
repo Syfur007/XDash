@@ -76,7 +76,7 @@ FINAL_STATUSES = {"complete", "error", "cancelAcknowledged"}  # tick() stops pol
 HISTORY_LIMIT = 50  # per-worker event log cap in kaggle_state.json — a rolling window, not an audit archive
 
 # Template-notebook launch (dashboard redesign, 2026-09): one push == one config, same shape as
-# an mclab launch, instead of the notebook itself hand-authoring a whole batch of configs. The
+# a local-device launch, instead of the notebook itself hand-authoring a whole batch of configs. The
 # dashboard renders this cell's three placeholders into a copy of the worker's template notebook
 # (settings.kaggle_default_template, or a per-worker override) before every push — see
 # _render_launch_notebook(). A worker that instead sets its own `notebook_path` (the original,
@@ -87,19 +87,12 @@ LAUNCH_SPEC_MARKER = "# DASHBOARD:LAUNCH_SPEC"
 _LAUNCH_PLACEHOLDERS = {
     "config_path": "__DASHBOARD_CONFIG_PATH__",
     "extra_args": "__DASHBOARD_EXTRA_ARGS__",
-    "run_mode": "__DASHBOARD_RUN_MODE__",
-    "resume_from_worker_id": "__DASHBOARD_RESUME_FROM_WORKER_ID__",
-    "resume_from_run_id": "__DASHBOARD_RESUME_FROM_RUN_ID__",
-    "resume_from_results_dir": "__DASHBOARD_RESUME_FROM_RESULTS_DIR__",
-    "resume_from_manifest_path": "__DASHBOARD_RESUME_FROM_MANIFEST_PATH__",
-    "chain_id": "__DASHBOARD_CHAIN_ID__",
-    "version_index": "__DASHBOARD_VERSION_INDEX__",
     # Resolved server-side from settings.train_script/eval_script, never hardcoded in the
     # template — a deployment may point these at a wrapper (e.g. this study's own
     # scripts/run_iccit_sweep.py, which loops the pre-registered seeds and writes the
     # manifest/ledger rows train.py's own CLI never does) rather than train.py/eval.py
     # directly. Mirrors tmux_runner.build_launch_command()'s own settings.train_script /
-    # settings.eval_script choice exactly, so a Kaggle-launched run and an mclab-launched run
+    # settings.eval_script choice exactly, so a Kaggle-launched run and a local-device-launched run
     # of the same config actually run the *same command* — not just a structurally similar one.
     #
     # No "mode" placeholder (EXPERIMENT_AUTOMATION_PLAN.md §2.4): a Kaggle push covers the
@@ -115,6 +108,13 @@ _LAUNCH_PLACEHOLDERS = {
     # to the eval command, never the train one.
     "eval_extra_flags": "__DASHBOARD_EVAL_EXTRA_FLAGS__",
     "max_hours": "__DASHBOARD_MAX_HOURS__",
+    # First entry of the same dataset_sources list that goes into kernel-metadata.json's
+    # declarative attach (see _kernel_metadata()) -- handed to the template too so its
+    # dataset-attach cell can fall back to a direct `kagglehub.dataset_download()` when the
+    # declarative attach didn't take (e.g. a worker whose dataset_sources drifted out of sync,
+    # or Kaggle simply not mounting it under /kaggle/input/ for this kernel). Empty string when
+    # nothing resolved, in which case the template cell keeps its old attach-only behavior.
+    "dataset_source": "__DASHBOARD_DATASET_SOURCE__",
 }
 
 # Mirrors orchestration/ledger.py's RUNS_FIELDS in the host repo exactly —
@@ -329,10 +329,18 @@ def _creds_dir(name: str) -> Path:
     return creds_root / name
 
 
-def _source_notebook_path(worker: Dict[str, Any]) -> str:
-    """The notebook this worker's next push is rendered from (template-backed)
-    or copied from verbatim (notebook-backed) — see add_worker()'s docstring."""
-    return worker.get("notebook_path") or worker.get("template_path") or settings.kaggle_default_template
+def _source_notebook_path(worker: Dict[str, Any]) -> Path:
+    """Absolute path to the notebook this worker's next push is rendered from
+    (template-backed) or copied from verbatim (notebook-backed) — see
+    add_worker()'s docstring. A worker's own notebook_path/template_path is
+    repo-relative (a file the operator explicitly chose inside the host
+    repo); the profile-wide default template is XDash-owned
+    (settings.kaggle_default_template_file, under data/<profile>/ — never
+    the host repo, see that setting's own comment for why)."""
+    override = worker.get("notebook_path") or worker.get("template_path")
+    if override:
+        return settings.repo_root / override
+    return settings.kaggle_default_template_file
 
 
 def _notebook_changed(worker: Dict[str, Any], worker_state: Dict[str, Any]) -> Optional[bool]:
@@ -348,7 +356,7 @@ def _notebook_changed(worker: Dict[str, Any], worker_state: Dict[str, Any]) -> O
     pushed_hash = worker_state.get("pushed_template_hash") or worker_state.get("pushed_notebook_hash")
     if not pushed_hash:
         return None
-    notebook_abs = settings.repo_root / _source_notebook_path(worker)
+    notebook_abs = _source_notebook_path(worker)
     if not notebook_abs.is_file():
         return None
     try:
@@ -383,19 +391,6 @@ def list_accounts() -> List[Dict[str, Any]]:
             "usage_history": usage_history(account["name"]),
         })
     return result
-
-
-def worker_resume_history(worker_id: str) -> List[Dict[str, Any]]:
-    """Return lineage-related state events for one worker, newest first."""
-    data = _load_accounts()
-    _, worker = _find_worker_and_account(data, worker_id)
-    if worker is None:
-        raise KaggleOpsError(f"Unknown worker '{worker_id}'")
-    history = _load_state().get(worker_id, {}).get("history", [])
-    return [event for event in reversed(history) if any(
-        marker in (event.get("event") or "").lower()
-        for marker in ("resume", "push", "complete", "error")
-    )]
 
 
 def add_account(
@@ -635,9 +630,6 @@ def add_worker(
             "results_dir": str(results_dir),
             "budget_hours": float(budget_hours) if budget_hours else settings.kaggle_default_budget_hours,
             "dataset_sources": dataset_sources,
-            "run_mode": "fresh",
-            "chain_id": f"{worker_id}:0",
-            "version_index": 0,
         }
         if notebook_path:
             worker["notebook_path"] = notebook_path
@@ -758,13 +750,7 @@ def _render_launch_notebook(
     template_abs: Path,
     config_path: str,
     extra_args: str,
-    run_mode: str = "fresh",
-    resume_from_worker_id: str = "",
-    resume_from_run_id: str = "",
-    resume_from_results_dir: str = "",
-    resume_from_manifest_path: str = "",
-    chain_id: str = "",
-    version_index: Optional[int] = None,
+    dataset_source: str = "",
 ) -> bytes:
     """Loads *template_abs* (nbformat JSON), finds the single cell carrying
     LAUNCH_SPEC_MARKER, and substitutes its `__DASHBOARD_*__` placeholders
@@ -796,13 +782,6 @@ def _render_launch_notebook(
     values = {
         _LAUNCH_PLACEHOLDERS["config_path"]: config_path,
         _LAUNCH_PLACEHOLDERS["extra_args"]: extra_args or "",
-        _LAUNCH_PLACEHOLDERS["run_mode"]: run_mode or "fresh",
-        _LAUNCH_PLACEHOLDERS["resume_from_worker_id"]: resume_from_worker_id or "",
-        _LAUNCH_PLACEHOLDERS["resume_from_run_id"]: resume_from_run_id or "",
-        _LAUNCH_PLACEHOLDERS["resume_from_results_dir"]: resume_from_results_dir or "",
-        _LAUNCH_PLACEHOLDERS["resume_from_manifest_path"]: resume_from_manifest_path or "",
-        _LAUNCH_PLACEHOLDERS["chain_id"]: chain_id or "",
-        _LAUNCH_PLACEHOLDERS["version_index"]: int(version_index) if version_index is not None else 0,
         _LAUNCH_PLACEHOLDERS["train_script"]: settings.train_script,
         _LAUNCH_PLACEHOLDERS["eval_script"]: settings.eval_script,
         # Joined into one shell-quoted string, same shape as EXTRA_ARGS, so the template's
@@ -815,6 +794,7 @@ def _render_launch_notebook(
             - float(settings.kaggle_setup_reserve_hours)
             - float(settings.kaggle_teardown_reserve_hours),
         ),
+        _LAUNCH_PLACEHOLDERS["dataset_source"]: dataset_source or "",
     }
 
     def substitute(line: str) -> str:
@@ -826,212 +806,29 @@ def _render_launch_notebook(
     return json.dumps(notebook, indent=1).encode()
 
 
-def _normalize_run_mode(mode: Optional[str]) -> str:
-    value = (mode or "fresh").strip().lower()
-    return value if value in {"fresh", "resume"} else "fresh"
 
-
-def mark_resume_origin(worker_id: str, run_id: str, source_dir: str = "", manifest_path: str = "") -> Dict[str, Any]:
-    run_id = (run_id or "").strip()
-    if not run_id:
-        raise KaggleOpsError("resume_from_run_id is required to mark a resume source")
-    state = _load_state()
-    rec = state.setdefault(worker_id, {})
-    rec.update({
-        "run_mode": "resume",
-        "resume_from_run_id": run_id,
-        "resume_from_results_dir": (source_dir or "").strip(),
-        "resume_from_manifest_path": (manifest_path or "").strip(),
-    })
-    _save_state(state)
-    return {"worker_id": worker_id, **rec}
-
-
-def set_run_mode(worker_id: str, mode: str) -> Dict[str, Any]:
-    mode = _normalize_run_mode(mode)
-    state = _load_state()
-    rec = state.setdefault(worker_id, {})
-    rec["run_mode"] = mode
-    if mode == "fresh":
-        rec.pop("resume_from_worker_id", None)
-        rec.pop("resume_from_run_id", None)
-        rec.pop("resume_from_results_dir", None)
-        rec.pop("resume_from_manifest_path", None)
-    _save_state(state)
-    return {"worker_id": worker_id, "run_mode": mode}
-
-
-def validate_resume_state(worker_id: str, resume_info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    info = resume_info or {}
-    source_worker = (info.get("resume_from_worker_id") or "").strip()
-    source_run = (info.get("resume_from_run_id") or "").strip()
-    results_dir = (info.get("resume_from_results_dir") or "").strip()
-    manifest_path = (info.get("resume_from_manifest_path") or "").strip()
-    expected_config = (info.get("config_path") or "").strip()
-    expected_chain = (info.get("chain_id") or "").strip()
-    ok = True
-    reasons: List[str] = []
-
-    if source_worker and source_worker == worker_id:
-        ok = False
-        reasons.append("worker cannot resume from itself")
-    if source_worker:
-        data = _load_accounts()
-        _, source = _find_worker_and_account(data, source_worker)
-        if source is None:
-            ok = False
-            reasons.append(f"resume_from_worker_id does not exist: {source_worker}")
-    if not source_run:
-        ok = False
-        reasons.append("resume_from_run_id is required")
-    if not results_dir:
-        ok = False
-        reasons.append("resume_from_results_dir is required")
-    else:
-        resolved = (settings.repo_root / results_dir).resolve()
-        repo_root = settings.repo_root.resolve()
-        if repo_root not in resolved.parents and resolved != repo_root:
-            ok = False
-            reasons.append(f"resume_from_results_dir escapes repo root: {results_dir}")
-        elif not resolved.exists():
-            ok = False
-            reasons.append(f"resume_from_results_dir does not exist: {results_dir}")
-    resolved_manifest: Optional[Path] = None
-    if manifest_path:
-        resolved_manifest = (settings.repo_root / manifest_path).resolve()
-        repo_root = settings.repo_root.resolve()
-        if repo_root not in resolved_manifest.parents and resolved_manifest != repo_root:
-            ok = False
-            reasons.append(f"resume_from_manifest_path escapes repo root: {manifest_path}")
-        elif not resolved_manifest.is_file():
-            ok = False
-            reasons.append(f"resume_from_manifest_path does not exist: {manifest_path}")
-        else:
-            try:
-                manifest = json.loads(resolved_manifest.read_text())
-            except (OSError, json.JSONDecodeError) as exc:
-                ok = False
-                reasons.append(f"resume manifest is not valid JSON: {exc}")
-            else:
-                manifest_run = str(manifest.get("run_id") or "").strip()
-                manifest_config = str(manifest.get("config_path") or "").strip()
-                manifest_chain = str(manifest.get("chain_id") or "").strip()
-                if manifest_run and manifest_run != source_run:
-                    ok = False
-                    reasons.append(f"resume manifest run_id mismatch: expected {source_run}, found {manifest_run}")
-                if expected_config and manifest_config and manifest_config != expected_config:
-                    ok = False
-                    reasons.append(f"resume manifest config mismatch: expected {expected_config}, found {manifest_config}")
-                if expected_chain and manifest_chain and manifest_chain != expected_chain:
-                    ok = False
-                    reasons.append(f"resume manifest chain mismatch: expected {expected_chain}, found {manifest_chain}")
-    return {"worker_id": worker_id, "ok": ok, "reasons": reasons, "resume_from_worker_id": source_worker, "resume_from_run_id": source_run}
-
-
-def resume_worker(
-    worker_id: str,
-    from_worker_id: str = "",
-    from_run_id: str = "",
-    source_dir: str = "",
-    manifest_path: str = "",
-    config_path: str = "",
-    extra_args: str = "",
-    chain_id: Optional[str] = None,
-    version_index: Optional[int] = None,
-) -> Dict[str, Any]:
-    data = _load_accounts()
-    _, worker = _find_worker_and_account(data, worker_id)
-    if worker is None:
-        raise KaggleOpsError(f"Unknown worker '{worker_id}'")
-    info = {
-        "resume_from_worker_id": (from_worker_id or "").strip(),
-        "resume_from_run_id": (from_run_id or "").strip(),
-        "resume_from_results_dir": (source_dir or "").strip(),
-        "resume_from_manifest_path": (manifest_path or "").strip(),
-        "config_path": (config_path or "").strip(),
-        "chain_id": (chain_id or "").strip(),
-    }
-    validation = validate_resume_state(worker_id, info)
-    if not validation["ok"]:
-        raise KaggleOpsError("Resume validation failed: " + "; ".join(validation["reasons"]))
-
-    state = _load_state().get(worker_id, {})
-    version = version_index if version_index is not None else int(state.get("version_index") or 0) + 1
-    chain = chain_id or state.get("chain_id") or worker.get("chain_id") or f"{worker_id}:{version}"
-    if worker.get("notebook_path"):
-        return push(
-            worker_id,
-            config_path=config_path,
-            extra_args=extra_args,
-            run_mode="resume",
-            resume_from_worker_id=info["resume_from_worker_id"],
-            resume_from_run_id=info["resume_from_run_id"],
-            resume_from_results_dir=info["resume_from_results_dir"],
-            resume_from_manifest_path=info["resume_from_manifest_path"],
-            chain_id=chain,
-            version_index=version,
-        )
-    return push(
-        worker_id,
-        config_path=config_path or state.get("last_config_path") or "",
-        extra_args=extra_args or (state.get("last_extra_args") or ""),
-        run_mode="resume",
-        resume_from_worker_id=info["resume_from_worker_id"],
-        resume_from_run_id=info["resume_from_run_id"],
-        resume_from_results_dir=info["resume_from_results_dir"],
-        resume_from_manifest_path=info["resume_from_manifest_path"],
-        chain_id=chain,
-        version_index=version,
-    )
-
-
-def push(worker_id: str, config_path: str = "", extra_args: str = "",
-         run_mode: Optional[str] = None,
-         resume_from_worker_id: str = "",
-         resume_from_run_id: str = "",
-         resume_from_results_dir: str = "",
-         resume_from_manifest_path: str = "",
-         chain_id: Optional[str] = None,
-         version_index: Optional[int] = None,
-) -> Dict[str, Any]:
+def push(worker_id: str, config_path: str = "", extra_args: str = "") -> Dict[str, Any]:
     """Pushes *worker_id*'s kernel. A notebook-backed worker (`notebook_path`
     set) is pushed verbatim — *config_path*/*extra_args* are ignored,
     matching the original behavior exactly. A template-backed worker (the
     default) requires *config_path*: the launch spec is rendered into its
     template (settings.kaggle_default_template, or `template_path` if set)
     before push, running train then eval sequentially inside the one kernel
-    (EXPERIMENT_AUTOMATION_PLAN.md §2.4)."""
+    (EXPERIMENT_AUTOMATION_PLAN.md §2.4).
+
+    Every push is fresh — there is no resume contract (XDASH_V2_PLAN.md §4.A1
+    deleted it: it validated thoroughly and then silently ran a fresh
+    training job anyway, see the plan's D1-D4). Phase D re-specifies resume
+    against Kaggle-dataset-versioned legs once the host repo supports
+    ``--max-hours`` self-limiting; nothing here should be extended to fake it
+    sooner."""
     data = _load_accounts()
     account, worker = _find_worker_and_account(data, worker_id)
     if worker is None:
         raise KaggleOpsError(f"Unknown worker '{worker_id}'")
 
-    staged_resume_dir: Optional[Path] = None
-    staged_resume_manifest: Optional[Path] = None
-    resolved_mode = _normalize_run_mode(run_mode or (worker.get("run_mode") or _load_state().get(worker_id, {}).get("run_mode") or "fresh"))
-    if resolved_mode == "resume":
-        resume_info = {
-            "resume_from_worker_id": (resume_from_worker_id or worker.get("resume_from_worker_id") or _load_state().get(worker_id, {}).get("resume_from_worker_id") or "").strip(),
-            "resume_from_run_id": (resume_from_run_id or worker.get("resume_from_run_id") or _load_state().get(worker_id, {}).get("resume_from_run_id") or "").strip(),
-            "resume_from_results_dir": (resume_from_results_dir or worker.get("resume_from_results_dir") or _load_state().get(worker_id, {}).get("resume_from_results_dir") or "").strip(),
-            "resume_from_manifest_path": (resume_from_manifest_path or worker.get("resume_from_manifest_path") or _load_state().get(worker_id, {}).get("resume_from_manifest_path") or "").strip(),
-            "config_path": (config_path or "").strip(),
-            "chain_id": (chain_id or "").strip(),
-        }
-        validation = validate_resume_state(worker_id, resume_info)
-        if not validation["ok"]:
-            raise KaggleOpsError("Resume validation failed: " + "; ".join(validation["reasons"]))
-        staged_resume_dir = (settings.repo_root / resume_info["resume_from_results_dir"]).resolve()
-        if resume_info["resume_from_manifest_path"]:
-            staged_resume_manifest = (settings.repo_root / resume_info["resume_from_manifest_path"]).resolve()
-
     notebook_path = worker.get("notebook_path")
     if notebook_path:
-        if resolved_mode == "resume":
-            raise KaggleOpsError(
-                f"Worker '{worker_id}' is fixed-notebook backed and cannot receive the dashboard "
-                "resume contract; use a template-backed worker for resumed runs."
-            )
         source_abs = settings.repo_root / notebook_path
         if not source_abs.is_file():
             raise KaggleOpsError(f"Notebook not found: {notebook_path}")
@@ -1042,46 +839,24 @@ def push(worker_id: str, config_path: str = "", extra_args: str = "",
         if not config_path:
             raise KaggleOpsError(
                 f"Worker '{worker_id}' is template-backed — a config_path is required to push "
-                "(pick a config the same way you would to launch it on mclab)"
+                "(pick a config the same way you would to launch it on the local device)"
             )
         try:
             cfg.read_config(config_path)  # raises if the config doesn't exist / isn't valid YAML
             cli_config_path = cfg.repo_relative_path(config_path)  # e.g. "configs/mkunet/foo.yaml"
         except (FileNotFoundError, ValueError) as e:
             raise KaggleOpsError(f"Config not found: {config_path} ({e})")
-        source_abs = settings.repo_root / _source_notebook_path(worker)
+        source_abs = _source_notebook_path(worker)
         if not source_abs.is_file():
-            raise KaggleOpsError(f"Template notebook not found: {_source_notebook_path(worker)}")
-        state = _load_state().get(worker_id, {})
-        version = version_index if version_index is not None else int(state.get("version_index") or 0)
-        chain = chain_id or state.get("chain_id") or worker.get("chain_id") or f"{worker_id}:{version}"
-        rendered_resume_dir = "/kaggle/working/resume_source" if staged_resume_dir else ""
-        rendered_resume_manifest = ""
-        if staged_resume_manifest:
-            rendered_resume_manifest = "/kaggle/working/resume_source/manifest.json"
-        push_bytes = _render_launch_notebook(
-            source_abs,
-            cli_config_path,
-            extra_args,
-            run_mode=resolved_mode,
-            resume_from_worker_id=resume_from_worker_id or state.get("resume_from_worker_id") or "",
-            resume_from_run_id=resume_from_run_id or state.get("resume_from_run_id") or "",
-            resume_from_results_dir=rendered_resume_dir or resume_from_results_dir or state.get("resume_from_results_dir") or "",
-            resume_from_manifest_path=rendered_resume_manifest or resume_from_manifest_path or state.get("resume_from_manifest_path") or "",
-            chain_id=chain,
-            version_index=version,
-        )
+            raise KaggleOpsError(f"Template notebook not found: {source_abs}")
+        dataset_source = next(iter(worker.get("dataset_sources") or []), "")
+        push_bytes = _render_launch_notebook(source_abs, cli_config_path, extra_args, dataset_source)
         push_name = source_abs.name
 
     source_hash = hashlib.sha1(source_abs.read_bytes()).hexdigest()
 
     tmpdir = tempfile.mkdtemp(prefix="kaggle_push_")
     try:
-        if staged_resume_dir:
-            target = Path(tmpdir) / "resume_source"
-            shutil.copytree(staged_resume_dir, target)
-            if staged_resume_manifest:
-                shutil.copy2(staged_resume_manifest, target / "manifest.json")
         (Path(tmpdir) / push_name).write_bytes(push_bytes)
         metadata = _kernel_metadata(account, worker, push_name)
         (Path(tmpdir) / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2))
@@ -1111,20 +886,11 @@ def push(worker_id: str, config_path: str = "", extra_args: str = "",
         "notified_final": False, "pushed_notebook_hash": notebook_hash, "pushed_template_hash": source_hash,
         "last_config_path": config_path or None,
         "last_extra_args": extra_args or None,
-        "run_mode": resolved_mode,
-        "chain_id": chain_id or _load_state().get(worker_id, {}).get("chain_id") or worker.get("chain_id") or f"{worker_id}:{int(_load_state().get(worker_id, {}).get('version_index') or 0)}",
-        "version_index": int(_load_state().get(worker_id, {}).get("version_index") or 0) + (1 if resolved_mode == "resume" else 0),
+        "xdash_status": None,  # cleared here — download() sets it from this push's own status file
     }
-    if resolved_mode == "resume":
-        state_patch.update({
-            "resume_from_worker_id": resume_from_worker_id or _load_state().get(worker_id, {}).get("resume_from_worker_id") or "",
-            "resume_from_run_id": resume_from_run_id or _load_state().get(worker_id, {}).get("resume_from_run_id") or "",
-            "resume_from_results_dir": resume_from_results_dir or _load_state().get(worker_id, {}).get("resume_from_results_dir") or "",
-            "resume_from_manifest_path": resume_from_manifest_path or _load_state().get(worker_id, {}).get("resume_from_manifest_path") or "",
-        })
     _update_worker_state(worker_id, state_patch, event=event)
     warning = _concurrent_push_warning(account, worker_id)
-    result = {"worker_id": worker_id, "status": "pushed", "run_mode": resolved_mode}
+    result = {"worker_id": worker_id, "status": "pushed"}
     if warning:
         result["concurrent_warning"] = warning
     return result
@@ -1133,7 +899,7 @@ def push(worker_id: str, config_path: str = "", extra_args: str = "",
 def restart(worker_id: str) -> Dict[str, Any]:
     """Re-pushes a template-backed worker with the config/extra_args from
     its last push — the Kaggle-side counterpart of terminals.restart()
-    (mclab's restart re-runs the same config/args in a fresh tmux session;
+    (the local device's restart re-runs the same config/args in a fresh tmux session;
     this re-renders and re-pushes the same launch spec). Not meaningful for
     a notebook-backed worker (push() already ignores config_path for those)
     — just calls push() again with no spec, which is a plain re-push,
@@ -1176,6 +942,166 @@ def _concurrent_push_warning(account: Dict[str, Any], worker_id: str) -> Optiona
         f"Account '{account['name']}' already has {', '.join(siblings)} in progress — "
         "Kaggle typically runs one kernel per account at a time, so this push may just queue."
     )
+
+
+# --------------------------------------------------------------------------- worker-less push (Experiments)
+# XDASH_V2_PLAN.md §3.3 originally read: "There is no worker. Kernel slug and results dir are
+# derived per experiment, not stored per worker." Still true for *results dir* — see
+# results_dir_for_experiment() — but *kernel slug* reverted to per-account on 2026-09-22 (see
+# kernel_slug_for_account()'s own docstring for why: Kaggle Secrets can't be attached via the
+# API, only per-kernel through the web UI, so a fresh kernel per experiment would need that
+# manual step redone forever). Still no persisted worker record and no kaggle_state.json entry —
+# the functions below share the low-level CLI mechanics above (_render_launch_notebook,
+# _kernel_metadata, _run_kaggle, register_ledger, _read_xdash_status) with the worker-based
+# push() but keep their own state entirely on the caller's Attempt record, so the old
+# Assignments/Kaggle tab (still worker-based, per §6.8's strangler migration) and the new
+# dispatcher can never step on each other's bookkeeping even though both may push to the same
+# account.
+_KERNEL_SLUG_MAX = 48
+
+
+def kernel_slug_for_account(account_name: str) -> str:
+    """Stable, long-lived kernel slug for *account_name* — one Kaggle notebook per account,
+    reused across every experiment that account ever runs.
+
+    XDASH_V2_PLAN.md §3.3 originally specified one kernel *per experiment* instead; reverted
+    2026-09-22 after a real push hit Kaggle's "No user secrets exist for kernel id ... and label
+    GITHUB_TOKEN" error. A Kaggle Secret can only be attached to a kernel through the web UI —
+    there is no API/CLI field for it — so a perpetually-growing set of brand-new per-experiment
+    kernels would need that manual step repeated for every single experiment, forever, rather
+    than once per account. Results stay isolated per experiment via results_dir_for_experiment()
+    below, so this does not bring back D4's "downloads interleaved on disk" problem — only
+    D4's *cosmetic* half (a kernel's version history on Kaggle's own site interleaves multiple
+    experiments) comes back, which is a fair trade for pushes that actually run.
+
+    Deliberately a different slug shape than the old worker system's `xdash-{profile}-{account}`
+    (add_worker()) so this can never collide with a still-live legacy worker push (§6.8's
+    strangler migration keeps both systems running side by side) — even though, if those old
+    kernels already have GITHUB_TOKEN attached from prior use, this one still needs its own
+    one-time manual attachment before its first push. That manual step is unavoidable and not
+    something this function — or any code — can do on your behalf."""
+    base = re.sub(r"[^a-z0-9-]+", "-", f"{settings.profile_name}-slot-{account_name}").strip("-").lower()
+    slug = f"xdash-{base}"
+    if len(slug) <= _KERNEL_SLUG_MAX:
+        return slug
+    digest = hashlib.sha1(slug.encode()).hexdigest()[:6]
+    keep = _KERNEL_SLUG_MAX - len(digest) - 1
+    return f"{slug[:keep]}-{digest}"
+
+
+def results_dir_for_experiment(experiment_id: str) -> str:
+    return f"outputs/kaggle/{experiment_id}"
+
+
+def push_experiment_attempt(
+    account_name: str, experiment_id: str, config_path: str, extra_args: str,
+    dataset_sources: List[str], budget_hours: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Pushes one Attempt's kernel for *experiment_id* under *account_name*. Always
+    template-backed (the escape hatch for a hand-authored notebook stays a worker-only action,
+    §3.3) and always fresh — there is no resume contract here either (§4.A1)."""
+    data = _load_accounts()
+    account = _find_account(data, account_name)
+    if account is None:
+        raise KaggleOpsError(f"Unknown account '{account_name}'")
+
+    config_path = (config_path or "").strip()
+    if not config_path:
+        raise KaggleOpsError("config_path is required")
+    try:
+        cfg.read_config(config_path)  # raises if the config doesn't exist / isn't valid YAML
+        cli_config_path = cfg.repo_relative_path(config_path)
+    except (FileNotFoundError, ValueError) as e:
+        raise KaggleOpsError(f"Config not found: {config_path} ({e})")
+
+    template_abs = settings.kaggle_default_template_file
+    if not template_abs.is_file():
+        raise KaggleOpsError(f"Template notebook not found: {template_abs}")
+
+    kernel_slug = kernel_slug_for_account(account_name)
+    results_dir = results_dir_for_experiment(experiment_id)
+    budget = float(budget_hours) if budget_hours else settings.kaggle_default_budget_hours
+    # _kernel_metadata only reads kernel_slug/dataset_sources off "worker" — a bare dict with
+    # just those two keys is all it needs, no registry record required.
+    pseudo_worker = {"kernel_slug": kernel_slug, "dataset_sources": list(dataset_sources or [])}
+
+    dataset_source = next(iter(pseudo_worker["dataset_sources"]), "")
+    push_bytes = _render_launch_notebook(template_abs, cli_config_path, extra_args, dataset_source)
+    push_name = template_abs.name
+
+    tmpdir = tempfile.mkdtemp(prefix="kaggle_push_")
+    try:
+        (Path(tmpdir) / push_name).write_bytes(push_bytes)
+        metadata = _kernel_metadata(account, pseudo_worker, push_name)
+        (Path(tmpdir) / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2))
+        push_args = ["kernels", "push", "-p", tmpdir]
+        timeout_args = ["--timeout", str(int(budget * 3600))]
+        proc = _run_kaggle(push_args + timeout_args, account["name"], timeout=120)
+        if proc.returncode != 0 and _looks_like_unrecognized_option(proc.stderr or proc.stdout, "--timeout"):
+            proc = _run_kaggle(push_args, account["name"], timeout=120)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip()
+        raise KaggleOpsError(f"Push failed for experiment '{experiment_id}': {detail}")
+
+    return {
+        "account": account_name, "kernel_slug": kernel_slug, "results_dir": results_dir,
+        "pushed_at": _now_iso(),
+    }
+
+
+def refresh_experiment_status(account_name: str, kernel_slug: str) -> Dict[str, Any]:
+    """Polls Kaggle for *kernel_slug*'s current status. No worker registry lookup — a
+    worker-less Attempt already knows its own account+kernel_slug from push_experiment_attempt's
+    return value."""
+    data = _load_accounts()
+    account = _find_account(data, account_name)
+    if account is None:
+        raise KaggleOpsError(f"Unknown account '{account_name}'")
+    kernel_ref = f"{account['kaggle_username']}/{kernel_slug}"
+    proc = _run_kaggle(["kernels", "status", kernel_ref], account_name, timeout=30)
+    if proc.returncode != 0:
+        return {"status": "unknown", "last_error": (proc.stderr or proc.stdout).strip()}
+    m = STATUS_RE.search(proc.stdout)
+    kaggle_status = _normalize_kaggle_status(m.group(1)) if m else "unknown"
+    return {"status": kaggle_status, "last_error": None}
+
+
+def download_experiment(account_name: str, kernel_slug: str, results_dir: str) -> Dict[str, Any]:
+    """Worker-less counterpart to download() — extracts into *results_dir* (already derived by
+    the caller from the experiment_id) and reads xdash_status.json for diagnosis exactly like the
+    worker path does (§4.A7)."""
+    data = _load_accounts()
+    account = _find_account(data, account_name)
+    if account is None:
+        raise KaggleOpsError(f"Unknown account '{account_name}'")
+    kernel_ref = f"{account['kaggle_username']}/{kernel_slug}"
+
+    tmpdir = tempfile.mkdtemp(prefix="kaggle_download_")
+    try:
+        proc = _run_kaggle(["kernels", "output", kernel_ref, "-p", tmpdir], account_name, timeout=900)
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout).strip()
+            raise KaggleOpsError(f"Download failed for '{kernel_slug}': {detail}")
+        zips = list(Path(tmpdir).glob("*.zip"))
+        if not zips:
+            raise KaggleOpsError(f"No output files found for '{kernel_slug}' — has the kernel finished?")
+        results_dir_abs = (settings.repo_root / results_dir).resolve()
+        repo_root = settings.repo_root.resolve()
+        if repo_root not in results_dir_abs.parents and results_dir_abs != repo_root:
+            raise KaggleOpsError("results_dir escapes the repo root")
+        results_dir_abs.mkdir(parents=True, exist_ok=True)
+        for zip_path in zips:
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(results_dir_abs)
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+
+    registered = register_ledger(results_dir_abs)
+    xdash_status = _read_xdash_status(results_dir_abs)
+    return {"results_dir": str(results_dir_abs), "registered_runs": registered, "xdash_status": xdash_status}
 
 
 # --------------------------------------------------------------------------- status
@@ -1336,6 +1262,23 @@ def register_ledger(results_dir: Path) -> List[str]:
     return newly_registered
 
 
+def _read_xdash_status(results_dir: Path) -> Optional[Dict[str, Any]]:
+    """The launch template's own {stage, returncode, started_at, ended_at,
+    setup_seconds} record (XDASH_V2_PLAN.md §4.A7) — written unconditionally
+    by the template's run cell, whether train/eval succeeded or not, so a
+    failed attempt is diagnosable from what actually got downloaded instead
+    of inferred from zip presence (the previous behavior: a failed run
+    produced no zips at all, since the packaging cell never ran after an
+    aborting assert)."""
+    status_path = results_dir / "outputs" / "xdash_status.json"
+    if not status_path.is_file():
+        return None
+    try:
+        return json.loads(status_path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def download(worker_id: str) -> Dict[str, Any]:
     data = _load_accounts()
     account, worker = _find_worker_and_account(data, worker_id)
@@ -1368,11 +1311,20 @@ def download(worker_id: str) -> Dict[str, Any]:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
     registered = register_ledger(results_dir)
-    _update_worker_state(
-        worker_id, {"status": "downloaded", "downloaded_at": _now_iso(), "last_error": None},
-        event=f"downloaded — {len(registered)} run(s) registered" if registered else "downloaded",
-    )
-    return {"worker_id": worker_id, "results_dir": str(results_dir), "registered_runs": registered}
+    xdash_status = _read_xdash_status(results_dir)
+    failed_stage = xdash_status and xdash_status.get("returncode") not in (0, None)
+    patch = {
+        "status": "downloaded", "downloaded_at": _now_iso(), "xdash_status": xdash_status,
+        "last_error": (
+            f"{xdash_status.get('stage', 'run')} exited with code {xdash_status.get('returncode')} "
+            "(see downloaded logs)"
+        ) if failed_stage else None,
+    }
+    event = f"downloaded — {len(registered)} run(s) registered" if registered else "downloaded"
+    if failed_stage:
+        event = f"downloaded — {xdash_status.get('stage', 'run')} failed (exit {xdash_status.get('returncode')})"
+    _update_worker_state(worker_id, patch, event=event)
+    return {"worker_id": worker_id, "results_dir": str(results_dir), "registered_runs": registered, "xdash_status": xdash_status}
 
 
 # --------------------------------------------------------------------------- quota estimate
@@ -1725,9 +1677,6 @@ def import_registry(payload: Dict[str, Any]) -> Dict[str, Any]:
                     "results_dir": w["results_dir"],
                     "budget_hours": w.get("budget_hours") or settings.kaggle_default_budget_hours,
                     "dataset_sources": incoming_datasets,
-                    "run_mode": "fresh",
-                    "chain_id": f"{worker_id}:0",
-                    "version_index": 0,
                 }
                 if source_field:
                     new_worker[source_field] = w[source_field]

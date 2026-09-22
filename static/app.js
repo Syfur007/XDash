@@ -248,6 +248,7 @@ function initNav() {
     try {
       await Promise.all([loadSystem(), loadRepos()]);
       renderSettings();
+      loadTemplates();
       toast("Settings refreshed", "ok");
     } catch (e) { toast("Couldn't refresh settings: " + e.message, "err"); }
   });
@@ -314,15 +315,11 @@ function closeSidebar() {
 function switchView(view) {
   document.querySelectorAll(".nav-item").forEach((el) => el.classList.toggle("active", el.dataset.view === view));
   document.querySelectorAll(".view").forEach((el) => el.classList.toggle("active", el.id === `view-${view}`));
-  if (view === "reports" && !state.reportGroups.length) loadReports();
-  if (view === "history" && !state.historyTree.length) loadHistory();
+  if (view === "lab") { loadLab(); startLabPolling(); } else { stopLabPolling(); }
   if (view === "data") loadDataView();
-  if (view === "runners") { loadMonitors(); refreshTensorboardStatus(); loadKaggle(); loadRunnersOverview(); }
-  if (view === "experiments") { loadExperimentsKaggleActive(); loadExperimentsOtherRepos(); }
-  if (view === "assignments" && !state.assignmentsLoaded) loadAssignments();
-  if (view === "settings") renderSettings();
-  if (view === "templates") loadTemplates();
-  if (view === "overview") loadOverview();
+  if (view === "compute") { loadMonitors(); refreshTensorboardStatus(); loadKaggle(); loadRunnersOverview(); }
+  if (view === "experiments") { loadSpine(); loadExperimentsKaggleActive(); loadExperimentsOtherRepos(); }
+  if (view === "settings") { renderSettings(); loadTemplates(); }
 }
 
 async function loadTemplates() {
@@ -465,14 +462,12 @@ async function switchRepo(profileId) {
   state.selectedTerminal = null;
   state.reportGroups = [];
   state.historyTree = [];
-  state.assignmentsLoaded = false;
-  state.assignmentConfigsLoaded = false;
   state.runTargetsLoaded = false;
   state.schedulerConfigsLoaded = false;
   state.schedulerTemplatesLoaded = false;
   state.kaggleConfigsLoaded = false;
 
-  const currentView = document.querySelector(".nav-item.active")?.dataset.view || "overview";
+  const currentView = document.querySelector(".nav-item.active")?.dataset.view || "lab";
 
   await loadSystem();
   await loadRepos();
@@ -695,7 +690,7 @@ async function loadResolvedConfig() {
   }
 }
 
-// Runner picker (DASHBOARD_REDESIGN_PLAN.md §3.2): mclab is always launchable
+// Runner picker (DASHBOARD_REDESIGN_PLAN.md §3.2): the local device is always launchable
 // directly; a Kaggle worker is only offered here if it's template-backed
 // (no notebook_path — see backend/kaggle.py's add_worker() docstring), since
 // only those actually run *this* picked config — a notebook-backed worker
@@ -716,13 +711,13 @@ async function populateRunTargetSelect() {
         select.appendChild(opt);
       }
     }
-  } catch (e) { /* mclab-only select still works fine */ }
+  } catch (e) { /* local-only select still works fine */ }
 }
 
 // A Kaggle push always runs train then eval sequentially inside one kernel now
 // (EXPERIMENT_AUTOMATION_PLAN.md §2.4) — there's no per-push mode choice for it the way
-// mclab's terminals.launch() still has. Grey the selector out rather than removing it, so
-// switching back to mclab restores the choice without re-rendering the whole run bar.
+// the local device's terminals.launch() still has. Grey the selector out rather than removing it, so
+// switching back to the local device restores the choice without re-rendering the whole run bar.
 function updateRunModeAvailability() {
   const target = document.getElementById("run-target-select").value || "local";
   const modeSelect = document.getElementById("run-mode");
@@ -748,7 +743,7 @@ async function runConfig() {
       });
       toast("Launched in a new terminal", "ok");
       state.selectedTerminal = term.session_name;
-      switchToSubtab("experiments", "experiments-subtabs", "active");
+      switchToSubtab("experiments", "experiments-subtabs", "sessions");
       await loadTerminals();
     } catch (e) {
       toast("Couldn't launch: " + e.message, "err");
@@ -766,7 +761,7 @@ async function runConfig() {
     });
     const label = `${runnerId.replace("kaggle:", "")}/${workerId}`;
     toast(result.concurrent_warning ? `Pushed to ${label} — ${result.concurrent_warning}` : `Pushed to ${label}`, result.concurrent_warning ? "" : "ok");
-    switchView("runners");
+    switchView("compute");
   } catch (e) {
     toast("Couldn't push: " + e.message, "err");
   }
@@ -2688,6 +2683,12 @@ async function stopTensorboard() {
 function initButtons() {
   initToastHoverPause();
   document.getElementById("btn-refresh-configs").addEventListener("click", loadConfigs);
+  // Wrapped, not passed bare: initButtons() runs synchronously before any `await` in boot(),
+  // i.e. before the browser has loaded js/views/lab.js (a later <script> tag) — a bare
+  // `loadLab` reference here would throw ReferenceError and abort every button-wiring line
+  // after it. The wrapper only resolves the name at click time, long after every script has
+  // loaded, same as every other cross-file callback below already does via an arrow function.
+  document.getElementById("btn-lab-refresh").addEventListener("click", () => loadLab());
   document.getElementById("btn-save-config").addEventListener("click", saveConfig);
   document.getElementById("btn-toggle-resolved").addEventListener("click", toggleResolvedConfig);
   document.getElementById("btn-run").addEventListener("click", runConfig);
@@ -2748,6 +2749,11 @@ async function boot() {
   await loadConfigs();
   const interval = (state.system && state.system.poll_interval_ms) || 2000;
   state.pollTimer = setInterval(() => { loadTerminals(); loadMonitors(); loadScheduler(); }, interval);
+  // Lab is the default landing view (XDASH_V2_PLAN.md §6.3) — unlike the Overview tab it
+  // replaces, it must actually have data the instant the page opens, not only after a manual
+  // tab switch away and back (switchView() is what every other tab relies on for its first load).
+  loadLab();
+  startLabPolling();
 }
 
 boot();

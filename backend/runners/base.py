@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 # One canonical status vocabulary every runner's native status maps into
-# (DASHBOARD_REDESIGN_PLAN.md §2.3) — mclab's `running/completed/failed/
+# (DASHBOARD_REDESIGN_PLAN.md §2.3) — the local device's `running/completed/failed/
 # stopped/interrupted/unmanaged` (terminals.py), the scheduler's `pending/
 # running/cancelling/completed/failed/cancelled/skipped` (scheduler.py), and
 # Kaggle's `queued/preparing/running/complete/error/cancelAcknowledged`

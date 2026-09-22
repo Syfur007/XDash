@@ -197,8 +197,41 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .path-input{ display:flex; gap:6px; align-items:center; width:100%; }
 .path-input .text-input{ min-width:0; }
-.path-picker-modal{ width:min(680px, calc(100vw - 32px)); }
+/* .modal(width:380px), declared further down this file, has equal selector specificity to a
+   plain `.path-picker-modal`/`.run-composer-modal` class rule — with both classes on the same
+   element, CSS's tie-break is "later rule in source wins", so `.modal`'s 380px was silently
+   beating these ever since they were added (found 2026-09-22 chasing a "dialog won't get any
+   wider" report). Scoping as `.modal.path-picker-modal` raises specificity above plain `.modal`
+   so the override actually takes. */
+.modal.path-picker-modal{ width:min(680px, calc(100vw - 32px)); }
 .path-picker-modal > .text-input{ width:100%; margin:0 0 10px; }
+
+/* Run Composer (XDASH_V2_PLAN.md §6.5) — deliberately much wider than the confirm/path-picker
+   modals above: its form rows (config filter, seeds/args, where/retry/batch-name) wrap onto
+   their own lines at 680px and the dialog reads as cramped on anything but a narrow screen. */
+/* Same `.modal.<x>` specificity fix as .path-picker-modal above — plain `.run-composer-modal`
+   was losing its width to `.modal`'s 380px every time, which is why the dialog read as
+   narrow/"shrunk" no matter what value got put here. max-height+overflow-y caps the dialog to
+   the viewport and scrolls its own content instead, so a wide config selection (more preflight
+   rows, more resolved ids) grows internally rather than pushing the whole dialog taller than
+   the screen. */
+.modal.run-composer-modal{ width:min(1280px, calc(100vw - 48px)); max-height:calc(100vh - 64px); overflow-y:auto; }
+.run-composer-modal > .field{ margin-bottom:10px; }
+.run-composer-modal > .field > .text-input{ width:100%; margin-top:4px; }
+
+/* Preflight summary — a dedicated box instead of reusing .settings-profile-path (its
+   white-space:nowrap + ellipsis was clipping this block down to one truncated line, which is
+   why the total-runs count read as "omitted"). Structured in three tiers: the headline number,
+   a capacity/queue readout per pool, then the resolved experiment ids. */
+.run-composer-preflight{ margin:10px 0; padding:12px 14px; border:1px solid var(--border-soft); border-radius:var(--radius-sm); background:var(--surface-1); }
+.preflight-empty{ color:var(--text-faint); font-size:12px; }
+.preflight-total{ display:flex; align-items:baseline; flex-wrap:wrap; gap:6px 10px; font-size:13px; color:var(--text-muted); }
+.preflight-total-number{ font-size:24px; font-weight:700; color:var(--teal); line-height:1; }
+.preflight-capacity{ display:flex; flex-wrap:wrap; gap:6px 18px; font-size:12px; color:var(--text-muted); margin-top:10px; padding-top:10px; border-top:1px solid var(--border-soft); }
+.preflight-capacity-row{ display:flex; align-items:center; gap:6px; white-space:nowrap; }
+.preflight-queue-note{ flex-basis:100%; font-size:11px; color:var(--text-faint); margin-top:2px; }
+.preflight-ids{ font-family:var(--mono); font-size:11px; color:var(--text-faint); max-height:80px; overflow:auto; line-height:1.7; margin-top:10px; padding-top:10px; border-top:1px solid var(--border-soft); white-space:normal; }
+.preflight-reused{ color:var(--amber); font-size:11px; margin-top:6px; }
 .path-picker-list{ max-height:420px; overflow:auto; border:1px solid var(--border-soft); border-radius:var(--radius); background:var(--surface-2); }
 .path-picker-item{ display:flex; flex-direction:column; align-items:flex-start; gap:2px; width:100%; padding:9px 11px; border:0; border-bottom:1px solid var(--border-soft); background:transparent; color:var(--text); text-align:left; cursor:pointer; }
 .path-picker-item:last-child{ border-bottom:0; }

@@ -11,15 +11,13 @@ this module needs (only dispatch when a scheduler slot is actually free).
 This module drives scheduler.add_item() and kaggle.push() the same way the
 rest of the dashboard always has.
 
-KNOWN GAP, not silently worked around: a row's Kaggle-feasibility here is
-quota/session-cap only (C2/C3) — it does NOT check whether any account's
-worker has the config's actual dataset attached (C4). That check needs a
-mapping from a config's dataset to a Kaggle dataset slug that doesn't exist
-yet anywhere in this codebase (EXPERIMENT_AUTOMATION_PLAN.md §2.5's own
-"still open" note). Until that lands, a row can be dispatched to an account
-whose worker lacks the right data, and the failure surfaces inside the
-Kaggle kernel (the launch template's own dataset-attach assertion) rather
-than being caught here first.
+Kaggle-feasibility requires a resolved dataset mapping (XDASH_V2_PLAN.md
+§3.4/§4.A3): a row whose config has no known Kaggle dataset slug is never
+routed to Kaggle at all, and blocks with the distinct `no-dataset-mapping`
+code (§3.5/§4.A4) rather than being dispatched to an account whose worker
+may not have the right data attached (the previous, permissive behavior —
+EXPERIMENT_AUTOMATION_PLAN.md §2.5's "still open" gap — let that failure
+surface inside the Kaggle kernel instead of being caught here first).
 """
 from __future__ import annotations
 
@@ -29,9 +27,8 @@ import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
-import yaml
-
 from . import assignments as asg
+from . import dataset_map
 from . import estimates
 from . import kaggle as kaggle_backend
 from . import notifications as notif
@@ -121,18 +118,9 @@ def start_batch(spec: Dict[str, Any]) -> Dict[str, Any]:
                 base_extra_args = ""
                 if seed is not None and settings.seed_arg:
                     base_extra_args = settings.seed_arg.format(seed=seed)
-                resume = entry.get("resume") or {}
-                run_mode = (entry.get("run_mode") or resume.get("run_mode") or "fresh").strip()
                 entries.append({
                     "config_path": config_path, "seed": seed, "batch_name": name, "pool": pool,
                     "extra": {"base_extra_args": base_extra_args},
-                    "run_mode": run_mode,
-                    "resume_from_worker_id": entry.get("resume_from_worker_id") or resume.get("from_worker_id", ""),
-                    "resume_from_run_id": entry.get("resume_from_run_id") or resume.get("from_run_id", ""),
-                    "resume_from_results_dir": entry.get("resume_from_results_dir") or resume.get("source_dir", ""),
-                    "resume_from_manifest_path": entry.get("resume_from_manifest_path") or resume.get("manifest_path", ""),
-                    "chain_id": entry.get("chain_id") or resume.get("chain_id", ""),
-                    "version_index": entry.get("version_index") if entry.get("version_index") is not None else resume.get("version_index"),
                 })
         if not entries:
             raise BatchError("Sweep spec expanded to zero rows")
@@ -220,12 +208,28 @@ def _finish_batch(name: str, status: str, reason: str = "") -> None:
 
 # --------------------------------------------------------------------------- capacity + feasibility
 def _local_free_slots() -> int:
+    """Free scheduler slots right now. A "pending" item only counts against
+    capacity if scheduler._tick() would actually launch it this tick — i.e.
+    it has no dependency, or that dependency has already completed
+    (mirroring scheduler.py's own launch condition exactly). Without this, a
+    `mode="both"` row's still-blocked eval half counted as a consumed slot
+    the instant its row was created, so a dependency-blocked item could
+    starve capacity that was, in reality, still free (XDASH_V2_PLAN.md D9)."""
     data = scheduler.list_items()
     items = data["items"]
-    running = sum(1 for i in items if i["status"] == "running")
-    pending = sum(1 for i in items if i["status"] == "pending")
     if data.get("paused"):
         return 0
+    running = sum(1 for i in items if i["status"] == "running")
+    by_id = {i["id"]: i for i in items}
+
+    def launch_eligible(item: Dict[str, Any]) -> bool:
+        dep_id = item.get("depends_on")
+        if not dep_id:
+            return True
+        dep = by_id.get(dep_id)
+        return dep is not None and dep["status"] == "completed"
+
+    pending = sum(1 for i in items if i["status"] == "pending" and launch_eligible(i))
     return max(0, data["max_concurrent"] - running - pending)
 
 
@@ -240,33 +244,19 @@ def _local_free_slots() -> int:
 _KAGGLE_BUSY_STATUSES = kaggle_backend.IN_PROGRESS_STATUSES | {"pushed"}
 
 
-def _config_kaggle_dataset(config_path: str) -> Optional[str]:
-    """Return an explicitly declared Kaggle dataset slug for a config.
-
-    The mapping is intentionally opt-in: a local dataset root cannot reliably
-    identify an uploaded Kaggle dataset, so configs without ``kaggle_dataset``
-    remain eligible for the legacy behavior until their mapping is declared.
-    """
-    path = (settings.repo_root / config_path).resolve()
-    if settings.repo_root.resolve() not in path.parents or not path.is_file():
-        return None
-    try:
-        raw = yaml.safe_load(path.read_text()) or {}
-    except (OSError, yaml.YAMLError):
-        return None
-    dataset = raw.get("dataset") if isinstance(raw, dict) else None
-    if not isinstance(dataset, dict):
-        return None
-    value = dataset.get("kaggle_dataset")
-    return value.strip() if isinstance(value, str) and value.strip() else None
+# Dataset resolution itself lives in backend/dataset_map.py — shared with the new
+# backend/experiments.py dispatcher (XDASH_V2_PLAN.md §3.4/§4.A3) so both agree on exactly one
+# answer for "what Kaggle dataset does this config need".
+_config_kaggle_dataset = dataset_map.resolve_kaggle_dataset
 
 
 def _idle_template_workers(account: Dict[str, Any], required_dataset: Optional[str] = None) -> List[Dict[str, Any]]:
     """Workers under *account* that can take an arbitrary config_path right
     now: template-backed (notebook-backed workers ignore config_path
     entirely and always run their own fixed notebook — dispatching a batch
-    row to one would silently run the wrong thing) and not currently
-    occupying the account's one real slot (_KAGGLE_BUSY_STATUSES)."""
+    row to one would silently run the wrong thing), not currently occupying
+    the account's one real slot (_KAGGLE_BUSY_STATUSES), and — when a
+    dataset is required — already declaring it attached."""
     return [
         w for w in account.get("workers", [])
         if not w.get("notebook_path")
@@ -276,12 +266,16 @@ def _idle_template_workers(account: Dict[str, Any], required_dataset: Optional[s
 
 
 def _kaggle_candidate_accounts(est: float, config_path: str = "") -> List[Dict[str, Any]]:
-    """Accounts with at least one idle template-backed worker, budget
-    headroom for *est* hours this week (C3), and a per-push session cap
-    that fits it too (C2 — approximated by the account's idle workers' own
-    budget_hours until EXPERIMENT_AUTOMATION_PLAN.md §8.1's setup/teardown
-    split lands and gives a tighter number)."""
+    """Accounts with at least one idle template-backed worker carrying the
+    config's required dataset, budget headroom for *est* hours this week
+    (C3), and a per-push session cap that fits it too (C2 — approximated by
+    the account's idle workers' own budget_hours until
+    EXPERIMENT_AUTOMATION_PLAN.md §8.1's setup/teardown split lands and gives
+    a tighter number). Returns [] outright when the config's dataset can't
+    be resolved at all (§3.4) — see _config_kaggle_dataset's docstring."""
     required_dataset = _config_kaggle_dataset(config_path)
+    if required_dataset is None:
+        return []
     out = []
     for account in kaggle_backend.list_accounts():
         idle = _idle_template_workers(account, required_dataset)
@@ -296,6 +290,50 @@ def _kaggle_candidate_accounts(est: float, config_path: str = "") -> List[Dict[s
             continue
         out.append(account)
     return out
+
+
+def _kaggle_block_code(est: float, config_path: str) -> str:
+    """Which of §3.5's distinct codes explains why Kaggle isn't usable for
+    this row right now (XDASH_V2_PLAN.md D7 — the previous version collapsed
+    every cause into one "quota-exhausted-or-no-idle-worker" string, so an
+    unmapped dataset and a genuinely exhausted account looked identical from
+    the Assignments board)."""
+    accounts = kaggle_backend.list_accounts()
+    if not accounts:
+        return "no-account"
+    required_dataset = _config_kaggle_dataset(config_path)
+    if required_dataset is None:
+        return "no-dataset-mapping"
+    with_dataset = [
+        a for a in accounts
+        if any(
+            not w.get("notebook_path") and required_dataset in (w.get("dataset_sources") or [])
+            for w in a.get("workers", [])
+        )
+    ]
+    if not with_dataset:
+        return "no-dataset-worker"
+    idle = [a for a in with_dataset if _idle_template_workers(a, required_dataset)]
+    if not idle:
+        return "pool-busy"
+    session_ok = [
+        a for a in idle
+        if est <= max(
+            (w.get("budget_hours") or settings.kaggle_default_budget_hours)
+            for w in _idle_template_workers(a, required_dataset)
+        )
+    ]
+    if not session_ok:
+        return "exceeds-session-cap"
+
+    def _fits_quota(account: Dict[str, Any]) -> bool:
+        remaining = (account.get("usage_estimate") or {}).get("remaining_hours")
+        return remaining is None or est <= remaining
+
+    quota_ok = [a for a in session_ok if _fits_quota(a)]
+    if not quota_ok:
+        return "quota-exhausted"
+    return "pool-busy"  # feasible in principle — lost a race with another row/tick for the slot
 
 
 def _account_last_activity(account: Dict[str, Any]) -> str:
@@ -388,9 +426,14 @@ def _dispatch_tick_locked() -> None:
         count = int(local_ok) + int(kaggle_ok)
         return (count, est)
 
+    # Computed once per row, not inside the sort key (XDASH_V2_PLAN.md D8 — a lambda calling
+    # feasibility(r) twice per row scored it twice, and each call re-walks every account's
+    # results directory via kaggle_backend.list_accounts()).
+    feasibility_by_id = {row["row_id"]: feasibility(row) for row in rows}
+
     # Rule 1: most-constrained first (fewest feasible resources), longest est_hours first
     # within an equal count — LPT within a tier, so long jobs don't get left for last.
-    scored = sorted(rows, key=lambda r: (feasibility(r)[0], -feasibility(r)[1]))
+    scored = sorted(rows, key=lambda r: (feasibility_by_id[r["row_id"]][0], -feasibility_by_id[r["row_id"]][1]))
 
     for row in scored:
         pool = row.get("pool") or "either"
@@ -409,12 +452,10 @@ def _dispatch_tick_locked() -> None:
             target = ("local", None)
 
         if target is None:
-            if pool == "kaggle_only":
-                reason = "quota-exhausted-or-no-idle-worker"
-            elif pool == "local_only":
-                reason = "local-busy"
-            else:
-                reason = "quota-exhausted-and-local-busy"
+            # §3.5's distinct codes (XDASH_V2_PLAN.md D7) — surface the more actionable Kaggle
+            # reason (a missing mapping/account/quota problem) over a bare "nothing free this
+            # tick", which is informational only and never something an operator can act on.
+            reason = "pool-busy" if pool == "local_only" else _kaggle_block_code(est, row.get("config_path", ""))
             if row["status"] != "blocked" or row.get("blocked_reason") != reason:
                 asg.claim_row(row["row_id"], {"status": "blocked", "blocked_reason": reason}, expected_status=row["status"])
             continue
@@ -440,19 +481,6 @@ def _dispatch_tick_locked() -> None:
             local_free -= 1
         else:
             account, worker = target[1]
-            if (row.get("run_mode") or "fresh") == "resume":
-                validation = kaggle_backend.validate_resume_state(worker["worker_id"], {
-                    "resume_from_worker_id": row.get("resume_from_worker_id", ""),
-                    "resume_from_run_id": row.get("resume_from_run_id", ""),
-                    "resume_from_results_dir": row.get("resume_from_results_dir", ""),
-                    "resume_from_manifest_path": row.get("resume_from_manifest_path", ""),
-                    "config_path": row.get("config_path", ""),
-                    "chain_id": row.get("chain_id", ""),
-                })
-                if not validation["ok"]:
-                    reason = "resume-invalid: " + "; ".join(validation["reasons"])
-                    asg.claim_row(row["row_id"], {"status": "blocked", "blocked_reason": reason[:300]}, expected_status=row["status"])
-                    continue
             claimed = asg.claim_row(
                 row["row_id"],
                 {
@@ -464,16 +492,7 @@ def _dispatch_tick_locked() -> None:
             if claimed is None:
                 continue
             try:
-                kaggle_backend.push(
-                    worker["worker_id"], row["config_path"], extra_args,
-                    run_mode=row.get("run_mode") or "fresh",
-                    resume_from_worker_id=row.get("resume_from_worker_id", ""),
-                    resume_from_run_id=row.get("resume_from_run_id", ""),
-                    resume_from_results_dir=row.get("resume_from_results_dir", ""),
-                    resume_from_manifest_path=row.get("resume_from_manifest_path", ""),
-                    chain_id=row.get("chain_id") or None,
-                    version_index=row.get("version_index"),
-                )
+                kaggle_backend.push(worker["worker_id"], row["config_path"], extra_args)
                 unit_ref = {"account": account["name"], "worker_id": worker["worker_id"]}
                 asg.update_row(row["row_id"], {"status": "kaggle-pushed", "unit_ref": unit_ref})
             except Exception as e:
@@ -506,7 +525,13 @@ def _settle_finished_batches(running_batches: Dict[str, Any]) -> None:
         rows = rows_by_batch.get(name, [])
         if not rows:
             continue
-        pending_or_inflight = [r for r in rows if r["status"] in {"pending"} or r["status"] in IN_FLIGHT_ROW_STATUSES]
+        # "dispatching" (D5) is a live row too — a crash between claiming a row and recording
+        # what it was claimed for leaves it here with no unit yet; counting it as settled would
+        # let the batch report "done" while that row is silently stranded forever.
+        pending_or_inflight = [
+            r for r in rows
+            if r["status"] in {"pending", "dispatching"} or r["status"] in IN_FLIGHT_ROW_STATUSES
+        ]
         if pending_or_inflight:
             continue
         blocked = [r for r in rows if r["status"] == "blocked"]
@@ -575,24 +600,36 @@ def _resolve_row(row: Dict[str, Any], succeeded: bool, raw_status: str) -> None:
 
 # --------------------------------------------------------------------------- reconciliation + poller
 def _reconcile_on_startup() -> None:
-    """Rows left local-queued/kaggle-pushed when the process died have no
-    path back on their own — the completion hook that would resolve them
-    only fires from inside _tick(), and a crashed process never got to run
-    it. Re-resolve each in-flight row against its unit before the first
+    """Rows left dispatching/local-queued/kaggle-pushed when the process died
+    have no path back on their own — the completion hook that would resolve
+    them only fires from inside _tick(), and a crashed process never got to
+    run it. Re-resolve each in-flight row against its unit before the first
     dispatch tick, so a crash strands a batch's *progress*, never the batch
-    itself silently forever."""
+    itself silently forever (XDASH_V2_PLAN.md D5)."""
     for row in asg.list_rows():
-        if row["status"] not in IN_FLIGHT_ROW_STATUSES:
+        status = row["status"]
+        if status not in IN_FLIGHT_ROW_STATUSES and status != "dispatching":
             continue
         unit_ref = row.get("unit_ref") or {}
-        if row["status"] == "local-queued":
+        if status == "dispatching":
+            if not unit_ref:
+                # The crash landed between claiming the row and recording what it was claimed
+                # for — no unit exists yet, so the only honest recovery is to hand it back to
+                # the pool rather than leave it stranded in "dispatching" forever.
+                asg.claim_row(row["row_id"], {"status": "pending"}, expected_status=status)
+                continue
+            # A populated unit_ref while still "dispatching" means the crash landed between the
+            # two update_row() calls that follow a successful claim — resolve it exactly like
+            # the matching in-flight status below, keyed off which shape unit_ref actually has.
+            status = "local-queued" if "eval_item_id" in unit_ref else "kaggle-pushed"
+        if status == "local-queued":
             eval_id = unit_ref.get("eval_item_id")
             item = next((i for i in scheduler.list_items()["items"] if i["id"] == eval_id), None)
             if item is None:
                 continue
             if item["status"] in ("completed", "failed", "cancelled", "skipped"):
                 _resolve_row(row, item["status"] == "completed", item["status"])
-        elif row["status"] == "kaggle-pushed":
+        elif status == "kaggle-pushed":
             worker_id = unit_ref.get("worker_id")
             if not worker_id:
                 continue

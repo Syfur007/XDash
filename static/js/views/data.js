@@ -12,9 +12,10 @@
 
 state.datasetList = [];
 state.selectedDatasetFragment = null;
+state.datasetMapEntries = []; // [{name, kaggle_dataset, source}] — GET /api/datasets/kaggle-map
 
 async function loadDataView() {
-  await Promise.all([loadDatasetCards(), loadTestEvalsTable()]);
+  await Promise.all([loadDatasetCards(), loadTestEvalsTable(), loadDatasetMap()]);
 }
 
 async function loadDatasetCards() {
@@ -149,9 +150,88 @@ async function loadTestEvalsTable() {
   }
 }
 
+// ------------------------------------------------------------ Kaggle dataset-slug mapping
+// XDASH_V2_PLAN.md §3.4's editor: GET/PUT /api/datasets/kaggle-map
+// (backend/dataset_map.py), the map the Experiments spine's Kaggle dispatch
+// resolves a config's `dataset.name` against before every push, for configs
+// that don't declare their own `dataset.kaggle_dataset`.
+async function loadDatasetMap() {
+  const body = document.getElementById("dataset-map-body");
+  if (!body) return;
+  try {
+    const data = await api("/api/datasets/kaggle-map");
+    state.datasetMapEntries = data.entries || [];
+    renderDatasetMap();
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="4" class="empty-state">Couldn't load dataset mapping: ${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+function datasetMapRowHtml(entry) {
+  const name = entry ? entry.name : "";
+  const slug = entry ? entry.kaggle_dataset : "";
+  const source = entry ? entry.source : "";
+  const sourceBadge = source === "dataset_map"
+    ? `<span class="badge slate" title="data/<profile>/dataset_map.json">XDash map</span>`
+    : source === "profile_default"
+      ? `<span class="badge slate" title="repos/<profile>.yaml's kaggle_dataset_map">profile default</span>`
+      : "";
+  return `<tr class="dataset-map-row">
+    <td><input class="text-input" data-field="name" value="${escapeHtml(name)}" placeholder="e.g. clinicdb" /></td>
+    <td><input class="text-input" data-field="slug" value="${escapeHtml(slug)}" placeholder="username/dataset-slug" /></td>
+    <td>${sourceBadge}</td>
+    <td><button class="btn btn-sm btn-ghost" data-remove-map-row>Remove</button></td>
+  </tr>`;
+}
+
+function renderDatasetMap() {
+  const body = document.getElementById("dataset-map-body");
+  const count = document.getElementById("dataset-map-count");
+  if (!body) return;
+  count.textContent = state.datasetMapEntries.length ? String(state.datasetMapEntries.length) : "";
+  body.innerHTML = state.datasetMapEntries.length
+    ? state.datasetMapEntries.map(datasetMapRowHtml).join("")
+    : `<tr><td colspan="4" class="empty-state">No dataset mappings yet — add one below, or declare <span style="font-family:var(--mono)">dataset.kaggle_dataset</span> directly in the config.</td></tr>`;
+  wireDatasetMapRows();
+}
+
+function wireDatasetMapRows() {
+  document.querySelectorAll("#dataset-map-body [data-remove-map-row]").forEach((btn) => {
+    btn.addEventListener("click", () => btn.closest("tr").remove());
+  });
+}
+
+function addDatasetMapRow() {
+  const body = document.getElementById("dataset-map-body");
+  if (!body) return;
+  if (!state.datasetMapEntries.length && body.querySelector(".empty-state")) body.innerHTML = "";
+  body.insertAdjacentHTML("beforeend", datasetMapRowHtml(null));
+  wireDatasetMapRows();
+}
+
+async function saveDatasetMap() {
+  const rows = document.querySelectorAll("#dataset-map-body .dataset-map-row");
+  const entries = {};
+  rows.forEach((row) => {
+    const name = row.querySelector('[data-field="name"]').value.trim();
+    const slug = row.querySelector('[data-field="slug"]').value.trim();
+    if (name && slug) entries[name] = slug;
+  });
+  try {
+    const data = await api("/api/datasets/kaggle-map", { method: "PUT", body: JSON.stringify({ entries }) });
+    state.datasetMapEntries = data.entries || [];
+    renderDatasetMap();
+    toast("Dataset mapping saved", "ok");
+  } catch (e) {
+    toast("Couldn't save dataset mapping: " + e.message, "err");
+  }
+}
+
 function initDataButtons() {
   document.getElementById("btn-refresh-data").addEventListener("click", loadDataView);
   document.getElementById("btn-channel-preview").addEventListener("click", previewChannels);
+  document.getElementById("btn-dataset-map-add").addEventListener("click", addDatasetMapRow);
+  document.getElementById("btn-dataset-map-save").addEventListener("click", saveDatasetMap);
 }
 
 initDataButtons();

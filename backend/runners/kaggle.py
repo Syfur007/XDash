@@ -14,7 +14,7 @@ RUNNER_ID_PREFIX = "kaggle:"
 
 # Kaggle's own native worker statuses (backend/kaggle.py) -> canonical. A
 # worker with no status yet (never pushed) isn't represented as a RunUnit at
-# all — see KaggleRunner.list_units() — the same way an mclab config that's
+# all — see KaggleRunner.list_units() — the same way a local-device config that's
 # never been launched has no Terminals entry either.
 _STATUS_MAP = {
     "push_failed": "failed",
@@ -33,11 +33,11 @@ _STATUS_MAP = {
 # 2026 — DASHBOARD_REDESIGN_PLAN.md §2.1's fact-check): `kernels` has no
 # stop/cancel/interrupt subcommand. `kernels delete` exists but removes the
 # kernel from the account entirely — a materially more destructive, more
-# permanent action than mclab's "kill" (which just ends a tmux session, the
+# permanent action than the local device's "kill" (which just ends a tmux session, the
 # run's history stays visible). Deliberately not wired as this runner's
 # `kill` capability for that reason; a future "delete kernel" action, if
 # wanted, should be its own explicit, separately-confirmed control, not
-# hidden behind a button labeled the same as mclab's Kill.
+# hidden behind a button labeled the same as the local device's Kill.
 _STOP_KILL_SUPPORTED = False
 
 

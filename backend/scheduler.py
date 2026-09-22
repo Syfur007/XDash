@@ -354,8 +354,10 @@ def _tick():
     # run after _lock is released.
     if just_finished:
         from . import batch_runner
+        from . import experiments
         for item in just_finished:
             batch_runner.on_scheduler_item_finished(item["id"])
+            experiments.on_scheduler_item_finished(item["id"])
 
 
 _worker_started = False

@@ -1,4 +1,4 @@
-"""LocalRunner — mclab, the machine the dashboard itself runs on. A thin
+"""LocalRunner — the local machine the dashboard itself runs on. A thin
 facade over terminals.py/tmux_runner.py (execution) and scheduler.py (the
 concurrency ceiling it already computes) — no new state, no behavior
 change to any of those modules."""
@@ -50,7 +50,7 @@ def _to_unit(term: Dict[str, Any]) -> RunUnit:
 class LocalRunner(Runner):
     id = RUNNER_ID
     kind = "local"
-    label = "mclab"
+    label = "Local device"
     capabilities = RunnerCapabilities(
         direct_launch=True, live_log=True, stop=True, kill=True, restart=True, queue=True,
     )

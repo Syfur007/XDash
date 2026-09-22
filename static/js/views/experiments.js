@@ -1,15 +1,17 @@
 // static/js/views/experiments.js
 //
-// Experiments tab wiring (DASHBOARD_REDESIGN_PLAN.md §3.3): Active/Queue/
-// Runs & Results are Terminals/Scheduler/Runs' own pre-existing markup and
-// render functions, relocated under one nav item with a subtab strip — see
-// index.html and app.js's initSubtabStrip(). This file only adds the one
-// genuinely new piece: a compact "also running on Kaggle" summary at the
-// top of Active, sourced from GET /api/experiments/active, so Active
-// answers "what's executing right now" across *every* runner instead of
-// just mclab's tmux sessions — Kaggle's own full worker cards (push/
-// refresh/download) still live on the Runners tab, this is a read-only
-// glance, not a duplicate control surface.
+// Experiments tab wiring (XDASH_V2_PLAN.md §6.4): the "Sessions" subtab is
+// Terminals' own pre-existing markup and render functions, relocated under
+// the Experiments nav item alongside the spine (Runs) and Configs (browse/
+// create) subtabs — see index.html and app.js's initSubtabStrip(). This
+// file only adds the one genuinely new piece: a compact "also running on
+// Kaggle" / "also running under other repos" summary at the top of
+// Sessions, sourced from GET /api/experiments/active and
+// GET /api/repos/sessions, so Sessions answers "what's executing right
+// now" across *every* runner and repo instead of just the local device's tmux
+// sessions — Kaggle's own full account cards (push/refresh/download) still
+// live on the Compute tab, this is a read-only glance, not a duplicate
+// control surface.
 //
 // Same classic-<script>-sharing-global-scope model as every other view file.
 
@@ -24,7 +26,7 @@ async function loadExperimentsKaggleActive() {
   }
   const kaggleUnits = (data.units || []).filter((u) => u.runner_id.startsWith("kaggle:"));
   if (!kaggleUnits.length) {
-    body.innerHTML = `<div class="empty-state">Nothing in flight on Kaggle right now — push a worker from the Runners tab.</div>`;
+    body.innerHTML = `<div class="empty-state">Nothing in flight on Kaggle right now — launch one from the Runs subtab's "+ Run".</div>`;
     return;
   }
   body.innerHTML = kaggleUnits.map((u) => `
@@ -84,9 +86,7 @@ async function loadExperimentsOtherRepos() {
 }
 
 function initExperimentsSubtabs() {
-  initSubtabStrip("experiments-subtabs", (key) => {
-    if (key === "runs" && !state.runGroups.length) loadRuns();
-  });
+  initSubtabStrip("experiments-subtabs", () => {});
 }
 
 initExperimentsSubtabs();

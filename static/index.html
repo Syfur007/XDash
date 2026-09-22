@@ -10,7 +10,7 @@
 
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/dracula.min.css">
-<link rel="stylesheet" href="styles.css?v=6">
+<link rel="stylesheet" href="styles.css?v=7">
 </head>
 <body>
 
@@ -26,38 +26,26 @@
       </div>
     </div>
 
+    <!-- XDASH_V2_PLAN.md §6.2's information architecture: Lab / Experiments /
+         Results / Compute / Data / Settings. Replaces the old Configs /
+         Templates / Experiments / Runners / Assignments / Reports / History
+         tab set — see each section below for where that content landed. -->
     <nav class="nav">
-      <div class="nav-item active" data-view="overview">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="3" y="4" width="7" height="7" rx="1"/><rect x="14" y="4" width="7" height="7" rx="1"/><rect x="3" y="13" width="7" height="7" rx="1"/><rect x="14" y="13" width="7" height="7" rx="1"/></svg>
-        Overview
-      </div>
-      <div class="nav-item" data-view="configs">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M4 9h16M9 9v11"/></svg>
-        Configs
-      </div>
-      <div class="nav-item" data-view="templates">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 5h16v14H4z"/><path d="M8 9h8M8 13h5"/><path d="M16 19v2"/></svg>
-        Templates
+      <div class="nav-item active" data-view="lab">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="9"/></svg>
+        Lab
       </div>
       <div class="nav-item" data-view="experiments">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 4h16v16H4z"/><path d="M8 9l3 3-3 3M13 15h3"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3v18M6 7h13a2 2 0 0 1 0 4H6M6 15h13a2 2 0 0 1 0 4H6"/></svg>
         Experiments
       </div>
-      <div class="nav-item" data-view="runners">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12h4l2.5 7L13 5l2.5 7H21"/></svg>
-        Runners
-      </div>
-      <div class="nav-item" data-view="assignments">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M9 3h6v4H9z"/><path d="M6 7h12v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1z"/><path d="M9 12h6M9 16h6"/></svg>
-        Assignments
-      </div>
-      <div class="nav-item" data-view="reports">
+      <div class="nav-item" data-view="results">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M6 3h9l5 5v13H6z"/><path d="M14 3v5h5M9 13h6M9 17h6M9 9h2"/></svg>
-        Reports
+        Results
       </div>
-      <div class="nav-item" data-view="history">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
-        History
+      <div class="nav-item" data-view="compute">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12h4l2.5 7L13 5l2.5 7H21"/></svg>
+        Compute
       </div>
       <div class="nav-item" data-view="data">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
@@ -108,155 +96,101 @@
   <!-- ============================================================ main -->
   <main class="main">
 
-    <!-- ---------------------------------------------------- Overview view -->
-    <section class="view active" id="view-overview">
+    <!-- ---------------------------------------------------- Lab view -->
+    <section class="view active" id="view-lab">
       <div class="view-header">
         <div>
-          <div class="view-title">Overview</div>
-          <div class="view-sub">Fleet snapshot — every runner's capacity, and what's happened recently across all of them.</div>
+          <div class="view-title">Lab</div>
+          <div class="view-sub">What is running, what is stuck and why, and what just finished — the control room (XDASH_V2_PLAN.md §6.3).</div>
         </div>
+        <button class="btn btn-ghost" id="btn-lab-refresh">Refresh</button>
       </div>
 
       <div class="panel">
-        <div class="panel-header"><span>Runners</span></div>
-        <div class="entity-grid" id="overview-runners-body" style="padding:14px 16px;">
+        <div class="panel-header"><span>Capacity</span></div>
+        <div class="entity-grid" id="lab-slots-body" style="padding:14px 16px;">
           <div class="empty-state">Loading…</div>
         </div>
       </div>
 
       <div class="panel" style="margin-top:16px;">
-        <div class="panel-header"><span>Recent activity</span></div>
-        <div id="overview-activity-body" style="padding:6px 16px 16px;">
-          <div class="empty-state">Loading…</div>
+        <div class="panel-header"><span>Running</span><span id="lab-running-count" class="badge slate">0</span></div>
+        <div class="entity-grid" id="lab-running-body" style="padding:14px 16px;">
+          <div class="empty-state">Nothing running.</div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-header"><span>⚠ Blocked</span><span id="lab-blocked-count" class="badge slate">0</span></div>
+        <div id="lab-blocked-body" style="padding:6px 16px 14px;">
+          <div class="empty-state">Nothing blocked.</div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-header">
+          <span>Queued <b id="lab-queued-count">0</b> &nbsp;·&nbsp; Done <b id="lab-done-count">0</b> &nbsp;·&nbsp; Failed <b id="lab-failed-count">0</b></span>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-header"><span>Recent</span></div>
+        <div id="lab-recent-body" style="padding:6px 16px 14px;">
+          <div class="empty-state">Nothing recent.</div>
         </div>
       </div>
     </section>
 
-    <!-- ---------------------------------------------------- Templates view -->
-    <section class="view" id="view-templates">
-      <div class="view-header">
-        <div>
-          <div class="view-title">Templates</div>
-          <div class="view-sub">Notebook launch templates available to Kaggle workers and their current validation state.</div>
-        </div>
-        <button class="btn btn-ghost" id="btn-refresh-templates">Refresh</button>
-      </div>
-      <div class="panel">
-        <div class="panel-header"><span>Notebook templates</span><span id="template-count"></span></div>
-        <div class="template-list" id="template-list-body"><div class="empty-state">Loading…</div></div>
-      </div>
-    </section>
-
-    <!-- ---------------------------------------------------- Configs view -->
-    <section class="view" id="view-configs">
-      <div class="view-header">
-        <div>
-          <div class="view-title">Configs</div>
-          <div class="view-sub">Browse, edit, launch, and visually build experiment configs from the configs/ directory.</div>
-        </div>
-        <button class="btn btn-ghost" id="btn-refresh-configs">Refresh</button>
-      </div>
-
-      <div class="subtab-strip" id="configs-subtabs">
-        <button class="subtab-btn active" data-subtab="browse">Browse</button>
-        <button class="subtab-btn" data-subtab="create">Create</button>
-      </div>
-
-      <div class="subtab-panel active" data-subtab="browse">
-        <div class="configs-layout">
-          <div class="panel config-tree">
-            <div class="panel-header"><span>Configs</span><span id="config-count"></span></div>
-            <div class="panel-filter"><input class="text-input" id="config-filter" placeholder="Filter configs…" autocomplete="off" /></div>
-            <div class="config-tree-body" id="config-tree-body">
-              <div class="empty-state">Loading…</div>
-            </div>
-          </div>
-
-          <div class="panel editor-pane">
-            <div class="editor-toolbar">
-              <span class="editor-path" id="editor-path">No config selected</span>
-              <span class="editor-status" id="editor-status"></span>
-              <button class="btn btn-sm btn-ghost" id="btn-toggle-resolved" disabled title="Show the fully compose-merged, schema-validated config — what utils.config.load_config() actually returns, not just this file's own lines">Show resolved</button>
-              <button class="btn btn-sm" id="btn-save-config" disabled>Save changes</button>
-            </div>
-            <div class="editor-body" id="editor-body">
-              <div class="empty-state">Select a config on the left to view and edit it.</div>
-            </div>
-            <div class="editor-body hidden" id="resolved-config-body" style="overflow:auto; display:block; padding:16px;"></div>
-            <div class="run-bar" id="run-bar" style="display:none;">
-              <label>RUN ON</label>
-              <select id="run-target-select"><option value="local">mclab</option></select>
-              <label>MODE</label>
-              <select id="run-mode">
-                <option value="train">train.py</option>
-                <option value="eval">eval.py</option>
-              </select>
-              <label>EXTRA ARGS</label>
-              <input class="text-input grow" id="run-extra-args" placeholder="--epochs 10 --lr 0.0005" />
-              <button class="btn btn-primary" id="btn-run">Run ▸</button>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="subtab-panel" data-subtab="create">
-        <div class="creator-layout">
-          <div class="creator-form-col">
-            <div class="panel">
-              <div class="panel-header"><span>Start from</span></div>
-              <div class="creator-base-row">
-                <select id="creator-base-select"><option value="">— pick a config to use as a template —</option></select>
-                <button class="btn btn-sm btn-primary" id="btn-load-base">Load as template</button>
-                <button class="btn btn-sm btn-ghost" id="btn-blank-base">Start blank</button>
-              </div>
-            </div>
-
-            <div id="creator-sections"></div>
-
-            <div class="panel" style="margin-top:18px;">
-              <div class="panel-header"><span>Save config</span></div>
-              <div class="creator-save-row">
-                <div class="field">
-                  <label>Folder</label>
-                  <select id="creator-folder-select"><option value="">general</option></select>
-                  <input class="text-input hidden" id="creator-new-folder-input" placeholder="new-folder-name" />
-                </div>
-                <div class="field grow">
-                  <label>Filename</label>
-                  <input class="text-input grow" id="creator-filename-input" placeholder="my_experiment.yaml" />
-                </div>
-                <button class="btn btn-primary" id="btn-save-creator-config">Save config</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="creator-preview-col">
-            <div class="panel creator-preview-panel">
-              <div class="panel-header"><span>Live preview</span></div>
-              <pre class="creator-preview-body" id="creator-preview-body"></pre>
-            </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ---------------------------------------------------- Experiments view -->
+    <!-- ---------------------------------------------------- Experiments view (XDASH_V2_PLAN.md §6.4) -->
+    <!-- Browse -> compose -> launch -> track, backed by the Experiment/Attempt model
+         (GET /api/experiments). Folds in what used to be three separate tabs:
+         Configs (now the "Configs" subtab), and the old Experiments tab's "Active"
+         subtab (now "Sessions" — local device tmux sessions + a glance at what's running
+         elsewhere on Kaggle / under other repos). -->
     <section class="view" id="view-experiments">
       <div class="view-header">
         <div>
           <div class="view-title">Experiments</div>
-          <div class="view-sub">Launch, watch, queue, and review runs — across every runner (mclab and Kaggle).</div>
+          <div class="view-sub">Browse configs, launch runs, and track every Experiment/Attempt — local device and Kaggle together.</div>
         </div>
       </div>
 
       <div class="subtab-strip" id="experiments-subtabs">
-        <button class="subtab-btn active" data-subtab="active">Active</button>
-        <button class="subtab-btn" data-subtab="queue">Queue</button>
-        <button class="subtab-btn" data-subtab="runs">Runs & Results</button>
+        <button class="subtab-btn active" data-subtab="runs">Runs</button>
+        <button class="subtab-btn" data-subtab="sessions">Sessions</button>
+        <button class="subtab-btn" data-subtab="configs">Configs</button>
       </div>
 
-      <!-- ····························································· Active -->
-      <div class="subtab-panel active" data-subtab="active">
+      <!-- ····························································· Runs (the spine) -->
+      <div class="subtab-panel active" data-subtab="runs">
+        <div class="job-actions" style="margin-bottom:12px; justify-content:flex-end;">
+          <select id="spine-status-filter" style="margin-right:8px;">
+            <option value="">All statuses</option>
+            <option value="pending">Pending</option>
+            <option value="blocked">Blocked</option>
+            <option value="dispatching">Dispatching</option>
+            <option value="running">Running</option>
+            <option value="done">Done</option>
+            <option value="failed">Failed</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+          <button class="btn btn-ghost" id="btn-spine-refresh">Refresh</button>
+          <button class="btn btn-primary" id="btn-spine-new-run">+ Run</button>
+        </div>
+
+        <div class="panel">
+          <div class="panel-header"><span>Experiments</span><span id="spine-count"></span></div>
+          <div style="padding:0 16px 16px; overflow:auto;">
+            <table class="compare-table" style="width:100%;">
+              <thead><tr><th>Experiment</th><th>Config</th><th>Seed</th><th>Batch</th><th>Status</th><th>Slot / why blocked</th><th>Updated</th><th></th></tr></thead>
+              <tbody id="spine-table-body"><tr><td colspan="8" class="empty-state">Loading…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- ····························································· Sessions -->
+      <div class="subtab-panel" data-subtab="sessions">
         <div class="panel" style="margin-bottom:16px;">
           <div class="panel-header"><span>Also running on Kaggle</span></div>
           <div class="kaggle-grid" id="experiments-kaggle-active-body" style="padding:12px 16px;">
@@ -272,7 +206,7 @@
         </div>
 
         <div class="job-actions" style="margin-bottom:12px;">
-          <button class="btn btn-ghost" id="btn-refresh-terminals">Refresh mclab sessions</button>
+          <button class="btn btn-ghost" id="btn-refresh-terminals">Refresh local device sessions</button>
         </div>
         <div class="configs-layout">
           <div class="panel config-tree">
@@ -292,91 +226,121 @@
               <div class="job-actions" id="terminal-actions"></div>
             </div>
             <div class="editor-body" id="terminal-body">
-              <div class="empty-state">Select a session on the left, or launch a new one from the Configs tab.</div>
+              <div class="empty-state">Select a session on the left, or launch a new one from the Configs subtab.</div>
             </div>
           </div>
         </div>
       </div>
 
-      <!-- ····························································· Queue -->
-      <div class="subtab-panel" data-subtab="queue">
-        <div class="job-actions" style="margin-bottom:12px;">
-          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-pause" title="Pause to stop new items launching — already-running items keep going">Queue: running</button>
-          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-notify" title="Send a notification (via the channels configured on the Runners tab) when a scheduled item finishes or fails">Notify on finish: off</button>
-          <button class="btn btn-ghost" id="btn-refresh-scheduler">Refresh</button>
+      <!-- ····························································· Configs -->
+      <div class="subtab-panel" data-subtab="configs">
+        <div class="job-actions" style="margin-bottom:12px; justify-content:flex-end;">
+          <button class="btn btn-ghost" id="btn-refresh-configs">Refresh</button>
         </div>
 
-        <div class="compute-summary-strip" id="scheduler-summary-strip"></div>
-
-        <div class="panel">
-          <div class="panel-header"><span>Concurrency</span></div>
-          <div class="concurrency-row">
-            <span class="concurrency-label">Max experiments running at once</span>
-            <div class="stepper">
-              <button class="stepper-btn" id="btn-concurrency-minus">−</button>
-              <span class="stepper-value" id="concurrency-value">1</span>
-              <button class="stepper-btn" id="btn-concurrency-plus">+</button>
-            </div>
-          </div>
-          <div style="padding:0 16px 14px;">
-            <div class="concurrency-bar-track"><div class="concurrency-bar-fill" id="concurrency-bar-fill" style="width:0%;"></div></div>
-          </div>
+        <div class="subtab-strip" id="configs-subtabs">
+          <button class="subtab-btn active" data-subtab="browse">Browse</button>
+          <button class="subtab-btn" data-subtab="create">Create</button>
         </div>
 
-        <div class="panel" style="margin-top:16px;">
-          <div class="panel-header">
-            <span>Add to schedule</span>
-            <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-more">More ways to add</button>
-          </div>
-          <div class="scheduler-add-form">
-            <div class="field grow">
-              <label>Config</label>
-              <select id="scheduler-config-select"><option value="">— pick a config —</option></select>
-            </div>
-            <div class="field">
-              <label>Mode</label>
-              <select id="scheduler-mode-select">
-                <option value="train">Train</option>
-                <option value="eval">Eval</option>
-                <option value="both">Train + Eval</option>
-              </select>
-            </div>
-            <div class="field grow">
-              <label>Extra args</label>
-              <input class="text-input grow" id="scheduler-extra-args" placeholder="--epochs 10 --lr 0.0005" />
-            </div>
-            <button class="btn btn-primary" id="btn-schedule-add">Add to schedule</button>
-            <button class="btn btn-sm btn-ghost" id="btn-schedule-save-template" title="Save the fields above as a reusable template">Save as template</button>
-          </div>
-          <div class="hidden" id="scheduler-more-panel">
-            <div class="scheduler-add-form" style="padding-top:0; border-top:1px dashed var(--border-soft);">
-              <div class="field grow">
-                <label>Bulk add — every config in a category</label>
-                <select id="scheduler-bulk-category"><option value="">— pick a category —</option></select>
+        <div class="subtab-panel active" data-subtab="browse">
+          <div class="configs-layout">
+            <div class="panel config-tree">
+              <div class="panel-header"><span>Configs</span><span id="config-count"></span></div>
+              <div class="panel-filter"><input class="text-input" id="config-filter" placeholder="Filter configs…" autocomplete="off" /></div>
+              <div class="config-tree-body" id="config-tree-body">
+                <div class="empty-state">Loading…</div>
               </div>
-              <button class="btn btn-ghost" id="btn-scheduler-bulk-add">Add all in category</button>
             </div>
-            <div class="view-sub" style="padding:4px 16px 0;">Saved templates</div>
-            <div id="scheduler-templates-body" class="entity-list" style="padding:10px 16px 16px;"></div>
+
+            <div class="panel editor-pane">
+              <div class="editor-toolbar">
+                <span class="editor-path" id="editor-path">No config selected</span>
+                <span class="editor-status" id="editor-status"></span>
+                <button class="btn btn-sm btn-ghost" id="btn-toggle-resolved" disabled title="Show the fully compose-merged, schema-validated config — what utils.config.load_config() actually returns, not just this file's own lines">Show resolved</button>
+                <button class="btn btn-sm" id="btn-save-config" disabled>Save changes</button>
+              </div>
+              <div class="editor-body" id="editor-body">
+                <div class="empty-state">Select a config on the left to view and edit it.</div>
+              </div>
+              <div class="editor-body hidden" id="resolved-config-body" style="overflow:auto; display:block; padding:16px;"></div>
+              <div class="run-bar" id="run-bar" style="display:none;">
+                <label>RUN ON</label>
+                <select id="run-target-select"><option value="local">Local device</option></select>
+                <label>MODE</label>
+                <select id="run-mode">
+                  <option value="train">train.py</option>
+                  <option value="eval">eval.py</option>
+                </select>
+                <label>EXTRA ARGS</label>
+                <input class="text-input grow" id="run-extra-args" placeholder="--epochs 10 --lr 0.0005" />
+                <button class="btn btn-primary" id="btn-run">Run ▸</button>
+              </div>
+            </div>
           </div>
         </div>
 
-        <div class="scheduler-section">
-          <h3 class="scheduler-section-title">Running <span class="count-badge" id="count-running-sched">0</span></h3>
-          <div id="scheduler-running-list" class="entity-grid"><div class="empty-state">Nothing running.</div></div>
+        <div class="subtab-panel" data-subtab="create">
+          <div class="creator-layout">
+            <div class="creator-form-col">
+              <div class="panel">
+                <div class="panel-header"><span>Start from</span></div>
+                <div class="creator-base-row">
+                  <select id="creator-base-select"><option value="">— pick a config to use as a template —</option></select>
+                  <button class="btn btn-sm btn-primary" id="btn-load-base">Load as template</button>
+                  <button class="btn btn-sm btn-ghost" id="btn-blank-base">Start blank</button>
+                </div>
+              </div>
+
+              <div id="creator-sections"></div>
+
+              <div class="panel" style="margin-top:18px;">
+                <div class="panel-header"><span>Save config</span></div>
+                <div class="creator-save-row">
+                  <div class="field">
+                    <label>Folder</label>
+                    <select id="creator-folder-select"><option value="">general</option></select>
+                    <input class="text-input hidden" id="creator-new-folder-input" placeholder="new-folder-name" />
+                  </div>
+                  <div class="field grow">
+                    <label>Filename</label>
+                    <input class="text-input grow" id="creator-filename-input" placeholder="my_experiment.yaml" />
+                  </div>
+                  <button class="btn btn-primary" id="btn-save-creator-config">Save config</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="creator-preview-col">
+              <div class="panel creator-preview-panel">
+                <div class="panel-header"><span>Live preview</span></div>
+                <pre class="creator-preview-body" id="creator-preview-body"></pre>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="scheduler-section">
-          <h3 class="scheduler-section-title">Scheduled <span class="count-badge" id="count-pending-sched">0</span> <span class="bulk-bar" id="scheduler-pending-bulk-bar"></span></h3>
-          <div id="scheduler-pending-list" class="entity-list"><div class="empty-state">Nothing queued.</div></div>
-        </div>
-        <div class="scheduler-section">
-          <h3 class="scheduler-section-title">Past <span class="count-badge" id="count-past-sched">0</span> <span class="bulk-bar" id="scheduler-past-bulk-bar"></span></h3>
-          <div id="scheduler-past-list" class="entity-grid"><div class="empty-state">No history yet.</div></div>
+      </div>
+    </section>
+
+    <!-- ---------------------------------------------------- Results view (XDASH_V2_PLAN.md §6.6) -->
+    <!-- Runs, Reports, and Files (formerly History), all of which already existed —
+         merged under one nav item. TensorBoard is a Compute toolbar item, not a tab. -->
+    <section class="view" id="view-results">
+      <div class="view-header">
+        <div>
+          <div class="view-title">Results</div>
+          <div class="view-sub">Runs, evaluation reports, and every file training writes to disk.</div>
         </div>
       </div>
 
-      <!-- ···························································· Runs & Results -->
-      <div class="subtab-panel" data-subtab="runs">
+      <div class="subtab-strip" id="results-subtabs">
+        <button class="subtab-btn active" data-subtab="runs">Runs</button>
+        <button class="subtab-btn" data-subtab="reports">Reports</button>
+        <button class="subtab-btn" data-subtab="files">Files</button>
+      </div>
+
+      <!-- ····························································· Runs -->
+      <div class="subtab-panel active" data-subtab="runs">
         <div class="job-actions" style="margin-bottom:12px; flex-wrap:wrap;">
           <button class="btn btn-sm btn-ghost" id="btn-run-compare-mode" title="Click cells to select 2+ runs, then compare them side by side">Compare runs</button>
           <button class="btn btn-primary hidden" id="btn-compare-runs">Compare selected (<span id="run-compare-count">0</span>)</button>
@@ -410,25 +374,164 @@
           </div>
         </div>
       </div>
+
+      <!-- ····························································· Reports -->
+      <div class="subtab-panel" data-subtab="reports">
+        <div class="job-actions" style="margin-bottom:12px;">
+          <div class="view-sub" style="flex:1;">Evaluation reports written to <span id="reports-dir-label" style="font-family:var(--mono)"></span>. Select 2+ to compare.</div>
+          <button class="btn btn-primary hidden" id="btn-compare-reports">Compare selected (<span id="compare-count">0</span>)</button>
+          <button class="btn btn-ghost" id="btn-refresh-reports">Refresh</button>
+        </div>
+
+        <div class="configs-layout">
+          <div class="panel config-tree">
+            <div class="panel-header"><span>Reports</span><span id="report-count"></span></div>
+            <div class="panel-filter"><input class="text-input" id="report-filter" placeholder="Filter reports…" autocomplete="off" /></div>
+            <div class="config-tree-body" id="report-list-body">
+              <div class="empty-state">Loading…</div>
+            </div>
+          </div>
+
+          <div class="panel editor-pane">
+            <div class="editor-body" id="report-body" style="overflow:auto; display:block; padding:20px;">
+              <div class="empty-state">Select a report on the left to view its details.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ····························································· Files -->
+      <div class="subtab-panel" data-subtab="files">
+        <div class="job-actions" style="margin-bottom:12px;">
+          <div class="view-sub" style="flex:1;">Browse every file written under <span id="history-logdir" style="font-family:var(--mono)"></span>.</div>
+          <button class="btn btn-ghost" id="btn-refresh-history">Refresh</button>
+        </div>
+
+        <div class="configs-layout">
+          <div class="panel history-tree-panel">
+            <div class="panel-header history-panel-header">
+              <select id="history-source" class="history-source-select">
+                <option value="logs">📄 Logs</option>
+                <option value="images">🖼 Images</option>
+              </select>
+              <span id="history-dir-label" class="history-dir-label"></span>
+            </div>
+            <div class="history-tree-body" id="history-tree-body">
+              <div class="empty-state">Loading…</div>
+            </div>
+          </div>
+
+          <div class="panel editor-pane">
+            <div class="editor-toolbar" id="history-toolbar">
+              <span class="editor-path" id="history-file-path">No file selected</span>
+              <span class="editor-status" id="history-file-meta"></span>
+            </div>
+            <div class="editor-body" id="history-file-body" style="overflow:auto;">
+              <div class="empty-state">Select a file on the left to view it.</div>
+            </div>
+          </div>
+        </div>
+      </div>
     </section>
 
-    <!-- ---------------------------------------------------- Runners view -->
-    <section class="view" id="view-runners">
+    <!-- ---------------------------------------------------- Compute view (XDASH_V2_PLAN.md §6.6) -->
+    <!-- Local device capacity, the local scheduler's concurrency/pause/queue (shared, live
+         capacity accounting with the Experiments spine dispatcher — see
+         backend/experiments.py's _local_free_slots()), machine stats, TensorBoard,
+         and Kaggle accounts + alert channels. No worker management (§3.7 retires
+         Kaggle workers — the spine pushes straight to a per-account kernel). -->
+    <section class="view" id="view-compute">
       <div class="view-header">
         <div>
-          <div class="view-title">Runners</div>
-          <div class="view-sub">Every compute backend this dashboard can launch on — mclab, plus each configured Kaggle account. Workers below also show up in Experiments → Active while a push is in flight.</div>
+          <div class="view-title">Compute</div>
+          <div class="view-sub">Local + Kaggle capacity, the local queue, machine stats, TensorBoard, and alert channels.</div>
         </div>
       </div>
 
       <div class="panel" style="margin-bottom:16px;">
-        <div class="panel-header"><span>mclab</span></div>
+        <div class="panel-header"><span>Local device</span></div>
         <div id="runner-local-body" style="padding:14px 16px;">
           <div class="empty-state">Loading…</div>
         </div>
       </div>
 
-      <div class="panel" style="margin-bottom:16px;">
+      <div class="view-sub" style="margin:4px 0 12px; font-weight:600; color:var(--text);">Local scheduler</div>
+
+      <div class="job-actions" style="margin-bottom:12px;">
+        <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-pause" title="Pause to stop new items launching — already-running items keep going">Queue: running</button>
+        <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-notify" title="Send a notification (via the channels configured below) when a scheduled item finishes or fails">Notify on finish: off</button>
+        <button class="btn btn-ghost" id="btn-refresh-scheduler">Refresh</button>
+      </div>
+
+      <div class="compute-summary-strip" id="scheduler-summary-strip"></div>
+
+      <div class="panel">
+        <div class="panel-header"><span>Concurrency</span></div>
+        <div class="concurrency-row">
+          <span class="concurrency-label">Max experiments running at once</span>
+          <div class="stepper">
+            <button class="stepper-btn" id="btn-concurrency-minus">−</button>
+            <span class="stepper-value" id="concurrency-value">1</span>
+            <button class="stepper-btn" id="btn-concurrency-plus">+</button>
+          </div>
+        </div>
+        <div style="padding:0 16px 14px;">
+          <div class="concurrency-bar-track"><div class="concurrency-bar-fill" id="concurrency-bar-fill" style="width:0%;"></div></div>
+        </div>
+      </div>
+
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-header">
+          <span>Add to schedule</span>
+          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-more">More ways to add</button>
+        </div>
+        <div class="scheduler-add-form">
+          <div class="field grow">
+            <label>Config</label>
+            <select id="scheduler-config-select"><option value="">— pick a config —</option></select>
+          </div>
+          <div class="field">
+            <label>Mode</label>
+            <select id="scheduler-mode-select">
+              <option value="train">Train</option>
+              <option value="eval">Eval</option>
+              <option value="both">Train + Eval</option>
+            </select>
+          </div>
+          <div class="field grow">
+            <label>Extra args</label>
+            <input class="text-input grow" id="scheduler-extra-args" placeholder="--epochs 10 --lr 0.0005" />
+          </div>
+          <button class="btn btn-primary" id="btn-schedule-add">Add to schedule</button>
+          <button class="btn btn-sm btn-ghost" id="btn-schedule-save-template" title="Save the fields above as a reusable template">Save as template</button>
+        </div>
+        <div class="hidden" id="scheduler-more-panel">
+          <div class="scheduler-add-form" style="padding-top:0; border-top:1px dashed var(--border-soft);">
+            <div class="field grow">
+              <label>Bulk add — every config in a category</label>
+              <select id="scheduler-bulk-category"><option value="">— pick a category —</option></select>
+            </div>
+            <button class="btn btn-ghost" id="btn-scheduler-bulk-add">Add all in category</button>
+          </div>
+          <div class="view-sub" style="padding:4px 16px 0;">Saved templates</div>
+          <div id="scheduler-templates-body" class="entity-list" style="padding:10px 16px 16px;"></div>
+        </div>
+      </div>
+
+      <div class="scheduler-section">
+        <h3 class="scheduler-section-title">Running <span class="count-badge" id="count-running-sched">0</span></h3>
+        <div id="scheduler-running-list" class="entity-grid"><div class="empty-state">Nothing running.</div></div>
+      </div>
+      <div class="scheduler-section">
+        <h3 class="scheduler-section-title">Scheduled <span class="count-badge" id="count-pending-sched">0</span> <span class="bulk-bar" id="scheduler-pending-bulk-bar"></span></h3>
+        <div id="scheduler-pending-list" class="entity-list"><div class="empty-state">Nothing queued.</div></div>
+      </div>
+      <div class="scheduler-section">
+        <h3 class="scheduler-section-title">Past <span class="count-badge" id="count-past-sched">0</span> <span class="bulk-bar" id="scheduler-past-bulk-bar"></span></h3>
+        <div id="scheduler-past-list" class="entity-grid"><div class="empty-state">No history yet.</div></div>
+      </div>
+
+      <div class="panel" style="margin:20px 0 16px;">
         <div class="panel-header">
           <span>Machine Stats</span>
           <button class="btn btn-ghost" id="btn-refresh-monitors">Refresh</button>
@@ -525,7 +628,12 @@
         </div>
       </div>
 
-      <div class="panel" style="margin-top:16px;">
+      <!-- Kaggle "workers" (XDASH_V2_PLAN.md §3.7): retired as a management surface —
+           the spine pushes straight to a per-account kernel and never creates or reads
+           a worker record (see backend/kaggle.py's push_experiment_attempt()). Kept in
+           the DOM rather than deleted so nothing here has to be rewired, but hidden:
+           there is no supported way to reach it from the UI any more. -->
+      <div class="panel hidden" style="margin-top:16px;">
         <div class="panel-header">
           <div style="display:flex; gap:8px; align-items:center;"><span>Workers</span><span id="kaggle-worker-count"></span></div>
           <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-add-worker">+ Add worker</button>
@@ -574,148 +682,9 @@
         <div class="panel-header">
           <div style="display:flex; gap:8px; align-items:center;"><span>Notifications</span><span id="kaggle-notif-count"></span></div>
         </div>
-        <div class="view-sub" style="padding:0 14px 10px;">Server-side alerts the background poller sends when a worker finishes or errors — these fire even when nobody has this tab open, on top of the browser notification toggle above. Also drives Experiments → Queue's "Notify on finish" toggle.</div>
+        <div class="view-sub" style="padding:0 14px 10px;">Server-side alerts the background poller sends when a worker finishes or errors — these fire even when nobody has this tab open, on top of the browser notification toggle above. Also drives the local scheduler's "Notify on finish" toggle above.</div>
         <div class="kaggle-grid" id="kaggle-notif-body">
           <div class="empty-state">Loading…</div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ---------------------------------------------------- Assignments view -->
-    <section class="view" id="view-assignments">
-      <div class="view-header">
-        <div>
-          <div class="view-title">Assignments</div>
-          <div class="view-sub">Plan which runner (mclab, or a Kaggle worker) should run each not-yet-launched config — answers "who's doing what" before Experiments answers "what's running now."</div>
-        </div>
-        <button class="btn btn-ghost" id="btn-refresh-assignments">Refresh</button>
-      </div>
-
-      <div class="panel" id="batch-panel">
-        <div class="panel-header"><span>Batches</span><span id="batch-count"></span></div>
-        <div class="scheduler-add-form" style="flex-wrap:wrap;">
-          <div class="field grow"><label>Sweep YAML</label><textarea class="text-input" id="batch-spec-input" rows="5" placeholder="name: iccit-ablation\nconfigs:\n  - path: configs/example.yaml\n    seeds: [0, 1]\npool: either\nmax_retries: 1"></textarea></div>
-          <button class="btn btn-primary" id="btn-start-batch">Start batch</button>
-        </div>
-        <div id="batch-status-body" style="padding:0 16px 16px;"></div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-header"><span id="assignment-form-title">Add / edit assignment</span></div>
-        <div class="scheduler-add-form" style="flex-wrap:wrap;">
-          <div class="field grow">
-            <label>Config</label>
-            <select id="assignment-config-select"><option value="">— pick a config —</option></select>
-          </div>
-          <div class="field">
-            <label>Seed (optional)</label>
-            <input class="text-input" id="assignment-seed-input" placeholder="1337" style="width:90px;" />
-          </div>
-          <div class="field">
-            <label>Block (optional)</label>
-            <input class="text-input" id="assignment-block-input" placeholder="A" style="width:80px;" />
-          </div>
-          <div class="field">
-            <label>Runner</label>
-            <select id="assignment-runner-select"><option value="">— pick a runner —</option></select>
-          </div>
-          <div class="field">
-            <label>...or free label</label>
-            <input class="text-input" id="assignment-runner-free" placeholder="e.g. w3" style="width:100px;" />
-          </div>
-          <div class="field">
-            <label>Status</label>
-            <input class="text-input" id="assignment-status-input" placeholder="planned" style="width:110px;" />
-          </div>
-          <div class="field grow">
-            <label>Notes</label>
-            <input class="text-input grow" id="assignment-notes-input" placeholder="optional" />
-          </div>
-          <button class="btn btn-primary" id="btn-assignment-submit">Add row</button>
-          <button class="btn btn-sm btn-ghost hidden" id="btn-assignment-cancel-edit">Cancel edit</button>
-        </div>
-      </div>
-
-      <div class="panel" style="margin-top:16px;">
-        <div class="panel-header">
-          <div style="display:flex; gap:8px; align-items:center;"><span>Board</span><span id="assignment-count"></span></div>
-          <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
-            <input class="text-input" id="assignment-import-path" placeholder="experiment_status.csv" style="width:200px;" />
-            <button class="btn btn-sm btn-ghost" id="btn-assignment-import" title="Import a legacy config,dataset,block,worker,status,... CSV — every column is preserved">Import CSV</button>
-            <button class="btn btn-sm btn-ghost" id="btn-assignment-export">Export CSV</button>
-          </div>
-        </div>
-        <div style="padding:0 16px 16px; overflow:auto;">
-          <table class="compare-table" style="width:100%;">
-            <thead><tr><th>Config</th><th>Seed</th><th>Runner</th><th>Status</th><th>Notes</th><th>Updated</th><th></th></tr></thead>
-            <tbody id="assignment-table-body"><tr><td colspan="7" class="empty-state">Loading…</td></tr></tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-
-    <!-- ---------------------------------------------------- Reports view -->
-    <section class="view" id="view-reports">
-      <div class="view-header">
-        <div>
-          <div class="view-title">Reports</div>
-          <div class="view-sub">Evaluation reports written to <span id="reports-dir-label" style="font-family:var(--mono)"></span>. Select 2+ to compare.</div>
-        </div>
-        <div style="display:flex; gap:8px;">
-          <button class="btn btn-primary hidden" id="btn-compare-reports">Compare selected (<span id="compare-count">0</span>)</button>
-          <button class="btn btn-ghost" id="btn-refresh-reports">Refresh</button>
-        </div>
-      </div>
-
-      <div class="configs-layout">
-        <div class="panel config-tree">
-          <div class="panel-header"><span>Reports</span><span id="report-count"></span></div>
-          <div class="panel-filter"><input class="text-input" id="report-filter" placeholder="Filter reports…" autocomplete="off" /></div>
-          <div class="config-tree-body" id="report-list-body">
-            <div class="empty-state">Loading…</div>
-          </div>
-        </div>
-
-        <div class="panel editor-pane">
-          <div class="editor-body" id="report-body" style="overflow:auto; display:block; padding:20px;">
-            <div class="empty-state">Select a report on the left to view its details.</div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- ---------------------------------------------------- History view -->
-    <section class="view" id="view-history">
-      <div class="view-header">
-        <div>
-          <div class="view-title">History</div>
-          <div class="view-sub">Browse every file written under <span id="history-logdir" style="font-family:var(--mono)"></span>.</div>
-        </div>
-        <button class="btn btn-ghost" id="btn-refresh-history">Refresh</button>
-      </div>
-
-      <div class="configs-layout">
-        <div class="panel history-tree-panel">
-          <div class="panel-header history-panel-header">
-            <select id="history-source" class="history-source-select">
-              <option value="logs">📄 Logs</option>
-              <option value="images">🖼 Images</option>
-            </select>
-            <span id="history-dir-label" class="history-dir-label"></span>
-          </div>
-          <div class="history-tree-body" id="history-tree-body">
-            <div class="empty-state">Loading…</div>
-          </div>
-        </div>
-
-        <div class="panel editor-pane">
-          <div class="editor-toolbar" id="history-toolbar">
-            <span class="editor-path" id="history-file-path">No file selected</span>
-            <span class="editor-status" id="history-file-meta"></span>
-          </div>
-          <div class="editor-body" id="history-file-body" style="overflow:auto;">
-            <div class="empty-state">Select a file on the left to view it.</div>
-          </div>
         </div>
       </div>
     </section>
@@ -725,7 +694,7 @@
       <div class="view-header">
         <div>
           <div class="view-title">Data</div>
-          <div class="view-sub">Registered datasets (from <span style="font-family:var(--mono)">configs/dataset/*.yaml</span>), a channel-mode montage preview, and the guarded test-set evaluation audit trail.</div>
+          <div class="view-sub">Registered datasets (from <span style="font-family:var(--mono)">configs/dataset/*.yaml</span>), Kaggle dataset-slug mapping, a channel-mode montage preview, and the guarded test-set evaluation audit trail.</div>
         </div>
         <button class="btn btn-ghost" id="btn-refresh-data">Refresh</button>
       </div>
@@ -771,6 +740,26 @@
         </div>
       </div>
 
+      <!-- Kaggle dataset-slug mapping editor (XDASH_V2_PLAN.md §3.4) — reads/writes
+           GET/PUT /api/datasets/kaggle-map (backend/dataset_map.py), which the
+           Experiments spine's Kaggle dispatch resolves against before every push. -->
+      <div class="panel" style="margin-bottom:18px;">
+        <div class="panel-header">
+          <span>Kaggle dataset mapping</span><span id="dataset-map-count"></span>
+        </div>
+        <div class="view-sub" style="padding:0 16px 10px;">Maps a config's <span style="font-family:var(--mono)">dataset.name</span> to a Kaggle dataset slug (<span style="font-family:var(--mono)">username/dataset-slug</span>), for configs that don't declare their own <span style="font-family:var(--mono)">dataset.kaggle_dataset</span>. An unmapped dataset blocks that config's Kaggle attempts with "no-dataset-mapping" instead of guessing.</div>
+        <div style="padding:0 16px 6px; overflow:auto;">
+          <table class="compare-table" style="width:100%;">
+            <thead><tr><th>Dataset name</th><th>Kaggle slug</th><th>Source</th><th></th></tr></thead>
+            <tbody id="dataset-map-body"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody>
+          </table>
+        </div>
+        <div class="job-actions" style="padding:0 16px 16px;">
+          <button class="btn btn-sm btn-ghost" id="btn-dataset-map-add">+ Add mapping</button>
+          <button class="btn btn-primary" id="btn-dataset-map-save">Save mapping</button>
+        </div>
+      </div>
+
       <div class="panel">
         <div class="panel-header"><span>Test-set evaluation audit trail</span><span id="test-evals-count"></span></div>
         <div style="padding:0 16px 16px; overflow:auto;">
@@ -784,7 +773,7 @@
       <div class="view-header">
         <div>
           <div class="view-title">Settings</div>
-          <div class="view-sub">Active repo profile, launch paths, runtime defaults, and deployment health.</div>
+          <div class="view-sub">Active repo profile, launch paths, runtime defaults, and notebook templates.</div>
         </div>
         <button class="btn btn-ghost" id="btn-refresh-settings">Refresh</button>
       </div>
@@ -792,6 +781,13 @@
       <div class="panel" style="margin-top:16px;">
         <div class="panel-header"><span>Repo profiles</span><span id="settings-profile-count"></span></div>
         <div class="settings-profile-list" id="settings-profile-body"><div class="empty-state">Loading…</div></div>
+      </div>
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-header"><span>Notebook templates</span><span id="template-count"></span></div>
+        <div class="job-actions" style="padding:10px 16px 0;">
+          <button class="btn btn-ghost" id="btn-refresh-templates">Refresh</button>
+        </div>
+        <div class="template-list" id="template-list-body"><div class="empty-state">Loading…</div></div>
       </div>
     </section>
 
@@ -820,6 +816,80 @@
   </div>
 </div>
 
+<div class="modal-backdrop hidden" id="run-composer-backdrop">
+  <div class="modal run-composer-modal">
+    <div class="modal-title">New run</div>
+    <div class="field">
+      <label>Configs <span class="settings-profile-path" id="run-composer-config-count"></span></label>
+      <input class="text-input" id="run-composer-config-filter" placeholder="Filter configs…" autocomplete="off" />
+      <div class="config-tree-body" id="run-composer-config-list" style="max-height:220px; overflow:auto; border:1px solid var(--border-soft); border-radius:var(--radius-sm); margin-top:6px;">
+        <div class="empty-state">Loading…</div>
+      </div>
+    </div>
+    <div class="scheduler-add-form" style="padding:10px 0 4px; flex-wrap:wrap;">
+      <div class="field">
+        <label>Seeds (comma-separated, blank = one run with no seed)</label>
+        <input class="text-input" id="run-composer-seeds" placeholder="0, 1, 2" />
+      </div>
+      <div class="field grow">
+        <label>Extra args (applied to every run)</label>
+        <input class="text-input grow" id="run-composer-args" placeholder="--epochs 200" />
+      </div>
+    </div>
+    <div class="scheduler-add-form" style="padding:4px 0; flex-wrap:wrap;">
+      <div class="field">
+        <label>Where</label>
+        <select id="run-composer-pool">
+          <option value="either">Anywhere</option>
+          <option value="local_only">Local device only</option>
+          <option value="kaggle_only">Kaggle only</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Retry attempts</label>
+        <input class="text-input" id="run-composer-retries" type="number" min="0" value="1" style="width:70px;" />
+      </div>
+      <div class="field" style="justify-content:flex-end;">
+        <label style="display:flex; align-items:center; gap:6px; margin-top:18px;">
+          <input type="checkbox" id="run-composer-force-retry" checked /> add --force on retry
+        </label>
+      </div>
+      <div class="field grow">
+        <label>Batch name (optional — groups these runs)</label>
+        <input class="text-input grow" id="run-composer-batch-name" placeholder="ablation-clinicdb-sep" />
+      </div>
+    </div>
+    <div class="run-composer-preflight" id="run-composer-preflight"><span class="preflight-empty">Pick at least one config to see how many runs this launches.</span></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="run-composer-cancel">Cancel</button>
+      <button class="btn btn-primary" id="run-composer-launch">Launch</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-backdrop hidden" id="delete-experiment-backdrop">
+  <div class="modal">
+    <div class="modal-title">Delete experiment</div>
+    <div class="modal-body" id="delete-experiment-body"></div>
+    <div class="field" style="margin:4px 0 8px;">
+      <label style="display:flex; align-items:flex-start; gap:8px; cursor:pointer;">
+        <input type="checkbox" id="delete-experiment-results" style="margin-top:3px;" />
+        <span>Also delete downloaded Kaggle results (<code>outputs/kaggle/&lt;id&gt;</code>) — safe, re-downloadable from Kaggle as long as the kernel output still exists there.</span>
+      </label>
+    </div>
+    <div class="field" style="margin-bottom:10px;">
+      <label style="display:flex; align-items:flex-start; gap:8px; cursor:pointer;">
+        <input type="checkbox" id="delete-experiment-ledger" style="margin-top:3px;" />
+        <span style="color:var(--amber);">Also delete this run from the host repo's own ledger (manifest + runs.csv row) — touches data the repo considers its record of what happened, not just the dashboard.</span>
+      </label>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="delete-experiment-cancel">Cancel</button>
+      <button class="btn btn-danger" id="delete-experiment-confirm">Delete</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal-backdrop hidden" id="command-palette-backdrop">
   <div class="palette-box">
     <input class="palette-input" id="command-palette-input" placeholder="Jump to a config, run, report, or tab…" autocomplete="off" spellcheck="false" />
@@ -832,19 +902,24 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/yaml/yaml.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
-<script src="app.js?v=7"></script>
+<script src="app.js?v=8"></script>
 <script src="js/components/badge.js?v=1"></script>
 <script src="js/components/heatmap-grid.js?v=1"></script>
 <script src="js/views/runs.js?v=2"></script>
-<script src="js/views/data.js?v=1"></script>
+<script src="js/views/data.js?v=2"></script>
 <script src="js/views/kaggle.js?v=2"></script>
-<script src="js/views/assignments.js?v=1"></script>
 <script src="js/views/runners.js?v=1"></script>
-<script src="js/views/experiments.js?v=1"></script>
-<script src="js/views/overview.js?v=1"></script>
-<script src="js/palette.js?v=1"></script>
+<script src="js/views/experiments.js?v=2"></script>
+<script src="js/views/spine.js?v=1"></script>
+<script src="js/views/lab.js?v=1"></script>
+<script src="js/palette.js?v=2"></script>
 <script>
   initSubtabStrip("configs-subtabs", (key) => { if (key === "create") initCreatorView(); });
+  initSubtabStrip("results-subtabs", (key) => {
+    if (key === "runs" && !state.runGroups.length) loadRuns();
+    if (key === "reports" && !state.reportGroups.length) loadReports();
+    if (key === "files" && !state.historyTree.length) loadHistory();
+  });
 </script>
 </body>
 </html>

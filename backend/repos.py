@@ -61,11 +61,18 @@ def set_active_profile(profile_name: str) -> Dict[str, Any]:
         raise RepoProfileError(f"Unknown repo profile '{profile_name}' (known: {', '.join(names) or 'none'})")
     if profile_name != settings.profile_name:
         from . import batch_runner
+        from . import experiments
         for batch in batch_runner.list_batches():
             if batch.get("status") == "running":
                 raise RepoProfileBusyError(
                     f"Cannot switch profiles while batch '{batch.get('name', '')}' is running; "
                     "pause or cancel it first"
+                )
+        for e in experiments.list_experiments():
+            if e["status"] in experiments.IN_FLIGHT_STATUSES:
+                raise RepoProfileBusyError(
+                    f"Cannot switch profiles while experiment '{e['experiment_id']}' is {e['status']}; "
+                    "cancel it first"
                 )
     settings.reload(profile_name)
     ACTIVE_REPO_FILE.parent.mkdir(parents=True, exist_ok=True)

@@ -106,5 +106,11 @@ scheduler_max_queue_size: 200
 kaggle_executable: "kaggle"
 kaggle_push_concurrency: 3
 kaggle_default_budget_hours: 9.5
+# XDASH_V2_PLAN.md §3.4 rule 3 — seeds data/dissert/dataset_map.json on first read. Restores the
+# mapping the three auto-dissert-* accounts' workers already carry as dataset_sources, now that
+# batch_runner.py requires a resolved mapping before routing a config to Kaggle at all (closes D7:
+# an unmapped dataset used to fall back to "attach to any idle worker regardless of dataset").
+kaggle_dataset_map:
+  clinicdb: "syfur007/clinicdb-images"
 kaggle_poll_interval_seconds: 180
 kaggle_webhook_url: ""

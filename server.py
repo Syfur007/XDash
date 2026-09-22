@@ -41,6 +41,8 @@ from backend import runners as runner_registry
 from backend.runners.base import ACTIVE_STATUSES, LaunchSpec, RunnerCapabilityError
 from backend import assignments
 from backend import batch_runner
+from backend import dataset_map
+from backend import experiments
 from backend import paths
 from backend import templates
 
@@ -51,6 +53,7 @@ app = Flask(__name__, static_folder=str(APP_DIR / "static"), static_url_path="")
 scheduler.ensure_worker_started()
 kaggle_ops.ensure_kaggle_worker_started()
 batch_runner.ensure_batch_worker_started()
+experiments.ensure_dispatcher_started()
 
 
 def err(message, code=400):
@@ -581,13 +584,7 @@ def api_kaggle_push(worker_id):
     # (EXPERIMENT_AUTOMATION_PLAN.md §2.4).
     body = request.get_json(silent=True) or {}
     try:
-        return jsonify(kaggle_ops.push(
-            worker_id, body.get("config_path", ""), body.get("extra_args", ""),
-            body.get("run_mode"), body.get("resume_from_worker_id", ""),
-            body.get("resume_from_run_id", ""), body.get("resume_from_results_dir", ""),
-            body.get("resume_from_manifest_path", ""), body.get("chain_id"),
-            body.get("version_index"),
-        ))
+        return jsonify(kaggle_ops.push(worker_id, body.get("config_path", ""), body.get("extra_args", "")))
     except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
 
@@ -598,42 +595,6 @@ def api_kaggle_restart_worker(worker_id):
         return jsonify(kaggle_ops.restart(worker_id))
     except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
-
-
-@app.route("/api/kaggle/workers/<worker_id>/resume", methods=["POST"])
-def api_kaggle_resume_worker(worker_id):
-    body = request.get_json(silent=True) or {}
-    try:
-        return jsonify(kaggle_ops.resume_worker(
-            worker_id,
-            body.get("resume_from_worker_id", ""),
-            body.get("resume_from_run_id", ""),
-            body.get("resume_from_results_dir", ""),
-            body.get("resume_from_manifest_path", ""),
-            body.get("config_path", ""),
-            body.get("extra_args", ""),
-            body.get("chain_id"),
-            body.get("version_index"),
-        ))
-    except kaggle_ops.KaggleOpsError as e:
-        return err(str(e), 400)
-
-
-@app.route("/api/kaggle/workers/<worker_id>/resume/validate", methods=["POST"])
-def api_kaggle_validate_resume(worker_id):
-    body = request.get_json(silent=True) or {}
-    try:
-        return jsonify(kaggle_ops.validate_resume_state(worker_id, body))
-    except kaggle_ops.KaggleOpsError as e:
-        return err(str(e), 400)
-
-
-@app.route("/api/kaggle/workers/<worker_id>/resume/history", methods=["GET"])
-def api_kaggle_resume_history(worker_id):
-    try:
-        return jsonify({"worker_id": worker_id, "history": kaggle_ops.worker_resume_history(worker_id)})
-    except kaggle_ops.KaggleOpsError as e:
-        return err(str(e), 404)
 
 
 @app.route("/api/kaggle/workers/<worker_id>/status", methods=["POST"])
@@ -741,6 +702,105 @@ def api_runner_launch(runner_id):
     return jsonify(result)
 
 
+# --------------------------------------------------------------------------- experiments (Phase B, XDASH_V2_PLAN.md §3/§5)
+# The new object model + API. Coexists with, does not replace, the Assignments/Batches/Kaggle-
+# worker routes below — see backend/experiments.py's module docstring for why both stay live
+# until Phase C3's strangler migration deletes the old frontend and these routes together.
+@app.route("/api/experiments", methods=["GET"])
+def api_list_experiments():
+    return jsonify({"experiments": experiments.list_experiments(
+        batch=request.args.get("batch"), status=request.args.get("status"),
+        config=request.args.get("config"), slot=request.args.get("slot"),
+    )})
+
+
+@app.route("/api/experiments", methods=["POST"])
+def api_create_experiments():
+    """THE single launch verb (§5). *configs* accepts either the fully-explicit
+    `[{"path": ..., "seeds": [...]}]` shape or the Run Composer's flatter
+    `{"configs": ["a.yaml", "b.yaml"], "seeds": [0, 1, 2]}` shorthand, applying the same seed
+    list to every path — both read naturally off §6.5's form and neither should force a caller
+    to repeat an identical seed list per config."""
+    body = request.get_json(silent=True) or {}
+    configs = body.get("configs") or []
+    if configs and isinstance(configs[0], str):
+        seeds = body.get("seeds") or [None]
+        configs = [{"path": c, "seeds": seeds} for c in configs]
+    try:
+        created = experiments.create_experiments(
+            configs=configs, extra_args=body.get("extra_args", ""),
+            pool=body.get("pool", "either"), batch_name=body.get("batch_name"),
+            max_retries=int(body.get("max_retries", 1)), force_on_retry=bool(body.get("force_on_retry", True)),
+        )
+    except experiments.ExperimentError as e:
+        return err(str(e), 400)
+    return jsonify({"experiments": created})
+
+
+@app.route("/api/experiments/<experiment_id>", methods=["GET"])
+def api_get_experiment(experiment_id):
+    try:
+        return jsonify(experiments.get_experiment(experiment_id))
+    except experiments.ExperimentError as e:
+        return err(str(e), 404)
+
+
+@app.route("/api/experiments/<experiment_id>/retry", methods=["POST"])
+def api_retry_experiment(experiment_id):
+    try:
+        return jsonify(experiments.retry_experiment(experiment_id))
+    except experiments.ExperimentError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/experiments/<experiment_id>/cancel", methods=["POST"])
+def api_cancel_experiment(experiment_id):
+    try:
+        return jsonify(experiments.cancel_experiment(experiment_id))
+    except experiments.ExperimentError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/experiments/<experiment_id>", methods=["DELETE"])
+def api_delete_experiment(experiment_id):
+    # ?remove_results=1 also deletes XDash's own outputs/kaggle/<id> download cache;
+    # ?remove_ledger=1 also deletes this experiment's run(s) from the host repo's own ledger —
+    # see experiments.delete_experiment()'s docstring for why each is opt-in.
+    remove_results = request.args.get("remove_results", "").strip().lower() in ("1", "true", "yes")
+    remove_ledger = request.args.get("remove_ledger", "").strip().lower() in ("1", "true", "yes")
+    try:
+        if not experiments.delete_experiment(experiment_id, remove_results=remove_results, remove_ledger=remove_ledger):
+            return err("Experiment not found", 404)
+    except experiments.ExperimentError as e:
+        return err(str(e), 400)
+    return jsonify({"removed": True, "removed_results": remove_results, "removed_ledger": remove_ledger})
+
+
+@app.route("/api/slots", methods=["GET"])
+def api_list_slots():
+    return jsonify({"slots": experiments.list_slots()})
+
+
+@app.route("/api/pulse", methods=["GET"])
+def api_pulse():
+    return jsonify(experiments.get_pulse())
+
+
+@app.route("/api/datasets/kaggle-map", methods=["GET"])
+def api_get_dataset_map():
+    return jsonify({"entries": dataset_map.map_with_provenance()})
+
+
+@app.route("/api/datasets/kaggle-map", methods=["PUT"])
+def api_put_dataset_map():
+    body = request.get_json(silent=True) or {}
+    entries = body.get("entries")
+    if not isinstance(entries, dict):
+        return err('Body must be {"entries": {name: kaggle_dataset, ...}}', 400)
+    saved = dataset_map.save_dataset_map(entries)
+    return jsonify({"entries": dataset_map.map_with_provenance(), "saved": saved})
+
+
 # --------------------------------------------------------------------------- assignment board (Phase 7)
 @app.route("/api/assignments", methods=["GET"])
 def api_list_assignments():
@@ -755,9 +815,6 @@ def api_add_assignment():
             body.get("config_path", ""), body.get("seed"), body.get("runner_id", ""),
             body.get("status", "planned"), body.get("notes", ""),
             body.get("block", ""), body.get("extra"), body.get("batch_name"), body.get("pool"),
-            body.get("run_mode", "fresh"), body.get("resume_from_worker_id", ""),
-            body.get("resume_from_run_id", ""), body.get("resume_from_results_dir", ""),
-            body.get("resume_from_manifest_path", ""), body.get("chain_id", ""), body.get("version_index"),
         ))
     except assignments.AssignmentError as e:
         return err(str(e), 400)

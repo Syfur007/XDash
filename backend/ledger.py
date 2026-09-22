@@ -1,18 +1,22 @@
-"""Read-only access to the orchestration layer's on-disk state: the CSV
-ledger (artifacts/ledger/*.csv) and per-run manifests
+"""Access to the orchestration layer's on-disk state: the CSV ledger
+(artifacts/ledger/*.csv) and per-run manifests
 (artifacts/runs/<run_id>/manifest.json).
 
-Stdlib only (csv, json) — reads plain files the orchestration package
-already writes, without importing that package itself, so this stays true
-to the dashboard's minimal dependency footprint (see
-IMPLEMENTATION_PLAN.md's design principles). Every reader tolerates a
-missing file/directory (returns an empty list) since a host repo may not
-have adopted the orchestration layer's artifacts/ layout at all.
+Mostly read-only (stdlib csv/json only, reading plain files the
+orchestration package already writes without importing that package
+itself — see IMPLEMENTATION_PLAN.md's design principles). Every reader
+tolerates a missing file/directory (returns an empty list) since a host
+repo may not have adopted the orchestration layer's artifacts/ layout at
+all. delete_run() (added 2026-09-22, for the Experiments spine's "hard
+delete" option) is the one write path — it touches data the host repo's
+own orchestration layer considers its record of what happened, not just
+XDash's dashboard state, so every caller must opt into it explicitly.
 """
 from __future__ import annotations
 
 import csv
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -91,6 +95,46 @@ def get_run(run_id: str) -> Optional[Dict[str, Any]]:
         return None
     ledger_row = next((r for r in list_ledger_rows("runs") if r.get("run_id") == run_id), None)
     return {**manifest, "ledger": ledger_row}
+
+
+def delete_run(run_id: str) -> bool:
+    """Removes *run_id*'s manifest.json (and, for the legacy layout, its
+    whole artifacts/runs/<run_id>/ directory) plus its row from the Runs
+    ledger CSV. Opt-in only — see this module's own docstring for why.
+    Leaves the "compute"/"test_evals"/"stats" ledger tables and (for the
+    "experiments" layout) the actual training output tree
+    (outputs/experiments/<name>-s<seed>/) untouched; this removes the
+    *ledger record*, not every artifact the run ever produced. Returns
+    False if nothing matching *run_id* was found."""
+    removed = False
+    if settings.manifest_layout == "legacy":
+        p = settings.runs_artifacts_dir / run_id / "manifest.json"
+        if p.is_file():
+            shutil.rmtree(p.parent, ignore_errors=True)
+            removed = True
+    if not removed:
+        for p in _iter_manifest_paths():
+            candidate = _load_manifest(p)
+            if candidate and (candidate.get("run_id") or p.parent.name) == run_id:
+                try:
+                    p.unlink()
+                    removed = True
+                except OSError:
+                    pass
+                break
+
+    runs_csv = settings.ledger_dir / "runs.csv"
+    rows = _read_csv(runs_csv)
+    if rows:
+        fieldnames = list(rows[0].keys())
+        kept = [r for r in rows if r.get("run_id") != run_id]
+        if len(kept) != len(rows):
+            with open(runs_csv, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                writer.writerows(kept)
+            removed = True
+    return removed
 
 
 def list_runs() -> List[Dict[str, Any]]:

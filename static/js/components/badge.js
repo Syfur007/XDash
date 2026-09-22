@@ -22,6 +22,11 @@ const STATUS_BADGE_CLASS = {
   completed: "emerald",
   stopped: "slate",
   failed: "red",
+  // backend/experiments.py's Attempt vocabulary (XDASH_V2_PLAN.md §3.2) — extends
+  // CANONICAL_STATUSES with the pre-unit-exists window a plain runner status never needs.
+  blocked: "red",
+  dispatching: "amber",
+  cancelled: "slate",
   // Kaggle kernel statuses (backend/kaggle.py) — "complete" is Kaggle's own
   // spelling, kept distinct from the local-run "completed"/"done" above.
   queued: "slate",

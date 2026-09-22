@@ -202,11 +202,30 @@ class Settings:
         self.est_hours_default = float(raw.get("est_hours_default", 6.0))
         self.kaggle_poll_interval_seconds = int(raw.get("kaggle_poll_interval_seconds", 180))
         self.kaggle_webhook_url = (raw.get("kaggle_webhook_url") or "").strip()
-        # Shared launch-template notebook a template-backed worker renders config/mode/extra_args
-        # into before every push, when it has no per-worker `template_path` override — see
-        # backend/kaggle.py's LAUNCH_SPEC_MARKER / _render_launch_notebook(). Repo-relative, same
-        # convention as a worker's notebook_path.
-        self.kaggle_default_template = raw.get("kaggle_default_template", "notebooks/kaggle_worker_template.ipynb")
+        # Filename (not a repo-relative path) of the shared launch-template notebook a
+        # template-backed worker renders config/mode/extra_args into before every push, when it
+        # has no per-worker `template_path` override — see backend/kaggle.py's
+        # LAUNCH_SPEC_MARKER / _render_launch_notebook(). XDash-owned (resolved below, once
+        # state_dir exists, as kaggle_default_template_file under data/<profile>/) — NOT
+        # repo-relative like a worker's notebook_path/template_path override. This used to
+        # resolve against repo_root (the host repo's own notebooks/ dir), which meant XDash
+        # needed write access into a repo it doesn't own to keep the template current, and let
+        # the host repo's copy silently drift from whatever XDash last edited — confirmed
+        # happening in practice (2026-09-22: the host dissert repo's notebooks/ copy was still
+        # the pre-resume-removal version, months stale, while every fix since had only ever
+        # touched XDash's own copy, which nothing was actually reading).
+        self.kaggle_default_template = raw.get("kaggle_default_template", "kaggle_worker_template.ipynb")
+
+        # §3.4's precedence rule 3 — a profile's own legacy dataset-name -> Kaggle-dataset-slug
+        # map, used to seed data/<profile>/dataset_map.json (XDash-owned storage, rule 2) the
+        # first time it's read. Keys are case-folded here so a profile spelling "ClinicDB:" and
+        # a config later spelling "clinicdb" still match (XDASH_V2_PLAN.md D11 — the old lookup
+        # case-folded only at the call site, never at load, so a mixed-case key never matched).
+        self.kaggle_dataset_map = {
+            str(name).strip().casefold(): str(source).strip()
+            for name, source in (raw.get("kaggle_dataset_map") or {}).items()
+            if str(name).strip() and str(source).strip()
+        }
 
         # Runtime state lives inside XDash/data, namespaced per profile
         # (MULTI_REPO_PLAN.md §5) so switching profiles never mixes one
@@ -228,6 +247,18 @@ class Settings:
         # per-profile like every other state file here, so a batch started under one repo
         # never becomes visible/actionable from another.
         self.batches_file = self.state_dir / "batches.json"
+        # XDash-owned dataset-name -> Kaggle-dataset-slug map (XDASH_V2_PLAN.md §3.4 rule 2),
+        # lazily seeded from kaggle_dataset_map above the first time it's read/written — see
+        # backend/batch_runner.py's resolve_kaggle_dataset(). Per-profile like every other state
+        # file here, so mapping clinicdb for dissert never leaks into another profile.
+        self.dataset_map_file = self.state_dir / "dataset_map.json"
+        # The resolved, absolute path backend/kaggle.py actually opens for the default template —
+        # see kaggle_default_template's own comment above for why this moved out of repo_root.
+        self.kaggle_default_template_file = self.state_dir / self.kaggle_default_template
+        # backend/experiments.py's own store (XDASH_V2_PLAN.md §3/Phase B) — deliberately
+        # separate from assignments.json/batches.json, which stay owned by the old, still-live
+        # batch_runner.py dispatcher until Phase C3's strangler migration deletes it (§6.8).
+        self.experiments_store_file = self.state_dir / "experiments.json"
         self.dashboard_log_dir = self.state_dir / "dashboard_logs"
         self.dashboard_log_dir.mkdir(parents=True, exist_ok=True)
 

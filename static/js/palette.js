@@ -34,7 +34,7 @@ function buildPaletteIndex() {
 
   for (const group of state.configs) {
     for (const c of group.configs) {
-      items.push({ kind: "config", label: c.name, sub: c.path, action: () => { switchView("configs"); selectConfig(c.path); } });
+      items.push({ kind: "config", label: c.name, sub: c.path, action: () => { switchToSubtab("experiments", "experiments-subtabs", "configs"); selectConfig(c.path); } });
     }
   }
 
@@ -46,7 +46,7 @@ function buildPaletteIndex() {
         kind: "run",
         label: r.run_id,
         sub: `${expLabel} · ${r.status}`,
-        action: () => { switchToSubtab("experiments", "experiments-subtabs", "runs"); selectRun(r.run_id); },
+        action: () => { switchToSubtab("results", "results-subtabs", "runs"); selectRun(r.run_id); },
       });
     }
   }
@@ -57,7 +57,7 @@ function buildPaletteIndex() {
         kind: "report",
         label: rep.experiment || rep.name,
         sub: rep.path,
-        action: () => { switchView("reports"); loadReportDetail(rep.path); },
+        action: () => { switchToSubtab("results", "results-subtabs", "reports"); loadReportDetail(rep.path); },
       });
     }
   }

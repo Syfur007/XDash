@@ -24,12 +24,11 @@ state.kaggleNotifications = {};       // channel -> settings, from GET /api/noti
 state.kaggleNotifEditOpen = new Set(); // channel keys with their edit form open
 
 // Template-backed workers (no notebook_path — see backend/kaggle.py's add_worker() docstring)
-// need a config/mode/extra_args picked per push, the same way a mclab launch does — this opens
+// need a config/mode/extra_args picked per push, the same way a local-device launch does — this opens
 // a small inline form on the worker's card instead of pushing immediately. A notebook-backed
 // worker (has notebook_path — e.g. the pre-existing iccit-kaggle-worker3/4.ipynb) keeps the
 // original one-click Push button, unchanged.
 state.kagglePushFormOpen = new Set();   // worker_ids with the inline push form expanded
-state.kaggleResumeFormOpen = new Set(); // worker_ids with the inline resume form expanded
 state.kaggleDatasetFormOpen = new Set(); // worker_ids with the inline dataset-sources edit form expanded
 state.kaggleConfigGroups = [];          // GET /api/configs, cached lazily the first time a push form opens
 state.kaggleConfigsLoaded = false;
@@ -506,7 +505,7 @@ function renderKaggleWorkers() {
   countEl.textContent = allWorkers.length ? `${allWorkers.length} worker${allWorkers.length === 1 ? "" : "s"}` : "";
 
   if (!allWorkers.length) {
-    body.innerHTML = `<div class="empty-state">No workers configured yet. Add one below once you've added an account — leave the notebook/template fields blank to push per-config launches through the default template, the same way you'd pick a config to launch on mclab.</div>`;
+    body.innerHTML = `<div class="empty-state">No workers configured yet. Add one below once you've added an account — leave the notebook/template fields blank to push per-config launches through the default template, the same way you'd pick a config to launch on the local device.</div>`;
     return;
   }
 
@@ -531,7 +530,7 @@ function renderKaggleWorkers() {
         }</div>`
       : "";
     // Template-backed (no notebook_path): push needs a config/mode/extra_args picked, same as
-    // an mclab launch — see DASHBOARD_REDESIGN_PLAN.md §2.2. Notebook-backed (legacy,
+    // a local-device launch — see DASHBOARD_REDESIGN_PLAN.md §2.2. Notebook-backed (legacy,
     // notebook_path set): the notebook already decides what it runs, so Push stays one-click.
     const templateBacked = !w.notebook_path;
     const lastSpec = w.last_config_path ? `<div class="kaggle-card-sub" title="Last pushed">last: ${escapeHtml(w.last_config_path)}</div>` : "";
@@ -550,10 +549,6 @@ function renderKaggleWorkers() {
         <button class="btn btn-sm btn-ghost" data-action="cancel-datasets-worker" data-id="${escapeHtml(w.worker_id)}">Cancel</button>
       </div>` : "";
     const pushFormOpen = state.kagglePushFormOpen.has(w.worker_id);
-    const resumeFormOpen = state.kaggleResumeFormOpen.has(w.worker_id);
-    const resumeMeta = w.resume_from_run_id || w.resume_from_worker_id || w.run_mode === "resume"
-      ? `<div class="kaggle-card-sub" title="Resume lineage">run mode: ${escapeHtml(w.run_mode || "fresh")} · source: ${escapeHtml(w.resume_from_run_id || w.resume_from_worker_id || "unknown")}</div>`
-      : `<div class="kaggle-card-sub" title="Fresh launch">run mode: fresh</div>`;
     const pushFormHtml = templateBacked && pushFormOpen ? `
       <div class="scheduler-add-form" style="padding:10px 0 4px; flex-wrap:wrap;">
         <div class="field grow">
@@ -567,17 +562,6 @@ function renderKaggleWorkers() {
         <button class="btn btn-sm btn-primary" data-action="submit-push-worker" data-id="${escapeHtml(w.worker_id)}">Push ▸</button>
         <button class="btn btn-sm btn-ghost" data-action="cancel-push-worker" data-id="${escapeHtml(w.worker_id)}">Cancel</button>
       </div>` : "";
-    const resumeFormHtml = resumeFormOpen ? `
-      <div class="scheduler-add-form" style="padding:10px 0 4px; flex-wrap:wrap;">
-        <div class="field grow"><label>Source worker id</label><input class="text-input grow" id="kaggle-resume-worker-${cssEscapeAttr(w.worker_id)}" placeholder="source-worker" /></div>
-        <div class="field grow"><label>Source run id</label><input class="text-input grow" id="kaggle-resume-run-${cssEscapeAttr(w.worker_id)}" placeholder="run-123" /></div>
-        <div class="field grow"><label>Results dir</label><div class="path-input"><input class="text-input grow" id="kaggle-resume-dir-${cssEscapeAttr(w.worker_id)}" placeholder="results/source_worker" /><button class="btn btn-sm btn-ghost" data-path-picker="kaggle-resume-dir-${cssEscapeAttr(w.worker_id)}" data-path-kind="directory" title="Choose source results directory">Browse</button></div></div>
-        <div class="field grow"><label>Manifest path</label><div class="path-input"><input class="text-input grow" id="kaggle-resume-manifest-${cssEscapeAttr(w.worker_id)}" placeholder="results/source_worker/manifest.json" /><button class="btn btn-sm btn-ghost" data-path-picker="kaggle-resume-manifest-${cssEscapeAttr(w.worker_id)}" title="Choose source manifest">Browse</button></div></div>
-        <div class="field grow"><label>Config</label><input class="text-input grow" id="kaggle-resume-config-${cssEscapeAttr(w.worker_id)}" value="${escapeHtml(w.last_config_path || "")}" placeholder="configs/experiment.yaml" /></div>
-        <div class="field"><label>Chain</label><input class="text-input" id="kaggle-resume-chain-${cssEscapeAttr(w.worker_id)}" value="${escapeHtml(w.chain_id || "")}" placeholder="worker:0" /></div>
-        <button class="btn btn-sm btn-primary" data-action="submit-resume-worker" data-id="${escapeHtml(w.worker_id)}">Start resumed run</button>
-        <button class="btn btn-sm btn-ghost" data-action="cancel-resume-worker" data-id="${escapeHtml(w.worker_id)}">Cancel</button>
-      </div>` : "";
     return `<div class="kaggle-card">
       <div class="kaggle-card-accent ${accentClass}"></div>
       <div class="kaggle-card-body">
@@ -585,7 +569,6 @@ function renderKaggleWorkers() {
           <div>
             <div class="kaggle-card-title">${escapeHtml(w.worker_id)}</div>
             <div class="kaggle-card-sub">${escapeHtml(w.account_name)} · ${escapeHtml(w.kernel_slug)} ${templateBacked ? '· <span title="Renders a config into the shared/override template on push">template-backed</span>' : '· <span title="Pushes a fixed notebook verbatim">notebook-backed</span>'}</div>
-            ${resumeMeta}
             ${lastSpec}
             ${templateBacked ? datasetsSummary : ""}
           </div>
@@ -606,12 +589,10 @@ function renderKaggleWorkers() {
         ${errorHtml}
         ${historyHtml}
         ${pushFormHtml}
-        ${resumeFormHtml}
         ${datasetFormHtml}
 
         <div class="kaggle-card-footer">
           <button class="btn btn-sm btn-ghost" data-action="push-worker" data-id="${escapeHtml(w.worker_id)}">Push</button>
-          <button class="btn btn-sm btn-ghost" data-action="resume-worker" data-id="${escapeHtml(w.worker_id)}">Resume</button>
           ${w.last_config_path ? `<button class="btn btn-sm btn-ghost" data-action="restart-worker" data-id="${escapeHtml(w.worker_id)}" title="Re-push with the same config/extra_args as last time">Restart</button>` : ""}
           <button class="btn btn-sm btn-ghost" data-action="refresh-worker" data-id="${escapeHtml(w.worker_id)}">Refresh</button>
           <button class="btn btn-sm btn-ghost" data-action="download-worker" data-id="${escapeHtml(w.worker_id)}">Download</button>
@@ -631,11 +612,8 @@ function renderKaggleWorkers() {
       const id = btn.dataset.id;
       const action = btn.dataset.action;
       if (action === "push-worker") pushKaggleWorker(id);
-      else if (action === "resume-worker") toggleKaggleResumeForm(id);
       else if (action === "submit-push-worker") submitKagglePushForm(id);
       else if (action === "cancel-push-worker") { state.kagglePushFormOpen.delete(id); renderKaggleWorkers(); }
-      else if (action === "submit-resume-worker") submitKaggleResumeForm(id);
-      else if (action === "cancel-resume-worker") { state.kaggleResumeFormOpen.delete(id); renderKaggleWorkers(); }
       else if (action === "restart-worker") restartKaggleWorker(id);
       else if (action === "refresh-worker") refreshKaggleWorker(id);
       else if (action === "download-worker") downloadKaggleWorker(id);
@@ -817,41 +795,6 @@ async function submitKagglePushForm(workerId) {
   if (!config_path) { toast("Pick a config first", "err"); return; }
   const ok = await doKagglePush(workerId, { config_path, extra_args });
   if (ok) state.kagglePushFormOpen.delete(workerId);
-}
-
-function toggleKaggleResumeForm(workerId) {
-  if (state.kaggleResumeFormOpen.has(workerId)) state.kaggleResumeFormOpen.delete(workerId);
-  else state.kaggleResumeFormOpen.add(workerId);
-  renderKaggleWorkers();
-}
-
-async function submitKaggleResumeForm(workerId) {
-  const safeId = cssEscapeAttr(workerId);
-  const source_worker_id = document.getElementById(`kaggle-resume-worker-${safeId}`)?.value.trim() || "";
-  const resume_from_run_id = document.getElementById(`kaggle-resume-run-${safeId}`)?.value.trim() || "";
-  const resume_from_results_dir = document.getElementById(`kaggle-resume-dir-${safeId}`)?.value.trim() || "";
-  const resume_from_manifest_path = document.getElementById(`kaggle-resume-manifest-${safeId}`)?.value.trim() || "";
-  const config_path = document.getElementById(`kaggle-resume-config-${safeId}`)?.value.trim() || "";
-  const chain_id = document.getElementById(`kaggle-resume-chain-${safeId}`)?.value.trim() || "";
-  if (!resume_from_run_id || !resume_from_results_dir) {
-    toast("Source run id and results dir are required for a resumed launch", "err");
-    return;
-  }
-  try {
-    const result = await api(`/api/kaggle/workers/${encodeURIComponent(workerId)}/resume`, { method: "POST", body: JSON.stringify({
-      resume_from_worker_id: source_worker_id,
-      resume_from_run_id,
-      resume_from_results_dir,
-      resume_from_manifest_path,
-      config_path,
-      chain_id,
-    }) });
-    state.kaggleResumeFormOpen.delete(workerId);
-    toast(result.run_mode === "resume" ? `Resumed '${workerId}' from ${resume_from_run_id}` : `Pushed '${workerId}'`, "ok");
-    loadKaggle();
-  } catch (e) {
-    toast(`Resume failed: ${e.message}`, "err");
-  }
 }
 
 async function restartKaggleWorker(workerId) {
