@@ -14,31 +14,17 @@
 state.kaggleAccounts = [];
 state.kaggleCredEditOpen = new Set();
 state.kaggleNameEditOpen = new Set();
-state.kaggleHistoryOpen = new Set();
-state.kaggleLastFailedAction = {};   // worker_id -> "push" | "refresh" | "download", for the one-click Retry button
-state.kaggleLastSeenStatus = {};     // worker_id -> status, so loadKaggle() can tell a *new* transition from a re-render
 state.kaggleAutoRefreshTimer = null;
 state.kaggleAutoRefresh = _kaggleGetPref("kaggleAutoRefresh");
-state.kaggleNotify = _kaggleGetPref("kaggleNotify");
 state.kaggleNotifications = {};       // channel -> settings, from GET /api/notifications
 state.kaggleNotifEditOpen = new Set(); // channel keys with their edit form open
 
-// Template-backed workers (no notebook_path — see backend/kaggle.py's add_worker() docstring)
-// need a config/mode/extra_args picked per push, the same way a local-device launch does — this opens
-// a small inline form on the worker's card instead of pushing immediately. A notebook-backed
-// worker (has notebook_path — e.g. the pre-existing iccit-kaggle-worker3/4.ipynb) keeps the
-// original one-click Push button, unchanged.
-state.kagglePushFormOpen = new Set();   // worker_ids with the inline push form expanded
-state.kaggleDatasetFormOpen = new Set(); // worker_ids with the inline dataset-sources edit form expanded
-state.kaggleConfigGroups = [];          // GET /api/configs, cached lazily the first time a push form opens
-state.kaggleConfigsLoaded = false;
-
-// The 5 server-side notification channels (backend/notifications.py),
-// offered alongside the browser Notification toggle above — sent by the
-// Kaggle background poller (and, if enabled, the Scheduler's own tick), so
-// they fire even when nobody has this tab open. `required` drives the
+// The 5 server-side notification channels (backend/notifications.py) — sent by
+// the dispatcher when an Attempt resolves (and, if enabled, the Scheduler's own
+// tick), so they fire even when nobody has this tab open. `required` drives the
 // "configured" chip; `secret` fields are masked round-trip (see
-// get_notification_settings()).
+// get_notification_settings()). The Compute-tab phase moves this whole block
+// to Settings (Multi_runner_XDash.md, Phase 6).
 const KAGGLE_NOTIF_CHANNELS = [
   {
     key: "telegram", label: "Telegram", icon: "✈️",
@@ -95,21 +81,15 @@ function _kaggleSetPref(key, value) {
 
 async function loadKaggle() {
   const accountsBody = document.getElementById("kaggle-accounts-body");
-  const workersBody = document.getElementById("kaggle-workers-body");
   accountsBody.innerHTML = `<div class="empty-state">Loading…</div>`;
-  workersBody.innerHTML = `<div class="empty-state">Loading…</div>`;
   try {
     const data = await api("/api/kaggle/accounts");
     state.kaggleAccounts = data.accounts || [];
-    checkKaggleNotifications(state.kaggleAccounts);
     renderKaggleSummary();
     renderKaggleAccounts();
-    renderKaggleWorkers();
-    renderKaggleWorkerAccountOptions();
   } catch (e) {
     document.getElementById("kaggle-summary-strip").innerHTML = "";
     accountsBody.innerHTML = `<div class="empty-state">Failed to load accounts: ${escapeHtml(e.message)}</div>`;
-    workersBody.innerHTML = "";
   }
   loadKaggleNotifications();
 }
@@ -119,28 +99,29 @@ function renderKaggleSummary() {
   const accounts = state.kaggleAccounts;
   if (!accounts.length) { el.innerHTML = ""; return; }
 
-  const allWorkers = accounts.flatMap((a) => a.workers || []);
+  // Accounts are Slots now, not worker fleets (XDASH_V2_PLAN.md §3.7): what is
+  // *running* on one is an Attempt, which the Lab view already reports off
+  // /api/pulse. This strip therefore summarises capacity and quota only.
   const totalHours = accounts.reduce((sum, a) => sum + ((a.usage_estimate || {}).hours_this_week || 0), 0);
-  const running = allWorkers.filter((w) => ["queued", "preparing", "running"].includes(w.status)).length;
-  const complete = allWorkers.filter((w) => w.status === "complete").length;
-  const errored = allWorkers.filter((w) => w.status === "error" || w.status === "push_failed" || w.status === "unknown").length;
+  const budgeted = accounts.reduce((sum, a) => sum + ((a.usage_estimate || {}).weekly_budget_hours || 0), 0);
+  const credentialled = accounts.filter((a) => a.has_legacy_key || a.has_api_token).length;
 
   el.innerHTML =
     `<div class="compute-summary-chip"><b>${accounts.length}</b>account${accounts.length === 1 ? "" : "s"}</div>` +
-    `<div class="compute-summary-chip"><b>${allWorkers.length}</b>worker${allWorkers.length === 1 ? "" : "s"}</div>` +
-    `<div class="compute-summary-chip"><b>${totalHours.toFixed(2)}</b>est. GPU-hours this week</div>` +
-    (running ? `<div class="compute-summary-chip"><b style="color:var(--amber);">${running}</b>running</div>` : "") +
-    (complete ? `<div class="compute-summary-chip"><b style="color:var(--emerald);">${complete}</b>complete</div>` : "") +
-    (errored ? `<div class="compute-summary-chip"><b style="color:var(--red);">${errored}</b>need attention</div>` : "");
+    `<div class="compute-summary-chip"><b>${accounts.length}</b>slot${accounts.length === 1 ? "" : "s"} (1 per account)</div>` +
+    `<div class="compute-summary-chip"><b>${totalHours.toFixed(2)}</b>est. GPU-hours this week${budgeted ? ` / ${budgeted.toFixed(0)}` : ""}</div>` +
+    (credentialled < accounts.length
+      ? `<div class="compute-summary-chip"><b style="color:var(--red);">${accounts.length - credentialled}</b>missing credentials</div>`
+      : "");
 }
 
-// ----------------------------------------------------------- auto-refresh / notify
+// ----------------------------------------------------------- auto-refresh
 // Auto-refresh polls the (read-only, cheap) /api/kaggle/accounts endpoint —
-// the actual Kaggle status checks are the background poller's job
-// (backend/kaggle.py's ensure_kaggle_worker_started/_tick), which keeps
-// running server-side whether or not this tab is open or this toggle is on.
-// This toggle only controls whether the *page* re-renders itself to show
-// what the poller has already found.
+// the actual Kaggle status checks are the dispatcher's job
+// (backend/experiments.py's _poll_kaggle_attempts), which keeps running
+// server-side whether or not this tab is open or this toggle is on. This
+// toggle only controls whether the *page* re-renders itself to show what the
+// dispatcher has already found.
 function setKaggleAutoRefresh(enabled) {
   state.kaggleAutoRefresh = enabled;
   _kaggleSetPref("kaggleAutoRefresh", enabled);
@@ -149,34 +130,6 @@ function setKaggleAutoRefresh(enabled) {
   if (enabled) state.kaggleAutoRefreshTimer = setInterval(loadKaggle, 30000);
 }
 
-async function setKaggleNotify(enabled) {
-  if (enabled && typeof Notification !== "undefined" && Notification.permission === "default") {
-    const permission = await Notification.requestPermission();
-    if (permission !== "granted") { toast("Browser notification permission was not granted", "err"); enabled = false; }
-  }
-  state.kaggleNotify = enabled;
-  _kaggleSetPref("kaggleNotify", enabled);
-  document.getElementById("btn-kaggle-toggle-notify").textContent = `Notify: ${enabled ? "on" : "off"}`;
-}
-
-function checkKaggleNotifications(accounts) {
-  accounts.forEach((a) => (a.workers || []).forEach((w) => {
-    const prevStatus = state.kaggleLastSeenStatus[w.worker_id];
-    if (prevStatus !== undefined && prevStatus !== w.status && (w.status === "complete" || w.status === "error")) {
-      fireKaggleNotification(w, a.name);
-    }
-    state.kaggleLastSeenStatus[w.worker_id] = w.status;
-  }));
-}
-
-function fireKaggleNotification(worker, accountName) {
-  if (!state.kaggleNotify || typeof Notification === "undefined" || Notification.permission !== "granted") return;
-  try {
-    new Notification(`Kaggle: '${worker.worker_id}' is ${worker.status}`, {
-      body: `${accountName} · ${worker.kernel_slug}`,
-    });
-  } catch (e) { /* some browsers throw if the page isn't foregrounded/focused-eligible — not worth surfacing */ }
-}
 
 function renderKaggleAccounts() {
   const body = document.getElementById("kaggle-accounts-body");
@@ -193,7 +146,6 @@ function renderKaggleAccounts() {
   body.innerHTML = state.kaggleAccounts.map((a) => {
     const usage = a.usage_estimate || {};
     const hours = usage.hours_this_week !== undefined ? usage.hours_this_week : "–";
-    const workerCount = (a.workers || []).length;
     const credEditOpen = state.kaggleCredEditOpen.has(a.name);
     const nameEditOpen = state.kaggleNameEditOpen.has(a.name);
     const titleHtml = nameEditOpen
@@ -208,7 +160,7 @@ function renderKaggleAccounts() {
         <div class="kaggle-card-header">
           <div style="min-width:0;">
             <div class="kaggle-card-title-row">${titleHtml}</div>
-            <div class="kaggle-card-sub">${escapeHtml(a.kaggle_username || "–")} · ${workerCount} worker${workerCount === 1 ? "" : "s"}</div>
+            <div class="kaggle-card-sub">${escapeHtml(a.kaggle_username || "–")} · 1 slot</div>
           </div>
           <div class="kaggle-cred-chips">
             <span class="kaggle-chip on" title="${a.scope === "system"
@@ -279,7 +231,7 @@ async function loadKaggleNotifications() {
     state.kaggleNotifications = await api("/api/notifications");
   } catch (e) {
     // Non-critical panel — render whatever we already have rather than
-    // blanking the accounts/workers panels' own error state on top of it.
+    // blanking the accounts panel's own error state on top of it.
   }
   renderKaggleNotifications();
 }
@@ -468,7 +420,7 @@ async function saveKaggleCredentials(name) {
     await api(`/api/kaggle/accounts/${encodeURIComponent(name)}/credentials`, {
       method: "PATCH", body: JSON.stringify({ username, key, api_token }),
     });
-    toast(`Credentials updated for '${name}' — its workers were left untouched`, "ok");
+    toast(`Credentials updated for '${name}'`, "ok");
     state.kaggleCredEditOpen.delete(name);
     loadKaggle();
   } catch (e) {
@@ -488,148 +440,6 @@ async function removeKaggleCredential(name, kind) {
   }
 }
 
-function renderKaggleWorkerAccountOptions() {
-  const select = document.getElementById("kaggle-new-worker-account");
-  const current = select.value;
-  select.innerHTML = `<option value="">— pick an account —</option>` +
-    state.kaggleAccounts.map((a) => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)}</option>`).join("");
-  if (state.kaggleAccounts.some((a) => a.name === current)) select.value = current;
-}
-
-function renderKaggleWorkers() {
-  const body = document.getElementById("kaggle-workers-body");
-  const countEl = document.getElementById("kaggle-worker-count");
-  const allWorkers = [];
-  state.kaggleAccounts.forEach((a) => (a.workers || []).forEach((w) => allWorkers.push({ ...w, account_name: a.name })));
-
-  countEl.textContent = allWorkers.length ? `${allWorkers.length} worker${allWorkers.length === 1 ? "" : "s"}` : "";
-
-  if (!allWorkers.length) {
-    body.innerHTML = `<div class="empty-state">No workers configured yet. Add one below once you've added an account — leave the notebook/template fields blank to push per-config launches through the default template, the same way you'd pick a config to launch on the local device.</div>`;
-    return;
-  }
-
-  body.innerHTML = allWorkers.map((w) => {
-    const status = w.status || "unconfigured";
-    const accentClass = w.over_budget ? "red" : statusBadgeClass(status);
-    const pushedText = w.pushed_at ? timeAgo(w.pushed_at) : "not pushed yet";
-    const overBudgetBadge = w.over_budget ? `<span class="badge red" title="Running longer than its session budget">over budget</span>` : "";
-    const notebookChangedBadge = w.notebook_changed
-      ? `<span class="badge amber" title="The local notebook differs from what was last pushed">notebook changed</span>` : "";
-    const retryBtn = state.kaggleLastFailedAction[w.worker_id]
-      ? `<button class="btn-icon" data-action="retry-worker" data-id="${escapeHtml(w.worker_id)}" title="Retry the last failed action">↻</button>` : "";
-    const errorHtml = w.last_error
-      ? `<div class="kaggle-card-error">${escapeHtml(w.last_error)} ${retryBtn}</div>` : "";
-    const historyOpen = state.kaggleHistoryOpen.has(w.worker_id);
-    const historyEntries = (w.history || []).slice().reverse();
-    const historyHtml = historyOpen
-      ? `<div class="kaggle-history">${
-          historyEntries.length
-            ? historyEntries.map((h) => `<div class="kaggle-history-row"><span class="kaggle-history-time">${escapeHtml(timeAgo(h.at))}</span>${escapeHtml(h.event)}</div>`).join("")
-            : `<div class="kaggle-history-row">No activity yet.</div>`
-        }</div>`
-      : "";
-    // Template-backed (no notebook_path): push needs a config/mode/extra_args picked, same as
-    // a local-device launch — see DASHBOARD_REDESIGN_PLAN.md §2.2. Notebook-backed (legacy,
-    // notebook_path set): the notebook already decides what it runs, so Push stays one-click.
-    const templateBacked = !w.notebook_path;
-    const lastSpec = w.last_config_path ? `<div class="kaggle-card-sub" title="Last pushed">last: ${escapeHtml(w.last_config_path)}</div>` : "";
-    const datasetSources = w.dataset_sources || [];
-    const datasetsSummary = datasetSources.length
-      ? `<div class="kaggle-card-sub" title="Kaggle datasets attached to this worker's kernel on every push">datasets: ${escapeHtml(datasetSources.join(", "))}</div>`
-      : `<div class="kaggle-card-sub" style="color:var(--red)" title="No datasets attached — a template-backed push will fail at the launch template's own dataset probe">no datasets attached</div>`;
-    const datasetFormOpen = state.kaggleDatasetFormOpen.has(w.worker_id);
-    const datasetFormHtml = templateBacked && datasetFormOpen ? `
-      <div class="scheduler-add-form" style="padding:10px 0 4px; flex-wrap:wrap;">
-        <div class="field grow" title="Kaggle datasets this worker's pushed kernel declares, as username/dataset-slug, comma-separated.">
-          <label>Dataset sources (comma-separated username/slug)</label>
-          <input class="text-input grow" id="kaggle-datasets-input-${cssEscapeAttr(w.worker_id)}" value="${escapeHtml(datasetSources.join(", "))}" placeholder="syfur007/clinicdb-images" />
-        </div>
-        <button class="btn btn-sm btn-primary" data-action="submit-datasets-worker" data-id="${escapeHtml(w.worker_id)}" data-account="${escapeHtml(w.account_name)}">Save</button>
-        <button class="btn btn-sm btn-ghost" data-action="cancel-datasets-worker" data-id="${escapeHtml(w.worker_id)}">Cancel</button>
-      </div>` : "";
-    const pushFormOpen = state.kagglePushFormOpen.has(w.worker_id);
-    const pushFormHtml = templateBacked && pushFormOpen ? `
-      <div class="scheduler-add-form" style="padding:10px 0 4px; flex-wrap:wrap;">
-        <div class="field grow">
-          <label>Config</label>
-          <select id="kaggle-push-config-${cssEscapeAttr(w.worker_id)}"><option value="">— pick a config —</option></select>
-        </div>
-        <div class="field grow" title="Runs train then eval sequentially inside this one kernel — there is no separate train-only or eval-only push.">
-          <label>Extra args (applied to both stages)</label>
-          <input class="text-input grow" id="kaggle-push-args-${cssEscapeAttr(w.worker_id)}" placeholder="--epochs 10" />
-        </div>
-        <button class="btn btn-sm btn-primary" data-action="submit-push-worker" data-id="${escapeHtml(w.worker_id)}">Push ▸</button>
-        <button class="btn btn-sm btn-ghost" data-action="cancel-push-worker" data-id="${escapeHtml(w.worker_id)}">Cancel</button>
-      </div>` : "";
-    return `<div class="kaggle-card">
-      <div class="kaggle-card-accent ${accentClass}"></div>
-      <div class="kaggle-card-body">
-        <div class="kaggle-card-header">
-          <div>
-            <div class="kaggle-card-title">${escapeHtml(w.worker_id)}</div>
-            <div class="kaggle-card-sub">${escapeHtml(w.account_name)} · ${escapeHtml(w.kernel_slug)} ${templateBacked ? '· <span title="Renders a config into the shared/override template on push">template-backed</span>' : '· <span title="Pushes a fixed notebook verbatim">notebook-backed</span>'}</div>
-            ${lastSpec}
-            ${templateBacked ? datasetsSummary : ""}
-          </div>
-          <div>${renderStatusBadge(status)} ${overBudgetBadge} ${notebookChangedBadge}</div>
-        </div>
-
-        <div class="kaggle-stat-row">
-          <div class="kaggle-stat">
-            <div class="kaggle-stat-label">Pushed</div>
-            <div class="kaggle-stat-value" style="font-size:12.5px;">${escapeHtml(pushedText)}</div>
-          </div>
-          <div class="kaggle-stat">
-            <div class="kaggle-stat-label">Budget</div>
-            <div class="kaggle-stat-value" style="font-size:12.5px;">${w.budget_hours ? escapeHtml(String(w.budget_hours)) + "h" : "–"}</div>
-          </div>
-        </div>
-
-        ${errorHtml}
-        ${historyHtml}
-        ${pushFormHtml}
-        ${datasetFormHtml}
-
-        <div class="kaggle-card-footer">
-          <button class="btn btn-sm btn-ghost" data-action="push-worker" data-id="${escapeHtml(w.worker_id)}">Push</button>
-          ${w.last_config_path ? `<button class="btn btn-sm btn-ghost" data-action="restart-worker" data-id="${escapeHtml(w.worker_id)}" title="Re-push with the same config/extra_args as last time">Restart</button>` : ""}
-          <button class="btn btn-sm btn-ghost" data-action="refresh-worker" data-id="${escapeHtml(w.worker_id)}">Refresh</button>
-          <button class="btn btn-sm btn-ghost" data-action="download-worker" data-id="${escapeHtml(w.worker_id)}">Download</button>
-          ${templateBacked ? `<button class="btn btn-sm btn-ghost" data-action="toggle-datasets-worker" data-id="${escapeHtml(w.worker_id)}">${datasetFormOpen ? "Cancel" : "Edit datasets"}</button>` : ""}
-          <button class="btn btn-sm btn-ghost" data-action="toggle-history" data-id="${escapeHtml(w.worker_id)}">${historyOpen ? "Hide history" : "History"}</button>
-          <button class="btn btn-sm btn-danger" data-action="remove-worker" data-id="${escapeHtml(w.worker_id)}" data-account="${escapeHtml(w.account_name)}">Remove</button>
-        </div>
-      </div>
-    </div>`;
-  }).join("");
-
-  body.querySelectorAll("select[id^='kaggle-push-config-']").forEach((sel) => populateKaggleConfigSelect(sel));
-
-  body.querySelectorAll("button[data-action]").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const id = btn.dataset.id;
-      const action = btn.dataset.action;
-      if (action === "push-worker") pushKaggleWorker(id);
-      else if (action === "submit-push-worker") submitKagglePushForm(id);
-      else if (action === "cancel-push-worker") { state.kagglePushFormOpen.delete(id); renderKaggleWorkers(); }
-      else if (action === "restart-worker") restartKaggleWorker(id);
-      else if (action === "refresh-worker") refreshKaggleWorker(id);
-      else if (action === "download-worker") downloadKaggleWorker(id);
-      else if (action === "remove-worker") removeKaggleWorker(btn.dataset.account, id);
-      else if (action === "toggle-history") toggleKaggleWorkerHistory(id);
-      else if (action === "retry-worker") retryKaggleAction(id);
-      else if (action === "toggle-datasets-worker") {
-        if (state.kaggleDatasetFormOpen.has(id)) state.kaggleDatasetFormOpen.delete(id);
-        else state.kaggleDatasetFormOpen.add(id);
-        renderKaggleWorkers();
-      }
-      else if (action === "submit-datasets-worker") submitKaggleDatasetsForm(btn.dataset.account, id);
-      else if (action === "cancel-datasets-worker") { state.kaggleDatasetFormOpen.delete(id); renderKaggleWorkers(); }
-    });
-  });
-}
 
 // ---------------------------------------------------------------- accounts
 async function addKaggleAccount() {
@@ -667,7 +477,7 @@ async function validateKaggleAccount(name) {
 async function removeKaggleAccount(name) {
   const ok = await showConfirm(
     "Remove account?",
-    `This deletes '${name}'s stored credentials and its worker assignments from the dashboard. It does not affect anything already on Kaggle.`
+    `This deletes '${name}'s stored credentials from the dashboard. It does not affect anything already on Kaggle, and past runs stay in Results.`
   );
   if (!ok) return;
   try {
@@ -679,234 +489,6 @@ async function removeKaggleAccount(name) {
   }
 }
 
-// ----------------------------------------------------------------- workers
-function findKaggleWorker(workerId) {
-  for (const a of state.kaggleAccounts) {
-    const w = (a.workers || []).find((w) => w.worker_id === workerId);
-    if (w) return w;
-  }
-  return null;
-}
-
-// Populates one <select> with every config, grouped by category — same shape as
-// populateSchedulerConfigSelect() in app.js, duplicated (not shared) since it also wires a
-// second bulk-category <select> this doesn't need; kept in sync manually if that ever changes.
-async function populateKaggleConfigSelect(selectEl) {
-  if (!state.kaggleConfigsLoaded) {
-    state.kaggleConfigsLoaded = true;
-    try {
-      const data = await api("/api/configs");
-      state.kaggleConfigGroups = data.groups || [];
-    } catch (e) { /* leave empty — the select just stays a single placeholder option */ }
-  }
-  for (const group of state.kaggleConfigGroups) {
-    const optgroup = document.createElement("optgroup");
-    optgroup.label = group.category;
-    for (const c of group.configs) {
-      const opt = document.createElement("option");
-      opt.value = c.path; opt.textContent = c.name;
-      optgroup.appendChild(opt);
-    }
-    selectEl.appendChild(optgroup);
-  }
-}
-
-async function addKaggleWorker() {
-  const account_name = document.getElementById("kaggle-new-worker-account").value;
-  const worker_id = document.getElementById("kaggle-new-worker-id").value.trim();
-  const notebook_path = document.getElementById("kaggle-new-worker-notebook").value.trim();
-  const template_path = document.getElementById("kaggle-new-worker-template").value.trim();
-  const kernel_slug = document.getElementById("kaggle-new-worker-slug").value.trim();
-  const results_dir = document.getElementById("kaggle-new-worker-results").value.trim();
-  const budgetRaw = document.getElementById("kaggle-new-worker-budget").value.trim();
-  const dataset_sources = document.getElementById("kaggle-new-worker-datasets").value
-    .split(",").map((s) => s.trim()).filter(Boolean);
-  if (!account_name || !worker_id || !kernel_slug || !results_dir) {
-    toast("Account, worker id, kernel slug and results dir are all required", "err");
-    return;
-  }
-  if (notebook_path && template_path) {
-    toast("Set either a fixed notebook path or a template override, not both", "err");
-    return;
-  }
-  const body = { worker_id, kernel_slug, results_dir, notebook_path, template_path, dataset_sources };
-  if (budgetRaw) body.budget_hours = parseFloat(budgetRaw);
-  try {
-    await api(`/api/kaggle/accounts/${encodeURIComponent(account_name)}/workers`, { method: "POST", body: JSON.stringify(body) });
-    toast(`Worker '${worker_id}' added`, "ok");
-    ["kaggle-new-worker-id", "kaggle-new-worker-notebook", "kaggle-new-worker-template", "kaggle-new-worker-slug", "kaggle-new-worker-results", "kaggle-new-worker-budget", "kaggle-new-worker-datasets"]
-      .forEach((id) => (document.getElementById(id).value = ""));
-    toggleKaggleAddForm("kaggle-add-worker-form", "btn-kaggle-toggle-add-worker", "+ Add worker", "Cancel");
-    loadKaggle();
-  } catch (e) {
-    toast("Couldn't add worker: " + e.message, "err");
-  }
-}
-
-async function removeKaggleWorker(accountName, workerId) {
-  const ok = await showConfirm(
-    "Remove worker?",
-    `This only removes '${workerId}' from the dashboard's registry — it does not touch anything on Kaggle.`
-  );
-  if (!ok) return;
-  try {
-    await api(`/api/kaggle/accounts/${encodeURIComponent(accountName)}/workers/${encodeURIComponent(workerId)}`, { method: "DELETE" });
-    toast(`Worker '${workerId}' removed`, "ok");
-    loadKaggle();
-  } catch (e) {
-    toast("Couldn't remove worker: " + e.message, "err");
-  }
-}
-
-// Notebook-backed: push immediately (config_path/mode/extra_args are ignored server-side for
-// these — see backend/kaggle.py's push()). Template-backed: open the inline config/mode/args
-// form on the card instead — see submitKagglePushForm() for what actually calls the API.
-function pushKaggleWorker(workerId) {
-  const w = findKaggleWorker(workerId);
-  if (w && w.notebook_path) {
-    doKagglePush(workerId, {});
-    return;
-  }
-  state.kagglePushFormOpen.add(workerId);
-  renderKaggleWorkers();
-}
-
-async function submitKaggleDatasetsForm(accountName, workerId) {
-  const safeId = cssEscapeAttr(workerId);
-  const dataset_sources = document.getElementById(`kaggle-datasets-input-${safeId}`).value
-    .split(",").map((s) => s.trim()).filter(Boolean);
-  try {
-    await api(
-      `/api/kaggle/accounts/${encodeURIComponent(accountName)}/workers/${encodeURIComponent(workerId)}/datasets`,
-      { method: "POST", body: JSON.stringify({ dataset_sources }) },
-    );
-    toast(`Updated datasets for '${workerId}'`, "ok");
-    state.kaggleDatasetFormOpen.delete(workerId);
-    loadKaggle();
-  } catch (e) {
-    toast("Couldn't update datasets: " + e.message, "err");
-  }
-}
-
-async function submitKagglePushForm(workerId) {
-  const safeId = cssEscapeAttr(workerId);
-  const config_path = document.getElementById(`kaggle-push-config-${safeId}`).value;
-  const extra_args = document.getElementById(`kaggle-push-args-${safeId}`).value.trim();
-  if (!config_path) { toast("Pick a config first", "err"); return; }
-  const ok = await doKagglePush(workerId, { config_path, extra_args });
-  if (ok) state.kagglePushFormOpen.delete(workerId);
-}
-
-async function restartKaggleWorker(workerId) {
-  try {
-    const result = await api(`/api/kaggle/workers/${encodeURIComponent(workerId)}/restart`, { method: "POST" });
-    delete state.kaggleLastFailedAction[workerId];
-    toast(result.concurrent_warning ? `Re-pushed '${workerId}' — ${result.concurrent_warning}` : `Re-pushed '${workerId}'`, result.concurrent_warning ? "" : "ok");
-    loadKaggle();
-  } catch (e) {
-    state.kaggleLastFailedAction[workerId] = "push";
-    toast(`Restart failed: ${e.message}`, "err");
-    renderKaggleWorkers();
-  }
-}
-
-async function doKagglePush(workerId, spec) {
-  try {
-    const result = await api(`/api/kaggle/workers/${encodeURIComponent(workerId)}/push`, { method: "POST", body: JSON.stringify(spec) });
-    delete state.kaggleLastFailedAction[workerId];
-    toast(result.concurrent_warning ? `Pushed '${workerId}' — ${result.concurrent_warning}` : `Pushed '${workerId}'`, result.concurrent_warning ? "" : "ok");
-    loadKaggle();
-    return true;
-  } catch (e) {
-    state.kaggleLastFailedAction[workerId] = "push";
-    toast(`Push failed: ${e.message}`, "err");
-    renderKaggleWorkers();
-    return false;
-  }
-}
-
-async function refreshKaggleWorker(workerId) {
-  try {
-    const result = await api(`/api/kaggle/workers/${encodeURIComponent(workerId)}/status`, { method: "POST" });
-    delete state.kaggleLastFailedAction[workerId];
-    toast(`'${workerId}': ${result.status}`, "ok");
-    loadKaggle();
-  } catch (e) {
-    state.kaggleLastFailedAction[workerId] = "refresh";
-    toast(`Status check failed: ${e.message}`, "err");
-    renderKaggleWorkers();
-  }
-}
-
-async function downloadKaggleWorker(workerId) {
-  try {
-    const result = await api(`/api/kaggle/workers/${encodeURIComponent(workerId)}/download`, { method: "POST" });
-    delete state.kaggleLastFailedAction[workerId];
-    const n = (result.registered_runs || []).length;
-    toast(`Downloaded '${workerId}' — ${n} run${n === 1 ? "" : "s"} registered into the ledger`, "ok");
-    loadKaggle();
-  } catch (e) {
-    state.kaggleLastFailedAction[workerId] = "download";
-    toast(`Download failed: ${e.message}`, "err");
-    renderKaggleWorkers();
-  }
-}
-
-const kaggleRetryHandlers = { push: pushKaggleWorker, refresh: refreshKaggleWorker, download: downloadKaggleWorker };
-
-function retryKaggleAction(workerId) {
-  const action = state.kaggleLastFailedAction[workerId];
-  if (action) kaggleRetryHandlers[action](workerId);
-}
-
-function toggleKaggleWorkerHistory(workerId) {
-  if (state.kaggleHistoryOpen.has(workerId)) state.kaggleHistoryOpen.delete(workerId);
-  else state.kaggleHistoryOpen.add(workerId);
-  renderKaggleWorkers();
-}
-
-// -------------------------------------------------------------------- bulk
-async function pushAllKaggleWorkers() {
-  const targets = state.kaggleAccounts.flatMap((a) => (a.workers || []).map((w) => `${w.worker_id} (${a.name})`));
-  if (!targets.length) { toast("No workers configured", "err"); return; }
-  const ok = await showConfirm(
-    `Push ${targets.length} worker${targets.length === 1 ? "" : "s"}?`,
-    `This pushes every configured worker, using real GPU quota on each account: ${targets.join(", ")}. ` +
-    `Template-backed workers with no config picked yet (no prior push) will fail individually — ` +
-    `push those once from their own card first, then "Push all" re-pushes their last config.`
-  );
-  if (!ok) return;
-  try {
-    const { results } = await api("/api/kaggle/push_all", { method: "POST" });
-    const failed = results.filter((r) => r.error).length;
-    toast(`Pushed ${results.length - failed}/${results.length} worker(s)${failed ? `, ${failed} failed` : ""}`, failed ? "err" : "ok");
-    loadKaggle();
-  } catch (e) {
-    toast("Push all failed: " + e.message, "err");
-  }
-}
-
-async function refreshAllKaggleWorkers() {
-  try {
-    const { results } = await api("/api/kaggle/refresh_all", { method: "POST" });
-    toast(`Refreshed ${results.length} worker(s)`, "ok");
-    loadKaggle();
-  } catch (e) {
-    toast("Refresh all failed: " + e.message, "err");
-  }
-}
-
-async function downloadAllKaggleWorkers() {
-  try {
-    const { results } = await api("/api/kaggle/download_all", { method: "POST" });
-    if (!results.length) { toast("No workers currently marked complete", ""); return; }
-    const failed = results.filter((r) => r.error).length;
-    toast(`Downloaded ${results.length - failed}/${results.length} worker(s)${failed ? `, ${failed} failed` : ""}`, failed ? "err" : "ok");
-    loadKaggle();
-  } catch (e) {
-    toast("Download all failed: " + e.message, "err");
-  }
-}
 
 function toggleKaggleAddForm(formId, toggleBtnId, collapsedLabel, expandedLabel) {
   const form = document.getElementById(formId);
@@ -916,78 +498,16 @@ function toggleKaggleAddForm(formId, toggleBtnId, collapsedLabel, expandedLabel)
   if (!nowHidden) form.querySelector("input, select")?.focus();
 }
 
-// ------------------------------------------------------------- export / import
-async function exportKaggleRegistry() {
-  try {
-    const data = await api("/api/kaggle/registry/export");
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = "kaggle_registry.json";
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
-    toast("Registry exported — credentials are never included", "ok");
-  } catch (e) {
-    toast("Export failed: " + e.message, "err");
-  }
-}
-
-function triggerKaggleImport() {
-  document.getElementById("kaggle-import-file").click();
-}
-
-async function handleKaggleImportFile(e) {
-  const file = e.target.files[0];
-  e.target.value = "";
-  if (!file) return;
-  let payload;
-  try {
-    payload = JSON.parse(await file.text());
-  } catch (err) {
-    toast("That file isn't valid JSON", "err");
-    return;
-  }
-  try {
-    const summary = await api("/api/kaggle/registry/import", { method: "POST", body: JSON.stringify(payload) });
-    const addedN = summary.workers_added.length;
-    const skippedAccounts = summary.accounts_skipped.length;
-    const skippedWorkers = summary.workers_skipped.length;
-    toast(
-      `Imported ${addedN} worker${addedN === 1 ? "" : "s"}` +
-      (skippedAccounts ? ` · ${skippedAccounts} account(s) skipped — not configured locally yet, add credentials first` : "") +
-      (skippedWorkers ? ` · ${skippedWorkers} worker(s) skipped` : ""),
-      addedN ? "ok" : ""
-    );
-    loadKaggle();
-  } catch (err) {
-    toast("Import failed: " + err.message, "err");
-  }
-}
 
 function initKaggleButtons() {
   document.getElementById("btn-kaggle-add-account").addEventListener("click", addKaggleAccount);
-  document.getElementById("btn-kaggle-add-worker").addEventListener("click", addKaggleWorker);
-  document.getElementById("btn-kaggle-push-all").addEventListener("click", pushAllKaggleWorkers);
-  document.getElementById("btn-kaggle-refresh-all").addEventListener("click", refreshAllKaggleWorkers);
-  document.getElementById("btn-kaggle-download-all").addEventListener("click", downloadAllKaggleWorkers);
   document.getElementById("btn-kaggle-toggle-add-account").addEventListener("click", () =>
     toggleKaggleAddForm("kaggle-add-account-form", "btn-kaggle-toggle-add-account", "+ Add account", "Cancel"));
-  document.getElementById("btn-kaggle-toggle-add-worker").addEventListener("click", () =>
-    toggleKaggleAddForm("kaggle-add-worker-form", "btn-kaggle-toggle-add-worker", "+ Add worker", "Cancel"));
   document.getElementById("btn-kaggle-toggle-autorefresh").addEventListener("click", () => setKaggleAutoRefresh(!state.kaggleAutoRefresh));
-  document.getElementById("btn-kaggle-toggle-notify").addEventListener("click", () => setKaggleNotify(!state.kaggleNotify));
-  document.getElementById("btn-kaggle-export").addEventListener("click", exportKaggleRegistry);
-  document.getElementById("btn-kaggle-import").addEventListener("click", triggerKaggleImport);
-  document.getElementById("kaggle-import-file").addEventListener("change", handleKaggleImportFile);
 
-  // Reflect stored preferences in the toggle labels, and actually start the
-  // auto-refresh timer if it was left on — but never auto-request
-  // Notification permission on load (that must stay behind a click).
+  // Reflect the stored preference in the toggle label, and actually start the
+  // auto-refresh timer if it was left on.
   setKaggleAutoRefresh(state.kaggleAutoRefresh);
-  document.getElementById("btn-kaggle-toggle-notify").textContent = `Notify: ${state.kaggleNotify ? "on" : "off"}`;
 }
 
 initKaggleButtons();

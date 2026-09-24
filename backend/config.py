@@ -241,23 +241,17 @@ class Settings:
         self.monitors_file = self.state_dir / "monitors.json"
         self.scheduler_file = self.state_dir / "scheduler.json"
         self.run_notes_file = self.state_dir / "run_notes.json"
-        self.assignments_file = self.state_dir / "assignments.json"
-        # Batch metadata (name/state/started_at) for backend/batch_runner.py — the rows
-        # themselves live in assignments.json (EXPERIMENT_AUTOMATION_PLAN.md §3/§4);
-        # per-profile like every other state file here, so a batch started under one repo
-        # never becomes visible/actionable from another.
-        self.batches_file = self.state_dir / "batches.json"
         # XDash-owned dataset-name -> Kaggle-dataset-slug map (XDASH_V2_PLAN.md §3.4 rule 2),
         # lazily seeded from kaggle_dataset_map above the first time it's read/written — see
-        # backend/batch_runner.py's resolve_kaggle_dataset(). Per-profile like every other state
+        # backend/dataset_map.py's resolve_kaggle_dataset(). Per-profile like every other state
         # file here, so mapping clinicdb for dissert never leaks into another profile.
         self.dataset_map_file = self.state_dir / "dataset_map.json"
         # The resolved, absolute path backend/kaggle.py actually opens for the default template —
         # see kaggle_default_template's own comment above for why this moved out of repo_root.
         self.kaggle_default_template_file = self.state_dir / self.kaggle_default_template
-        # backend/experiments.py's own store (XDASH_V2_PLAN.md §3/Phase B) — deliberately
-        # separate from assignments.json/batches.json, which stay owned by the old, still-live
-        # batch_runner.py dispatcher until Phase C3's strangler migration deletes it (§6.8).
+        # backend/experiments.py's own store (XDASH_V2_PLAN.md §3/Phase B) — the single
+        # dispatcher's state since the legacy assignments.json/batches.json pair and their
+        # batch_runner.py dispatcher were retired (§3.7).
         self.experiments_store_file = self.state_dir / "experiments.json"
         self.dashboard_log_dir = self.state_dir / "dashboard_logs"
         self.dashboard_log_dir.mkdir(parents=True, exist_ok=True)
@@ -267,6 +261,9 @@ class Settings:
         # kaggle.json and/or .../access_token — an account may have either or
         # both). Both are gitignored — see backend/kaggle.py.
         self.kaggle_accounts_file = self.state_dir / "kaggle_accounts.json"
+        # Retired with the worker registry (XDASH_V2_PLAN.md §3.7) — kept only so an
+        # existing data/<profile>/kaggle_state.json is still addressable if it needs
+        # inspecting by hand. Nothing reads it; Attempts in experiments.json replaced it.
         self.kaggle_state_file = self.state_dir / "kaggle_state.json"
         self.kaggle_creds_dir = self.state_dir / "kaggle_accounts"
         self.kaggle_creds_dir.mkdir(parents=True, exist_ok=True)

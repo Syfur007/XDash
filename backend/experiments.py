@@ -2,26 +2,13 @@
 dispatcher (§4's greedy policy, generalized) — the backend for Phase B's API
 (§5): GET/POST /api/experiments, /api/slots, /api/pulse.
 
-**Coexists with, does not replace, backend/batch_runner.py.** Per the plan's
-§6.8 "strangler, not big-bang" migration, the old `/api/assignments*` and
-`/api/batches/*` routes (and the Kaggle worker registry/routes they can
-dispatch to) stay exactly as they were after Phase A — driven by
-batch_runner.py's own independent dispatcher — until Phase C3 deletes the
-old frontend and these retired routes together, in one commit (§3.7/§6.8
-step 5). This module is the new, parallel system the *next* UI will be
-built against.
-
-**Known, deliberate limitation of this coexistence window:** both
-dispatchers can push to the same Kaggle account (one slot, platform-limited)
-without coordinating through a shared lock — see `_kaggle_account_busy()`'s
-docstring for exactly what is and isn't covered. This is a real gap, not an
-oversight; closing it fully means unifying the two dispatchers, which is
-Phase C3's job, not Phase B's. The blast radius is bounded: Kaggle itself
-queues a second push against a busy account rather than corrupting
-anything (kaggle.py's own `_concurrent_push_warning` already documents this
-as an accepted soft-failure mode), and local scheduler capacity is shared,
-live state (scheduler.list_items()), not duplicated, so both dispatchers
-always see the same free-slot count.
+**This is the only dispatcher.** The strangler migration of §6.8 is
+complete: `backend/batch_runner.py`, `backend/assignments.py` and the
+`/api/assignments*` routes are deleted, and the Kaggle *worker* registry
+they dispatched to went with them (§3.7). The coexistence window this
+module was written inside — two dispatchers racing for one Kaggle slot
+without a shared lock — is therefore closed by construction, not by
+agreement.
 
 Identity: `experiment_id = f"{experiment_name}-s{seed}"` (no seed ->
 lower-cased so a hand-declared `logging.experiment_name` and dissert's own
@@ -54,7 +41,6 @@ _dispatch_lock = threading.Lock()  # serializes _dispatch_tick() — see batch_r
 PRE_DISPATCH_STATUSES = {"pending", "blocked"}      # not yet claimed by a slot
 IN_FLIGHT_STATUSES = {"dispatching", "running"}     # claimed; a unit exists or is being created
 TERMINAL_STATUSES = {"done", "failed", "cancelled"}
-_KAGGLE_BUSY_STATUSES = kaggle_backend.IN_PROGRESS_STATUSES | {"pushed"}
 
 
 class ExperimentError(Exception):
@@ -502,13 +488,10 @@ def _local_free_slots() -> int:
 
 
 def _kaggle_account_busy(account: Dict[str, Any]) -> bool:
-    """Is *account*'s one real slot occupied — by an old worker-based push
-    OR a new Attempt. This is the one place the new dispatcher looks at the
-    old system's state at all (see module docstring's "known limitation":
-    the reverse — the old dispatcher checking new Attempts — does not
-    happen, since batch_runner.py is frozen as of Phase B)."""
-    if any((w.get("status") or "") in _KAGGLE_BUSY_STATUSES for w in account.get("workers", [])):
-        return True
+    """Is *account*'s one real slot occupied? Attempts are now the only thing
+    that can occupy it — the worker registry this also had to check is gone
+    (XDASH_V2_PLAN.md §3.7), so this no longer reads any second system's
+    state."""
     with _lock:
         data = _load()
     slot = f"kaggle:{account['name']}"

@@ -330,7 +330,7 @@ async function loadTemplates() {
     const data = await api("/api/templates");
     const templates = data.templates || [];
     document.getElementById("template-count").textContent = `${templates.length} template${templates.length === 1 ? "" : "s"}`;
-    body.innerHTML = templates.length ? templates.map((template) => `<div class="template-row"><div class="template-main"><strong>${escapeHtml(template.path)}</strong><div class="settings-profile-path">${template.exists ? `${template.size.toLocaleString()} bytes` : "missing"}</div></div><span class="badge ${template.exists ? template.is_default ? "green" : "slate" : "red"}">${template.is_default ? "default" : template.exists ? "available" : "missing"}</span><div class="template-workers">${template.linked_workers.length ? template.linked_workers.map((worker) => `<span class="badge slate">${escapeHtml(worker.account)} · ${escapeHtml(worker.worker_id)}</span>`).join("") : "<span class=\"settings-profile-path\">No linked workers</span>"}</div></div>`).join("") : `<div class="empty-state">No notebook templates found.</div>`;
+    body.innerHTML = templates.length ? templates.map((template) => `<div class="template-row"><div class="template-main"><strong>${escapeHtml(template.path)}</strong><div class="settings-profile-path">${template.exists ? `${template.size.toLocaleString()} bytes` : "missing"}</div></div><span class="badge ${template.exists ? template.is_default ? "green" : "slate" : "red"}">${template.is_default ? "default" : template.exists ? "available" : "missing"}</span></div>`).join("") : `<div class="empty-state">No notebook templates found.</div>`;
   } catch (e) { body.innerHTML = `<div class="empty-state">Couldn't load templates: ${escapeHtml(e.message)}</div>`; }
 }
 
@@ -690,26 +690,22 @@ async function loadResolvedConfig() {
   }
 }
 
-// Runner picker (DASHBOARD_REDESIGN_PLAN.md §3.2): the local device is always launchable
-// directly; a Kaggle worker is only offered here if it's template-backed
-// (no notebook_path — see backend/kaggle.py's add_worker() docstring), since
-// only those actually run *this* picked config — a notebook-backed worker
-// ignores config_path entirely and keeps its own push button on the Runners
-// tab. Value encodes runner_id and (for Kaggle) worker_id as
-// "kaggle:<account>::<worker_id>" — split back apart in runConfig().
+// Runner picker: the local device launches directly into a tmux session; Kaggle
+// does not launch directly any more (XDASH_V2_PLAN.md §3.7 retired the worker
+// registry this used to enumerate, and §5 made POST /api/experiments the single
+// launch verb). So Kaggle is offered as one target — "any account" — and picking
+// it creates an Experiment that the dispatcher routes to whichever account has
+// both a free slot and the quota for it.
 async function populateRunTargetSelect() {
   state.runTargetsLoaded = true;
   const select = document.getElementById("run-target-select");
   try {
     const data = await api("/api/kaggle/accounts");
-    for (const account of data.accounts || []) {
-      for (const w of account.workers || []) {
-        if (w.notebook_path) continue;
-        const opt = document.createElement("option");
-        opt.value = `kaggle:${account.name}::${w.worker_id}`;
-        opt.textContent = `Kaggle: ${account.name}/${w.worker_id}`;
-        select.appendChild(opt);
-      }
+    if ((data.accounts || []).length) {
+      const opt = document.createElement("option");
+      opt.value = "kaggle";
+      opt.textContent = `Kaggle (any of ${data.accounts.length} account${data.accounts.length === 1 ? "" : "s"})`;
+      select.appendChild(opt);
     }
   } catch (e) { /* local-only select still works fine */ }
 }
@@ -721,7 +717,7 @@ async function populateRunTargetSelect() {
 function updateRunModeAvailability() {
   const target = document.getElementById("run-target-select").value || "local";
   const modeSelect = document.getElementById("run-mode");
-  const isKaggle = target.startsWith("kaggle:");
+  const isKaggle = target === "kaggle";
   modeSelect.disabled = isKaggle;
   modeSelect.title = isKaggle
     ? "A Kaggle push always runs train then eval sequentially inside one kernel — there is no separate train-only or eval-only push."
@@ -751,19 +747,22 @@ async function runConfig() {
     return;
   }
 
-  const sepIdx = target.indexOf("::");
-  const runnerId = target.slice(0, sepIdx);
-  const workerId = target.slice(sepIdx + 2);
+  // Kaggle: create an Experiment and let the dispatcher claim a slot, rather
+  // than pushing from here. Seed is left unset (the config's own), so this is
+  // the one-config shorthand for what the Run Composer does in bulk.
   try {
-    const result = await api(`/api/runners/${encodeURIComponent(runnerId)}/launch`, {
+    const { experiments: created } = await api("/api/experiments", {
       method: "POST",
-      body: JSON.stringify({ config_path: state.selectedConfigPath, mode, extra_args, target: workerId }),
+      body: JSON.stringify({
+        configs: [state.selectedConfigPath], seeds: [null],
+        extra_args, pool: "kaggle_only",
+      }),
     });
-    const label = `${runnerId.replace("kaggle:", "")}/${workerId}`;
-    toast(result.concurrent_warning ? `Pushed to ${label} — ${result.concurrent_warning}` : `Pushed to ${label}`, result.concurrent_warning ? "" : "ok");
-    switchView("compute");
+    const first = (created || [])[0];
+    toast(first ? `Queued ${first.experiment_id} for Kaggle` : "Queued for Kaggle", "ok");
+    switchView("lab");
   } catch (e) {
-    toast("Couldn't push: " + e.message, "err");
+    toast("Couldn't queue: " + e.message, "err");
   }
 }
 

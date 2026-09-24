@@ -39,19 +39,18 @@ import subprocess
 import tempfile
 import threading
 import time
-import urllib.error
-import urllib.request
 import zipfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .config import settings, Settings, SYSTEM_KAGGLE_ACCOUNTS_FILE, SYSTEM_KAGGLE_CREDS_DIR
+from .config import (
+    settings, Settings, list_profile_names,
+    SYSTEM_KAGGLE_ACCOUNTS_FILE, SYSTEM_KAGGLE_CREDS_DIR,
+)
 from . import configs as cfg
-from . import notifications as notif
 
-_lock = threading.Lock()          # guards kaggle_accounts.json / kaggle_state.json
+_lock = threading.Lock()          # guards kaggle_accounts.json
 _ledger_lock = threading.Lock()   # guards concurrent appends to the host repo's runs.csv
 
 STATUS_RE = re.compile(r'has status "([^"]+)"')
@@ -59,21 +58,22 @@ _ENUM_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.")
 # Live-verified 2026-09 against the actually-installed `kaggle` CLI (pip package "kaggle" 1.7.4.5,
 # github.com/Kaggle/kaggle-api): `kernels status` prints the Python enum's own repr — e.g.
 # `has status "KernelWorkerStatus.RUNNING"` — not the bare lowercase string
-# IN_PROGRESS_STATUSES/FINISHED_STATUSES/FINAL_STATUSES below expect. Confirmed via a real push +
+# IN_PROGRESS_STATUSES/FINAL_STATUSES below expect. Confirmed via a real push +
 # status poll during this feature's own testing (DASHBOARD_REDESIGN_PLAN.md §2.1's fact-check).
-# Without this normalization, over-budget detection, the poller's final-status/notification
-# trigger, and download_all()'s "only download finished workers" filter all silently never fire
-# against this CLI version — every comparison below is an exact-match against a lowercase set.
+# Without this normalization, over-budget detection and the dispatcher's own
+# final-status/notification trigger silently never fire against this CLI version — every
+# comparison below is an exact-match against a lowercase set.
 _STATUS_ALIASES = {"cancelacknowledged": "cancelAcknowledged"}
 
 
 def _normalize_kaggle_status(raw: str) -> str:
     value = _ENUM_PREFIX_RE.sub("", (raw or "").strip()).strip().lower()
     return _STATUS_ALIASES.get(value, value)
+
+
 IN_PROGRESS_STATUSES = {"queued", "preparing", "running"}
-FINISHED_STATUSES = {"complete"}
-FINAL_STATUSES = {"complete", "error", "cancelAcknowledged"}  # tick() stops polling/chains past these
-HISTORY_LIMIT = 50  # per-worker event log cap in kaggle_state.json — a rolling window, not an audit archive
+# experiments.py stops polling an Attempt past one of these.
+FINAL_STATUSES = {"complete", "error", "cancelAcknowledged"}
 
 # Template-notebook launch (dashboard redesign, 2026-09): one push == one config, same shape as
 # a local-device launch, instead of the notebook itself hand-authoring a whole batch of configs. The
@@ -227,50 +227,8 @@ def _save_accounts(data: Dict[str, Any]) -> None:
     _save_scope(SCOPE_REPO, {"accounts": repo_out})
 
 
-def _load_state() -> Dict[str, Any]:
-    if not settings.kaggle_state_file.exists():
-        return {}
-    try:
-        return json.loads(settings.kaggle_state_file.read_text())
-    except Exception:
-        return {}
-
-
-def _save_state(state: Dict[str, Any]) -> None:
-    settings.kaggle_state_file.write_text(json.dumps(state, indent=2))
-
-
-def _update_worker_state(worker_id: str, patch: Dict[str, Any], event: Optional[str] = None) -> None:
-    """Merges *patch* into the worker's state record. *event*, if given, also
-    appends a timestamped entry to that record's rolling history log (capped
-    at HISTORY_LIMIT) — not every patch is history-worthy (e.g. a routine
-    status poll that didn't change anything), so callers opt in explicitly."""
-    with _lock:
-        state = _load_state()
-        rec = state.get(worker_id, {})
-        rec.update(patch)
-        if event:
-            history = rec.setdefault("history", [])
-            history.append({"at": _now_iso(), "event": event})
-            del history[:-HISTORY_LIMIT]
-        state[worker_id] = rec
-        _save_state(state)
-
-
 def _find_account(data: Dict[str, Any], name: str) -> Optional[Dict[str, Any]]:
     return next((a for a in data["accounts"] if a["name"] == name), None)
-
-
-def _find_worker(account: Dict[str, Any], worker_id: str) -> Optional[Dict[str, Any]]:
-    return next((w for w in account.get("workers", []) if w["worker_id"] == worker_id), None)
-
-
-def _find_worker_and_account(data: Dict[str, Any], worker_id: str):
-    for account in data["accounts"]:
-        w = _find_worker(account, worker_id)
-        if w is not None:
-            return account, w
-    return None, None
 
 
 # --------------------------------------------------------------------------- accounts
@@ -329,56 +287,13 @@ def _creds_dir(name: str) -> Path:
     return creds_root / name
 
 
-def _source_notebook_path(worker: Dict[str, Any]) -> Path:
-    """Absolute path to the notebook this worker's next push is rendered from
-    (template-backed) or copied from verbatim (notebook-backed) — see
-    add_worker()'s docstring. A worker's own notebook_path/template_path is
-    repo-relative (a file the operator explicitly chose inside the host
-    repo); the profile-wide default template is XDash-owned
-    (settings.kaggle_default_template_file, under data/<profile>/ — never
-    the host repo, see that setting's own comment for why)."""
-    override = worker.get("notebook_path") or worker.get("template_path")
-    if override:
-        return settings.repo_root / override
-    return settings.kaggle_default_template_file
-
-
-def _notebook_changed(worker: Dict[str, Any], worker_state: Dict[str, Any]) -> Optional[bool]:
-    """True if the worker's on-disk *source* notebook/template differs from
-    the one in effect at the last push (by content hash) — None if it's
-    never been pushed, or the file is currently missing, since "changed"
-    isn't a meaningful answer in either case. Compared against
-    `pushed_template_hash` (the source file's own hash), not
-    `pushed_notebook_hash` (the exact, possibly-rendered bytes actually
-    pushed) — for a template-backed worker those two differ on every push by
-    design (config/extra_args get baked in), which would otherwise make this
-    always report "changed" even when the template itself is untouched."""
-    pushed_hash = worker_state.get("pushed_template_hash") or worker_state.get("pushed_notebook_hash")
-    if not pushed_hash:
-        return None
-    notebook_abs = _source_notebook_path(worker)
-    if not notebook_abs.is_file():
-        return None
-    try:
-        current_hash = hashlib.sha1(notebook_abs.read_bytes()).hexdigest()
-    except OSError:
-        return None
-    return current_hash != pushed_hash
-
-
 def list_accounts() -> List[Dict[str, Any]]:
-    """Accounts + workers, each worker enriched with its last known status
-    (from kaggle_state.json), a self-tracked usage estimate/history, and
-    whether its notebook has changed since the last push. Never touches the
-    network — see refresh_status/refresh_all for that."""
+    """Accounts with a self-tracked usage estimate/history. Never touches the
+    network. Credentials are reported only as booleans — the secrets
+    themselves never round-trip to a caller (see update_credentials)."""
     data = _load_accounts()
-    state = _load_state()
     result = []
     for account in data["accounts"]:
-        workers = []
-        for w in account.get("workers", []):
-            w_state = state.get(w["worker_id"], {})
-            workers.append({**w, **w_state, "notebook_changed": _notebook_changed(w, w_state)})
         creds_dir = _creds_dir(account["name"])
         result.append({
             "name": account["name"],
@@ -386,7 +301,6 @@ def list_accounts() -> List[Dict[str, Any]]:
             "scope": account.get("scope", SCOPE_REPO),
             "has_legacy_key": (creds_dir / CREDS_FILENAME).is_file(),
             "has_api_token": (creds_dir / TOKEN_FILENAME).is_file(),
-            "workers": workers,
             "usage_estimate": estimate_usage(account["name"]),
             "usage_history": usage_history(account["name"]),
         })
@@ -552,127 +466,6 @@ def remove_account(name: str) -> bool:
     return True
 
 
-def _validate_notebook_path(notebook_path: str) -> Path:
-    notebook_abs = (settings.repo_root / notebook_path).resolve()
-    repo_root = settings.repo_root.resolve()
-    if repo_root not in notebook_abs.parents and notebook_abs != repo_root:
-        raise KaggleOpsError("notebook_path escapes the repo root")
-    if not notebook_abs.is_file():
-        raise KaggleOpsError(f"Notebook not found: {notebook_path}")
-    return notebook_abs
-
-
-# {username}/{slug} or {username}/{slug}/{version} — mirrors the installed kaggle CLI's own
-# validate_dataset_string() exactly (kaggle/api/kaggle_api_extended.py), so a malformed entry is
-# rejected here with a clear message instead of surfacing as a less legible failure from
-# `kaggle kernels push` itself (EXPERIMENT_AUTOMATION_PLAN.md §2.5).
-def _validate_dataset_source(source: str) -> str:
-    source = (source or "").strip()
-    if not source:
-        raise KaggleOpsError("Dataset source may not be empty")
-    parts = source.split("/")
-    if len(parts) < 2 or len(parts) > 3 or not parts[0] or not parts[1]:
-        raise KaggleOpsError(
-            f"Invalid dataset source {source!r} — expected '{{username}}/{{dataset-slug}}' or "
-            "'{username}/{dataset-slug}/{version}'"
-        )
-    return source
-
-
-def add_worker(
-    account_name: str, worker_id: str, kernel_slug: str, results_dir: str,
-    budget_hours: Optional[float] = None, notebook_path: str = "", template_path: str = "",
-    dataset_sources: Optional[List[str]] = None,
-) -> Dict[str, Any]:
-    """A worker is either **notebook-backed** (`notebook_path` set — the original shape: a fixed,
-    hand-authored notebook pushed verbatim every time, e.g. the existing
-    `iccit-kaggle-worker3/4.ipynb`) or **template-backed** (`notebook_path` left blank — the
-    default going forward: `push()` renders a config/extra_args into a shared template,
-    settings.kaggle_default_template unless `template_path` overrides it, per-launch — see
-    LAUNCH_SPEC_MARKER / _render_launch_notebook()). The two are mutually exclusive so a worker's
-    launch behavior is never ambiguous.
-
-    *dataset_sources* (EXPERIMENT_AUTOMATION_PLAN.md §2.5) is the list of Kaggle datasets
-    (`{username}/{slug}` strings) this worker's pushed kernel declares in kernel-metadata.json —
-    previously hardcoded to `[]` in _kernel_metadata(), which meant every push produced a kernel
-    with no data attached at all. A worker's template still asserts at runtime that the config's
-    dataset shows up under /kaggle/input/ (see the launch template's own dataset-attach cell) —
-    this only controls what Kaggle attaches *for* the kernel, not whether a given config's
-    dataset happens to be among what's listed here. NOT YET verified whether pushing overwrites
-    a dataset a human attached by hand through the Kaggle web UI (kernel-metadata.json is
-    declarative, so that's the expectation, but confirm with one real push before relying on
-    manual attachment as a fallback)."""
-    worker_id = (worker_id or "").strip()
-    notebook_path, template_path = (notebook_path or "").strip(), (template_path or "").strip()
-    if not worker_id or not kernel_slug or not results_dir:
-        raise KaggleOpsError("worker_id, kernel_slug and results_dir are all required")
-    if notebook_path and template_path:
-        raise KaggleOpsError("A worker takes either notebook_path (a fixed notebook) or template_path "
-                              "(a launch template), not both")
-    if notebook_path:
-        _validate_notebook_path(notebook_path)
-    elif template_path:
-        _validate_notebook_path(template_path)  # same validation: repo-relative, must exist
-    dataset_sources = [_validate_dataset_source(s) for s in (dataset_sources or [])]
-
-    with _lock:
-        data = _load_accounts()
-        account = _find_account(data, account_name)
-        if account is None:
-            raise KaggleOpsError(f"Unknown account '{account_name}'")
-        if _find_worker(account, worker_id) is not None:
-            raise KaggleOpsError(f"Worker '{worker_id}' already exists under '{account_name}'")
-        worker = {
-            "worker_id": worker_id,
-            "account_name": account_name,
-            "profile_name": settings.profile_name,
-            "kernel_slug": kernel_slug,
-            "results_dir": str(results_dir),
-            "budget_hours": float(budget_hours) if budget_hours else settings.kaggle_default_budget_hours,
-            "dataset_sources": dataset_sources,
-        }
-        if notebook_path:
-            worker["notebook_path"] = notebook_path
-        if template_path:
-            worker["template_path"] = template_path
-        account.setdefault("workers", []).append(worker)
-        _save_accounts(data)
-    return worker
-
-
-def set_worker_datasets(account_name: str, worker_id: str, dataset_sources: List[str]) -> Dict[str, Any]:
-    """Replaces a worker's dataset_sources wholesale — the data a config needs changes over a
-    worker's life (it's reused across many pushes/configs), so this needs to be editable without
-    deleting and re-adding the worker, which would also lose its budget_hours/kernel_slug/state
-    history for no reason."""
-    dataset_sources = [_validate_dataset_source(s) for s in (dataset_sources or [])]
-    with _lock:
-        data = _load_accounts()
-        account = _find_account(data, account_name)
-        if account is None:
-            raise KaggleOpsError(f"Unknown account '{account_name}'")
-        worker = _find_worker(account, worker_id)
-        if worker is None:
-            raise KaggleOpsError(f"Unknown worker '{worker_id}'")
-        worker["dataset_sources"] = dataset_sources
-        _save_accounts(data)
-    return {"worker_id": worker_id, "dataset_sources": dataset_sources}
-
-
-def remove_worker(account_name: str, worker_id: str) -> bool:
-    with _lock:
-        data = _load_accounts()
-        account = _find_account(data, account_name)
-        if account is None:
-            return False
-        before = len(account.get("workers", []))
-        account["workers"] = [w for w in account.get("workers", []) if w["worker_id"] != worker_id]
-        if len(account["workers"]) == before:
-            return False
-        _save_accounts(data)
-    return True
-
-
 # --------------------------------------------------------------------------- CLI subprocess
 def _run_kaggle(args: List[str], account_name: str, timeout: Optional[float] = None) -> subprocess.CompletedProcess:
     creds_dir = _creds_dir(account_name)
@@ -807,140 +600,10 @@ def _render_launch_notebook(
 
 
 
-def push(worker_id: str, config_path: str = "", extra_args: str = "") -> Dict[str, Any]:
-    """Pushes *worker_id*'s kernel. A notebook-backed worker (`notebook_path`
-    set) is pushed verbatim — *config_path*/*extra_args* are ignored,
-    matching the original behavior exactly. A template-backed worker (the
-    default) requires *config_path*: the launch spec is rendered into its
-    template (settings.kaggle_default_template, or `template_path` if set)
-    before push, running train then eval sequentially inside the one kernel
-    (EXPERIMENT_AUTOMATION_PLAN.md §2.4).
-
-    Every push is fresh — there is no resume contract (XDASH_V2_PLAN.md §4.A1
-    deleted it: it validated thoroughly and then silently ran a fresh
-    training job anyway, see the plan's D1-D4). Phase D re-specifies resume
-    against Kaggle-dataset-versioned legs once the host repo supports
-    ``--max-hours`` self-limiting; nothing here should be extended to fake it
-    sooner."""
-    data = _load_accounts()
-    account, worker = _find_worker_and_account(data, worker_id)
-    if worker is None:
-        raise KaggleOpsError(f"Unknown worker '{worker_id}'")
-
-    notebook_path = worker.get("notebook_path")
-    if notebook_path:
-        source_abs = settings.repo_root / notebook_path
-        if not source_abs.is_file():
-            raise KaggleOpsError(f"Notebook not found: {notebook_path}")
-        push_bytes = source_abs.read_bytes()
-        push_name = source_abs.name
-    else:
-        config_path = (config_path or "").strip()
-        if not config_path:
-            raise KaggleOpsError(
-                f"Worker '{worker_id}' is template-backed — a config_path is required to push "
-                "(pick a config the same way you would to launch it on the local device)"
-            )
-        try:
-            cfg.read_config(config_path)  # raises if the config doesn't exist / isn't valid YAML
-            cli_config_path = cfg.repo_relative_path(config_path)  # e.g. "configs/mkunet/foo.yaml"
-        except (FileNotFoundError, ValueError) as e:
-            raise KaggleOpsError(f"Config not found: {config_path} ({e})")
-        source_abs = _source_notebook_path(worker)
-        if not source_abs.is_file():
-            raise KaggleOpsError(f"Template notebook not found: {source_abs}")
-        dataset_source = next(iter(worker.get("dataset_sources") or []), "")
-        push_bytes = _render_launch_notebook(source_abs, cli_config_path, extra_args, dataset_source)
-        push_name = source_abs.name
-
-    source_hash = hashlib.sha1(source_abs.read_bytes()).hexdigest()
-
-    tmpdir = tempfile.mkdtemp(prefix="kaggle_push_")
-    try:
-        (Path(tmpdir) / push_name).write_bytes(push_bytes)
-        metadata = _kernel_metadata(account, worker, push_name)
-        (Path(tmpdir) / "kernel-metadata.json").write_text(json.dumps(metadata, indent=2))
-        push_args = ["kernels", "push", "-p", tmpdir]
-
-        budget_hours = worker.get("budget_hours") or settings.kaggle_default_budget_hours
-        timeout_args = ["--timeout", str(int(float(budget_hours) * 3600))]
-        proc = _run_kaggle(push_args + timeout_args, account["name"], timeout=120)
-        if proc.returncode != 0 and _looks_like_unrecognized_option(proc.stderr or proc.stdout, "--timeout"):
-            # The installed `kaggle` CLI predates the --timeout flag (confirmed present as of the
-            # official kaggle-cli's 2026 release, per DASHBOARD_REDESIGN_PLAN.md's fact-check, but
-            # never verified against whatever version is actually installed on this host) — retry
-            # without it rather than hard-failing every push over one optional enforcement flag.
-            proc = _run_kaggle(push_args, account["name"], timeout=120)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout).strip()
-        _update_worker_state(worker_id, {"status": "push_failed", "last_error": detail}, event="push failed")
-        raise KaggleOpsError(f"Push failed for '{worker_id}': {detail}")
-
-    notebook_hash = hashlib.sha1(push_bytes).hexdigest()
-    event = "pushed" if notebook_path else f"pushed — {config_path}"
-    state_patch = {
-        "status": "pushed", "pushed_at": _now_iso(), "last_error": None, "over_budget": False,
-        "notified_final": False, "pushed_notebook_hash": notebook_hash, "pushed_template_hash": source_hash,
-        "last_config_path": config_path or None,
-        "last_extra_args": extra_args or None,
-        "xdash_status": None,  # cleared here — download() sets it from this push's own status file
-    }
-    _update_worker_state(worker_id, state_patch, event=event)
-    warning = _concurrent_push_warning(account, worker_id)
-    result = {"worker_id": worker_id, "status": "pushed"}
-    if warning:
-        result["concurrent_warning"] = warning
-    return result
-
-
-def restart(worker_id: str) -> Dict[str, Any]:
-    """Re-pushes a template-backed worker with the config/extra_args from
-    its last push — the Kaggle-side counterpart of terminals.restart()
-    (the local device's restart re-runs the same config/args in a fresh tmux session;
-    this re-renders and re-pushes the same launch spec). Not meaningful for
-    a notebook-backed worker (push() already ignores config_path for those)
-    — just calls push() again with no spec, which is a plain re-push,
-    matching that worker's pre-existing behavior."""
-    data = _load_accounts()
-    _, worker = _find_worker_and_account(data, worker_id)
-    if worker is None:
-        raise KaggleOpsError(f"Unknown worker '{worker_id}'")
-    if worker.get("notebook_path"):
-        return push(worker_id)
-    state = _load_state().get(worker_id, {})
-    config_path = state.get("last_config_path")
-    if not config_path:
-        raise KaggleOpsError(f"Worker '{worker_id}' has never been pushed with a config — nothing to restart")
-    return push(worker_id, config_path, state.get("last_extra_args") or "")
-
-
 def _looks_like_unrecognized_option(output: str, flag: str) -> bool:
     text = (output or "").lower()
     return flag.lower() in text and any(
         phrase in text for phrase in ("no such option", "unrecognized", "unexpected argument", "unknown option")
-    )
-
-
-def _concurrent_push_warning(account: Dict[str, Any], worker_id: str) -> Optional[str]:
-    """Kaggle accounts typically run one kernel at a time — a second push
-    under the same account usually just queues (or bumps) the first rather
-    than running in parallel. Non-blocking: this only annotates the push
-    response so the caller can warn, since Kaggle's own behavior here isn't
-    something worth guessing at and hard-blocking on."""
-    state = _load_state()
-    siblings = [
-        w["worker_id"] for w in account.get("workers", [])
-        if w["worker_id"] != worker_id
-        and state.get(w["worker_id"], {}).get("status") in IN_PROGRESS_STATUSES
-    ]
-    if not siblings:
-        return None
-    return (
-        f"Account '{account['name']}' already has {', '.join(siblings)} in progress — "
-        "Kaggle typically runs one kernel per account at a time, so this push may just queue."
     )
 
 
@@ -1104,41 +767,6 @@ def download_experiment(account_name: str, kernel_slug: str, results_dir: str) -
     return {"results_dir": str(results_dir_abs), "registered_runs": registered, "xdash_status": xdash_status}
 
 
-# --------------------------------------------------------------------------- status
-def refresh_status(worker_id: str) -> Dict[str, Any]:
-    data = _load_accounts()
-    account, worker = _find_worker_and_account(data, worker_id)
-    if worker is None:
-        raise KaggleOpsError(f"Unknown worker '{worker_id}'")
-    kernel_ref = f"{account['kaggle_username']}/{worker['kernel_slug']}"
-    proc = _run_kaggle(["kernels", "status", kernel_ref], account["name"], timeout=30)
-
-    if proc.returncode != 0:
-        patch = {"status": "unknown", "last_error": (proc.stderr or proc.stdout).strip()}
-        _update_worker_state(worker_id, patch)
-        return {"worker_id": worker_id, **patch}
-
-    m = STATUS_RE.search(proc.stdout)
-    kaggle_status = _normalize_kaggle_status(m.group(1)) if m else "unknown"
-
-    state = _load_state()
-    prior = state.get(worker_id, {})
-    pushed_at = prior.get("pushed_at")
-    over_budget = False
-    if kaggle_status in IN_PROGRESS_STATUSES and pushed_at:
-        budget_hours = worker.get("budget_hours") or settings.kaggle_default_budget_hours
-        elapsed_hours = (datetime.now(timezone.utc) - datetime.fromisoformat(pushed_at)).total_seconds() / 3600.0
-        over_budget = elapsed_hours > budget_hours
-
-    patch = {"status": kaggle_status, "last_error": None, "over_budget": over_budget, "checked_at": _now_iso()}
-    # Only worth a history line when the status actually moved — a poll that
-    # just reconfirms "still running" every tick would otherwise flood the
-    # log with duplicate entries.
-    event = f"status: {kaggle_status}" if kaggle_status != prior.get("status") else None
-    _update_worker_state(worker_id, patch, event=event)
-    return {"worker_id": worker_id, **patch}
-
-
 # --------------------------------------------------------------------------- download + ledger
 def _iter_downloaded_manifests(results_dir: Path):
     """Yields (manifest_path, run_id) for every manifest.json under a
@@ -1279,54 +907,6 @@ def _read_xdash_status(results_dir: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def download(worker_id: str) -> Dict[str, Any]:
-    data = _load_accounts()
-    account, worker = _find_worker_and_account(data, worker_id)
-    if worker is None:
-        raise KaggleOpsError(f"Unknown worker '{worker_id}'")
-    kernel_ref = f"{account['kaggle_username']}/{worker['kernel_slug']}"
-
-    tmpdir = tempfile.mkdtemp(prefix="kaggle_download_")
-    try:
-        proc = _run_kaggle(["kernels", "output", kernel_ref, "-p", tmpdir], account["name"], timeout=900)
-        if proc.returncode != 0:
-            detail = (proc.stderr or proc.stdout).strip()
-            _update_worker_state(worker_id, {"last_error": detail})
-            raise KaggleOpsError(f"Download failed for '{worker_id}': {detail}")
-
-        zips = list(Path(tmpdir).glob("*.zip"))
-        if not zips:
-            raise KaggleOpsError(f"No output files found for '{worker_id}' — has the kernel finished?")
-
-        results_dir = (settings.repo_root / worker["results_dir"]).resolve()
-        repo_root = settings.repo_root.resolve()
-        if repo_root not in results_dir.parents and results_dir != repo_root:
-            raise KaggleOpsError("results_dir escapes the repo root")
-        results_dir.mkdir(parents=True, exist_ok=True)
-
-        for zip_path in zips:
-            with zipfile.ZipFile(zip_path) as zf:
-                zf.extractall(results_dir)
-    finally:
-        shutil.rmtree(tmpdir, ignore_errors=True)
-
-    registered = register_ledger(results_dir)
-    xdash_status = _read_xdash_status(results_dir)
-    failed_stage = xdash_status and xdash_status.get("returncode") not in (0, None)
-    patch = {
-        "status": "downloaded", "downloaded_at": _now_iso(), "xdash_status": xdash_status,
-        "last_error": (
-            f"{xdash_status.get('stage', 'run')} exited with code {xdash_status.get('returncode')} "
-            "(see downloaded logs)"
-        ) if failed_stage else None,
-    }
-    event = f"downloaded — {len(registered)} run(s) registered" if registered else "downloaded"
-    if failed_stage:
-        event = f"downloaded — {xdash_status.get('stage', 'run')} failed (exit {xdash_status.get('returncode')})"
-    _update_worker_state(worker_id, patch, event=event)
-    return {"worker_id": worker_id, "results_dir": str(results_dir), "registered_runs": registered, "xdash_status": xdash_status}
-
-
 # --------------------------------------------------------------------------- quota estimate
 _profile_snapshot_cache: Dict[str, Optional[Settings]] = {}
 
@@ -1347,6 +927,30 @@ def _profile_snapshot(profile_name: str) -> Optional[Settings]:
         except Exception:
             _profile_snapshot_cache[profile_name] = None
     return _profile_snapshot_cache[profile_name]
+
+
+# Attempt statuses (backend/experiments.py's vocabulary, not Kaggle's) that
+# should still reserve quota: the kernel is pushed or about to be, so its
+# hours are being spent even though no manifest exists yet.
+_RESERVING_STATUSES = frozenset({"dispatching", "running"})
+
+
+def _attempts_from_store(path: Path) -> List[Dict[str, Any]]:
+    """Every Attempt record out of a profile's experiments.json, read as plain
+    JSON rather than through backend/experiments.py — that module imports this
+    one to push, so a real import would be circular, and the four fields read
+    here (slot, status, started_at, unit_ref.results_dir) are a stable part of
+    the on-disk shape. Missing/corrupt file reads as "no attempts", never
+    raises: quota accounting degrading to 0 is survivable, a 500 on every
+    account list is not."""
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text())
+    except (ValueError, OSError):
+        return []
+    attempts = data.get("attempts") if isinstance(data, dict) else None
+    return list(attempts.values()) if isinstance(attempts, dict) else []
 
 
 def _iter_extracted_manifests(base_dir: Path, manifest_layout: str):
@@ -1421,7 +1025,7 @@ def _usage_history_uncached(account_name: str, weeks: int) -> List[Dict[str, Any
     the dispatcher over-commit the account.
 
     The current week's bucket also includes an **in-flight reservation**:
-    for each of this account's workers currently IN_PROGRESS_STATUSES, add
+    for each of this account's Attempts still in _RESERVING_STATUSES, add
     min(elapsed_hours, budget_hours). Without this, a kernel that has been
     running for hours counts as 0 until it finishes and is downloaded, so a
     gate built on the bare completed-runs total would keep waving through
@@ -1434,64 +1038,55 @@ def _usage_history_uncached(account_name: str, weeks: int) -> List[Dict[str, Any
     if account is None:
         return [{"week_start": b.isoformat(), "hours": 0.0} for b in buckets]
 
-    # (worker, repo_root, manifest_layout, state) tuples. A repo-scoped
-    # account only ever has workers under the active profile; a system one
-    # resolves each worker against its own profile's snapshot, since
-    # results_dir/manifest_layout/kaggle_state_file are all repo-relative or
-    # per-profile.
+    # (attempt, repo_root, manifest_layout) tuples. A repo-scoped account only
+    # ever ran under the active profile; a system one accrues hours under every
+    # profile it was dispatched from, and results_dir/manifest_layout are both
+    # repo-relative or per-profile — which is the whole reason for the
+    # per-profile snapshot rather than just reading `settings`.
     scoped: List[tuple] = []
     if account.get("scope") == SCOPE_SYSTEM:
-        stored = next(
-            (a for a in _load_scope(SCOPE_SYSTEM)["accounts"] if a["name"] == account_name), {}
-        )
-        for worker in stored.get("workers", []):
-            snap = _profile_snapshot(worker.get("profile", settings.profile_name))
+        for profile_name in list_profile_names():
+            snap = _profile_snapshot(profile_name)
             if snap is None:
                 continue
-            state = _load_state() if snap.profile_name == settings.profile_name else _read_state_file(snap.kaggle_state_file)
-            scoped.append((worker, snap.repo_root, snap.manifest_layout, state))
+            for attempt in _attempts_from_store(snap.experiments_store_file):
+                scoped.append((attempt, snap.repo_root, snap.manifest_layout))
     else:
-        state = _load_state()
-        scoped = [(w, settings.repo_root, settings.manifest_layout, state) for w in account.get("workers", [])]
+        for attempt in _attempts_from_store(settings.experiments_store_file):
+            scoped.append((attempt, settings.repo_root, settings.manifest_layout))
 
+    slot = "kaggle:%s" % account_name
     earliest = buckets[0]
     now = datetime.now(timezone.utc)
-    for worker, repo_root, manifest_layout, state in scoped:
-        base_dir = (repo_root / worker["results_dir"]).resolve()
-        for _p, _run_id, manifest in _iter_extracted_manifests(base_dir, manifest_layout):
-            start_time, gpu_hours = manifest.get("start_time"), manifest.get("gpu_hours")
-            if not start_time or not gpu_hours:
-                continue
-            try:
-                started = datetime.fromisoformat(start_time)
-            except ValueError:
-                continue
-            if started < earliest:
-                continue
-            bucket = _utc_week_start(started)
-            if bucket in totals:
-                totals[bucket] += float(gpu_hours)
+    for attempt, repo_root, manifest_layout in scoped:
+        if attempt.get("slot") != slot:
+            continue
+        results_dir = (attempt.get("unit_ref") or {}).get("results_dir")
+        if results_dir:
+            base_dir = (repo_root / results_dir).resolve()
+            for _p, _run_id, manifest in _iter_extracted_manifests(base_dir, manifest_layout):
+                start_time, gpu_hours = manifest.get("start_time"), manifest.get("gpu_hours")
+                if not start_time or not gpu_hours:
+                    continue
+                try:
+                    started = datetime.fromisoformat(start_time)
+                except ValueError:
+                    continue
+                if started < earliest:
+                    continue
+                bucket = _utc_week_start(started)
+                if bucket in totals:
+                    totals[bucket] += float(gpu_hours)
 
-        w_state = state.get(worker["worker_id"], {})
-        if w_state.get("status") in IN_PROGRESS_STATUSES and w_state.get("pushed_at"):
+        if attempt.get("status") in _RESERVING_STATUSES and attempt.get("started_at"):
             try:
-                pushed_at = datetime.fromisoformat(w_state["pushed_at"])
+                started_at = datetime.fromisoformat(attempt["started_at"])
             except ValueError:
                 continue
-            elapsed_hours = (now - pushed_at).total_seconds() / 3600.0
-            budget_hours = float(worker.get("budget_hours") or settings.kaggle_default_budget_hours)
-            totals[this_week_start] += min(elapsed_hours, budget_hours)
+            elapsed_hours = (now - started_at).total_seconds() / 3600.0
+            totals[this_week_start] += min(elapsed_hours, settings.kaggle_default_budget_hours)
 
     return [{"week_start": b.isoformat(), "hours": round(totals[b], 2)} for b in buckets]
-
-
-def _read_state_file(path: Path) -> Dict[str, Any]:
-    if not path.exists():
-        return {}
-    try:
-        return json.loads(path.read_text())
-    except Exception:
-        return {}
 
 
 def usage_history(account_name: str, weeks: int = 6) -> List[Dict[str, Any]]:
@@ -1551,142 +1146,6 @@ def set_weekly_budget(name: str, hours: Optional[float]) -> Dict[str, Any]:
     return {"name": name, "weekly_budget_hours": account["weekly_budget_hours"]}
 
 
-# --------------------------------------------------------------------------- bulk / fleet ops
-def _all_worker_ids() -> List[str]:
-    data = _load_accounts()
-    return [w["worker_id"] for a in data["accounts"] for w in a.get("workers", [])]
-
-
-def _run_bulk(fn, worker_ids: List[str]) -> List[Dict[str, Any]]:
-    if not worker_ids:
-        return []
-    results = []
-    with ThreadPoolExecutor(max_workers=settings.kaggle_push_concurrency) as pool:
-        futures = {pool.submit(fn, wid): wid for wid in worker_ids}
-        for future in as_completed(futures):
-            worker_id = futures[future]
-            try:
-                results.append(future.result())
-            except KaggleOpsError as e:
-                results.append({"worker_id": worker_id, "error": str(e)})
-    return results
-
-
-def _push_or_restart(worker_id: str) -> Dict[str, Any]:
-    """push_all()'s per-worker action: a notebook-backed worker just pushes
-    (as always); a template-backed worker re-pushes its *last* config/
-    extra_args via restart() — push() alone would fail every time here since it
-    has no config_path to work from without one being passed explicitly.
-    Raises KaggleOpsError (caught by _run_bulk) for a template-backed worker
-    that's never been pushed yet — "push all" bulk-repeats known launches,
-    it doesn't guess a first one."""
-    data = _load_accounts()
-    _, worker = _find_worker_and_account(data, worker_id)
-    if worker is None:
-        raise KaggleOpsError(f"Unknown worker '{worker_id}'")
-    if worker.get("notebook_path"):
-        return push(worker_id)
-    return restart(worker_id)
-
-
-def push_all() -> List[Dict[str, Any]]:
-    return _run_bulk(_push_or_restart, _all_worker_ids())
-
-
-def refresh_all() -> List[Dict[str, Any]]:
-    return _run_bulk(refresh_status, _all_worker_ids())
-
-
-def download_all() -> List[Dict[str, Any]]:
-    """Downloads every worker whose last known status (from the last
-    refresh) is Kaggle's finished state — running/queued workers are
-    skipped rather than attempting a download that would just fail."""
-    data = _load_accounts()
-    state = _load_state()
-    worker_ids = [
-        w["worker_id"]
-        for a in data["accounts"] for w in a.get("workers", [])
-        if state.get(w["worker_id"], {}).get("status") in FINISHED_STATUSES
-    ]
-    return _run_bulk(download, worker_ids)
-
-
-# --------------------------------------------------------------------------- registry export/import
-def export_registry() -> Dict[str, Any]:
-    """The account+worker registry, verbatim — no credentials are anywhere
-    in this structure (they live in separate files under kaggle_creds_dir,
-    never referenced here by content), so it's safe to hand to a teammate
-    or save as a file. Pairs with import_registry(), which only ever adds
-    workers to accounts that already exist locally — credentials are never
-    something an import can supply, by design."""
-    return _load_accounts()
-
-
-def import_registry(payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Adds workers from *payload* (the shape export_registry() returns) to
-    accounts that already exist locally, matched by name. An account in the
-    payload that doesn't exist locally is skipped entirely — creating one
-    would need credentials, which an import file never carries — and a
-    worker whose worker_id already exists locally, or whose notebook can't
-    be found under this repo_root, is skipped too rather than silently
-    overwritten or half-added."""
-    accounts_in = payload.get("accounts") if isinstance(payload, dict) else None
-    if not isinstance(accounts_in, list):
-        raise KaggleOpsError('Expected {"accounts": [...]} — the same shape export_registry() produces')
-
-    added: List[Dict[str, str]] = []
-    skipped_accounts: List[str] = []
-    skipped_workers: List[Dict[str, str]] = []
-    with _lock:
-        data = _load_accounts()
-        for incoming in accounts_in:
-            name = (incoming or {}).get("name")
-            account = _find_account(data, name) if name else None
-            if account is None:
-                if name:
-                    skipped_accounts.append(name)
-                continue
-            for w in incoming.get("workers", []) or []:
-                worker_id = (w or {}).get("worker_id")
-                if not worker_id:
-                    continue
-                if _find_worker(account, worker_id) is not None:
-                    skipped_workers.append({"account": name, "worker_id": worker_id, "reason": "already exists"})
-                    continue
-                required = {"kernel_slug", "results_dir"}  # notebook_path/template_path are both optional
-                if not required.issubset(w):
-                    skipped_workers.append({"account": name, "worker_id": worker_id, "reason": "missing fields"})
-                    continue
-                source_field = "notebook_path" if w.get("notebook_path") else ("template_path" if w.get("template_path") else None)
-                if source_field:
-                    try:
-                        _validate_notebook_path(w[source_field])
-                    except KaggleOpsError as e:
-                        skipped_workers.append({"account": name, "worker_id": worker_id, "reason": str(e)})
-                        continue
-                try:
-                    incoming_datasets = [_validate_dataset_source(s) for s in (w.get("dataset_sources") or [])]
-                except KaggleOpsError as e:
-                    skipped_workers.append({"account": name, "worker_id": worker_id, "reason": str(e)})
-                    continue
-                new_worker = {
-                    "worker_id": worker_id,
-                    "account_name": name,
-                    "profile_name": settings.profile_name,
-                    "kernel_slug": w["kernel_slug"],
-                    "results_dir": w["results_dir"],
-                    "budget_hours": w.get("budget_hours") or settings.kaggle_default_budget_hours,
-                    "dataset_sources": incoming_datasets,
-                }
-                if source_field:
-                    new_worker[source_field] = w[source_field]
-                account.setdefault("workers", []).append(new_worker)
-                added.append({"account": name, "worker_id": worker_id})
-        if added:
-            _save_accounts(data)
-    return {"workers_added": added, "accounts_skipped": skipped_accounts, "workers_skipped": skipped_workers}
-
-
 # --------------------------------------------------------------------------- background poller
 # The one deliberate background thread in this module (mirroring
 # backend/scheduler.py's own ensure_worker_started/_tick — see that module's
@@ -1699,67 +1158,3 @@ _poller_started = False
 _poller_lock = threading.Lock()
 
 
-def _send_webhook(text: str) -> None:
-    """Best-effort POST to a Slack/Discord-compatible incoming webhook (both
-    accept a bare {"text": ...} JSON body). Never raises — a webhook that's
-    unreachable or misconfigured shouldn't take down the poll tick, since
-    nothing downstream depends on it succeeding."""
-    url = settings.kaggle_webhook_url
-    if not url:
-        return
-    try:
-        req = urllib.request.Request(
-            url, data=json.dumps({"text": text}).encode(), method="POST",
-            headers={"Content-Type": "application/json"},
-        )
-        urllib.request.urlopen(req, timeout=10).close()
-    except (urllib.error.URLError, OSError):
-        pass
-
-
-def _tick() -> None:
-    data = _load_accounts()
-    state = _load_state()
-    for account in data["accounts"]:
-        for w in account.get("workers", []):
-            worker_id = w["worker_id"]
-            rec = state.get(worker_id, {})
-            if not rec.get("pushed_at") or rec.get("notified_final"):
-                continue  # never pushed, or this transition was already handled
-            try:
-                result = refresh_status(worker_id)
-            except KaggleOpsError:
-                continue
-            new_status = result.get("status")
-            if new_status not in FINAL_STATUSES:
-                continue
-
-            _update_worker_state(worker_id, {"notified_final": True})
-            notif.send_all(f"Kaggle worker '{worker_id}' ({account['name']}) is now {new_status}.")
-            _send_webhook(f"Kaggle worker '{worker_id}' ({account['name']}) is now {new_status}.")
-
-            # Batch-dispatcher completion hook (EXPERIMENT_AUTOMATION_PLAN.md §4). Lazy import:
-            # batch_runner imports this module to call push(), so a top-level import here would
-            # be circular; not held under any lock at this point in _tick() (each call above
-            # already acquired and released _lock independently), so no deadlock risk calling
-            # back into batch_runner's own locking (assignments._lock) from here.
-            from . import batch_runner
-            batch_runner.on_kaggle_unit_finished(worker_id, new_status)
-
-
-def _poll_loop() -> None:
-    while True:
-        try:
-            _tick()
-        except Exception:
-            pass  # one bad tick must never kill the whole poller
-        time.sleep(max(30, settings.kaggle_poll_interval_seconds))
-
-
-def ensure_kaggle_worker_started() -> None:
-    global _poller_started
-    with _poller_lock:
-        if _poller_started:
-            return
-        threading.Thread(target=_poll_loop, daemon=True).start()
-        _poller_started = True

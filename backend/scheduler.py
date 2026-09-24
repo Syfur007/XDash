@@ -349,14 +349,12 @@ def _tick():
             label = item.get("experiment_name") or item["config_path"]
             notif.send_all(f"Scheduled run '{label}' ({item['mode']}) is now {item['status']}.")
 
-    # Batch completion must observe both ordinary terminal transitions and
-    # dependency skips, but callbacks re-enter scheduler-owned APIs and must
-    # run after _lock is released.
+    # Attempt completion must observe both ordinary terminal transitions and
+    # dependency skips, but the callback re-enters scheduler-owned APIs and
+    # must run after _lock is released.
     if just_finished:
-        from . import batch_runner
         from . import experiments
         for item in just_finished:
-            batch_runner.on_scheduler_item_finished(item["id"])
             experiments.on_scheduler_item_finished(item["id"])
 
 

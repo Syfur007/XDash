@@ -60,14 +60,7 @@ def set_active_profile(profile_name: str) -> Dict[str, Any]:
     if profile_name not in names:
         raise RepoProfileError(f"Unknown repo profile '{profile_name}' (known: {', '.join(names) or 'none'})")
     if profile_name != settings.profile_name:
-        from . import batch_runner
         from . import experiments
-        for batch in batch_runner.list_batches():
-            if batch.get("status") == "running":
-                raise RepoProfileBusyError(
-                    f"Cannot switch profiles while batch '{batch.get('name', '')}' is running; "
-                    "pause or cancel it first"
-                )
         for e in experiments.list_experiments():
             if e["status"] in experiments.IN_FLIGHT_STATUSES:
                 raise RepoProfileBusyError(
@@ -125,31 +118,36 @@ def _local_sessions_for_profile(name: str, snap: Settings, alive_sessions: set) 
 
 
 def _kaggle_sessions_for_profile(name: str, snap: Settings) -> List[Dict[str, Any]]:
-    if not snap.kaggle_accounts_file.exists():
+    """In-flight Kaggle Attempts under *name*, read straight out of that
+    profile's experiments.json. Attempts replaced the worker registry this
+    used to enumerate (XDASH_V2_PLAN.md §3.7); reading the store as plain
+    JSON — rather than importing backend/experiments.py — keeps this a
+    snapshot of *another* profile, which is the whole point of the function
+    (backend/experiments.py only ever reports the active one)."""
+    if not snap.experiments_store_file.exists():
         return []
     try:
-        accounts = (json.loads(snap.kaggle_accounts_file.read_text()) or {}).get("accounts", [])
+        store = json.loads(snap.experiments_store_file.read_text()) or {}
     except Exception:
-        accounts = []
-    state: Dict[str, Any] = {}
-    if snap.kaggle_state_file.exists():
-        try:
-            state = json.loads(snap.kaggle_state_file.read_text()) or {}
-        except Exception:
-            state = {}
+        return []
+    attempts = store.get("attempts")
+    if not isinstance(attempts, dict):
+        return []
 
     out = []
-    for account in accounts:
-        for w in account.get("workers", []):
-            w_state = state.get(w["worker_id"], {})
-            if not w_state.get("status"):
-                continue  # never pushed — nothing to show, same as KaggleRunner.list_units()
-            out.append({
-                "profile": name, "kind": "kaggle", "unit_id": w["worker_id"],
-                "label": w["worker_id"], "account": account.get("name"),
-                "status": w_state.get("status"), "over_budget": w_state.get("over_budget", False),
-                "pushed_at": w_state.get("pushed_at"),
-            })
+    for attempt in attempts.values():
+        slot = attempt.get("slot") or ""
+        if not slot.startswith("kaggle:") or attempt.get("status") not in ("dispatching", "running"):
+            continue
+        unit_ref = attempt.get("unit_ref") or {}
+        out.append({
+            "profile": name, "kind": "kaggle", "unit_id": attempt.get("attempt_id"),
+            "label": attempt.get("experiment_id") or attempt.get("attempt_id"),
+            "account": slot.split(":", 1)[1],
+            "status": attempt.get("raw_status") or attempt.get("status"),
+            "kernel_slug": unit_ref.get("kernel_slug"),
+            "pushed_at": attempt.get("started_at"),
+        })
     return out
 
 

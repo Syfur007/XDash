@@ -39,8 +39,6 @@ from backend import run_notes
 from backend import repos as repos_ops
 from backend import runners as runner_registry
 from backend.runners.base import ACTIVE_STATUSES, LaunchSpec, RunnerCapabilityError
-from backend import assignments
-from backend import batch_runner
 from backend import dataset_map
 from backend import experiments
 from backend import paths
@@ -51,8 +49,9 @@ APP_DIR = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=str(APP_DIR / "static"), static_url_path="")
 
 scheduler.ensure_worker_started()
-kaggle_ops.ensure_kaggle_worker_started()
-batch_runner.ensure_batch_worker_started()
+# No separate Kaggle poller any more: experiments.py's dispatcher polls its own
+# Kaggle Attempts (_poll_kaggle_attempts), and the worker registry the old
+# poller existed to watch is gone (XDASH_V2_PLAN.md §3.7).
 experiments.ensure_dispatcher_started()
 
 
@@ -542,94 +541,6 @@ def api_kaggle_validate_account(name):
         return err(str(e), 400)
 
 
-@app.route("/api/kaggle/accounts/<name>/workers", methods=["POST"])
-def api_kaggle_add_worker(name):
-    body = request.get_json(silent=True) or {}
-    try:
-        return jsonify(kaggle_ops.add_worker(
-            name,
-            body.get("worker_id", ""),
-            body.get("kernel_slug", ""),
-            body.get("results_dir", ""),
-            body.get("budget_hours"),
-            body.get("notebook_path", ""),
-            body.get("template_path", ""),
-            body.get("dataset_sources") or [],
-        ))
-    except kaggle_ops.KaggleOpsError as e:
-        return err(str(e), 400)
-
-
-@app.route("/api/kaggle/accounts/<name>/workers/<worker_id>", methods=["DELETE"])
-def api_kaggle_remove_worker(name, worker_id):
-    if not kaggle_ops.remove_worker(name, worker_id):
-        return err("Worker not found", 404)
-    return jsonify({"removed": True})
-
-
-@app.route("/api/kaggle/accounts/<name>/workers/<worker_id>/datasets", methods=["POST"])
-def api_kaggle_set_worker_datasets(name, worker_id):
-    body = request.get_json(silent=True) or {}
-    try:
-        return jsonify(kaggle_ops.set_worker_datasets(name, worker_id, body.get("dataset_sources") or []))
-    except kaggle_ops.KaggleOpsError as e:
-        return err(str(e), 400)
-
-
-@app.route("/api/kaggle/workers/<worker_id>/push", methods=["POST"])
-def api_kaggle_push(worker_id):
-    # config_path/extra_args are only required for a template-backed worker (push() ignores
-    # them for a notebook-backed one) — see backend/kaggle.py's add_worker()/push() docstrings.
-    # No "mode": a template-backed push always runs train then eval inside one kernel
-    # (EXPERIMENT_AUTOMATION_PLAN.md §2.4).
-    body = request.get_json(silent=True) or {}
-    try:
-        return jsonify(kaggle_ops.push(worker_id, body.get("config_path", ""), body.get("extra_args", "")))
-    except kaggle_ops.KaggleOpsError as e:
-        return err(str(e), 400)
-
-
-@app.route("/api/kaggle/workers/<worker_id>/restart", methods=["POST"])
-def api_kaggle_restart_worker(worker_id):
-    try:
-        return jsonify(kaggle_ops.restart(worker_id))
-    except kaggle_ops.KaggleOpsError as e:
-        return err(str(e), 400)
-
-
-@app.route("/api/kaggle/workers/<worker_id>/status", methods=["POST"])
-def api_kaggle_refresh_status(worker_id):
-    try:
-        return jsonify(kaggle_ops.refresh_status(worker_id))
-    except kaggle_ops.KaggleOpsError as e:
-        return err(str(e), 400)
-
-
-@app.route("/api/kaggle/workers/<worker_id>/download", methods=["POST"])
-def api_kaggle_download(worker_id):
-    try:
-        return jsonify(kaggle_ops.download(worker_id))
-    except kaggle_ops.KaggleOpsError as e:
-        return err(str(e), 400)
-
-
-@app.route("/api/kaggle/push_all", methods=["POST"])
-def api_kaggle_push_all():
-    return jsonify({"results": kaggle_ops.push_all()})
-
-
-@app.route("/api/kaggle/refresh_all", methods=["POST"])
-def api_kaggle_refresh_all():
-    return jsonify({"results": kaggle_ops.refresh_all()})
-
-
-@app.route("/api/kaggle/download_all", methods=["POST"])
-def api_kaggle_download_all():
-    return jsonify({"results": kaggle_ops.download_all()})
-
-
-
-
 @app.route("/api/kaggle/accounts/<name>/weekly_budget", methods=["POST"])
 def api_kaggle_set_weekly_budget(name):
     body = request.get_json(silent=True) or {}
@@ -637,20 +548,6 @@ def api_kaggle_set_weekly_budget(name):
     try:
         return jsonify(kaggle_ops.set_weekly_budget(name, float(hours) if hours is not None else None))
     except (kaggle_ops.KaggleOpsError, TypeError, ValueError) as e:
-        return err(str(e), 400)
-
-
-@app.route("/api/kaggle/registry/export", methods=["GET"])
-def api_kaggle_export_registry():
-    return jsonify(kaggle_ops.export_registry())
-
-
-@app.route("/api/kaggle/registry/import", methods=["POST"])
-def api_kaggle_import_registry():
-    body = request.get_json(silent=True) or {}
-    try:
-        return jsonify(kaggle_ops.import_registry(body))
-    except kaggle_ops.KaggleOpsError as e:
         return err(str(e), 400)
 
 
@@ -801,91 +698,30 @@ def api_put_dataset_map():
     return jsonify({"entries": dataset_map.map_with_provenance(), "saved": saved})
 
 
-# --------------------------------------------------------------------------- assignment board (Phase 7)
-@app.route("/api/assignments", methods=["GET"])
-def api_list_assignments():
-    return jsonify({"rows": assignments.list_rows()})
-
-
-@app.route("/api/assignments", methods=["POST"])
-def api_add_assignment():
-    body = request.get_json(silent=True) or {}
-    try:
-        return jsonify(assignments.add_row(
-            body.get("config_path", ""), body.get("seed"), body.get("runner_id", ""),
-            body.get("status", "planned"), body.get("notes", ""),
-            body.get("block", ""), body.get("extra"), body.get("batch_name"), body.get("pool"),
-        ))
-    except assignments.AssignmentError as e:
-        return err(str(e), 400)
-
-
-@app.route("/api/assignments/<row_id>", methods=["PATCH"])
-def api_update_assignment(row_id):
-    body = request.get_json(silent=True) or {}
-    try:
-        return jsonify(assignments.update_row(row_id, body))
-    except assignments.AssignmentError as e:
-        return err(str(e), 400)
-
-
-@app.route("/api/assignments/<row_id>", methods=["DELETE"])
-def api_delete_assignment(row_id):
-    if not assignments.remove_row(row_id):
-        return err("Row not found", 404)
-    return jsonify({"removed": True})
-
-
-@app.route("/api/assignments/import_csv", methods=["POST"])
-def api_import_assignments_csv():
-    body = request.get_json(silent=True) or {}
-    try:
-        return jsonify(assignments.import_csv(body.get("csv_path", "")))
-    except assignments.AssignmentError as e:
-        return err(str(e), 400)
-
-
-@app.route("/api/assignments/export_csv", methods=["GET"])
-def api_export_assignments_csv():
-    return app.response_class(assignments.export_csv(), mimetype="text/csv")
-
-
 # --------------------------------------------------------------------------- experiment batches
+# A Batch is a grouping and a policy, never a state machine of its own
+# (XDASH_V2_PLAN.md §3.6): its status is *derived* from its Experiments on
+# every read, which is why there is no start/cancel here. Creating one is
+# `POST /api/experiments` with a batch_name; cancelling one is cancelling its
+# experiments.
 @app.route("/api/batches", methods=["GET"])
 def api_list_batches():
-    return jsonify({"batches": batch_runner.list_batches()})
-
-
-@app.route("/api/batches/start", methods=["POST"])
-def api_start_batch():
-    body = request.get_json(silent=True) or {}
-    try:
-        return jsonify(batch_runner.start_batch(body))
-    except batch_runner.BatchError as e:
-        return err(str(e), 400)
+    return jsonify({"batches": experiments.list_batches()})
 
 
 @app.route("/api/batches/<name>/pause", methods=["POST"])
 def api_pause_batch(name):
     try:
-        return jsonify(batch_runner.pause_batch(name))
-    except batch_runner.BatchError as e:
+        return jsonify(experiments.set_batch_paused(name, True))
+    except experiments.ExperimentError as e:
         return err(str(e), 404)
 
 
 @app.route("/api/batches/<name>/resume", methods=["POST"])
 def api_resume_batch(name):
     try:
-        return jsonify(batch_runner.resume_batch(name))
-    except batch_runner.BatchError as e:
-        return err(str(e), 404)
-
-
-@app.route("/api/batches/<name>/cancel", methods=["POST"])
-def api_cancel_batch(name):
-    try:
-        return jsonify(batch_runner.cancel_batch(name))
-    except batch_runner.BatchError as e:
+        return jsonify(experiments.set_batch_paused(name, False))
+    except experiments.ExperimentError as e:
         return err(str(e), 404)
 
 

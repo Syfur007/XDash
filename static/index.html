@@ -581,13 +581,6 @@
 
       <div class="job-actions" style="margin-bottom:12px; flex-wrap:wrap;">
         <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-autorefresh" title="Poll and re-render this section automatically">Auto-refresh: off</button>
-        <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-notify" title="Browser notification when a worker finishes or errors">Notify: off</button>
-        <button class="btn btn-sm btn-ghost" id="btn-kaggle-export">Export registry</button>
-        <button class="btn btn-sm btn-ghost" id="btn-kaggle-import">Import registry</button>
-        <input type="file" id="kaggle-import-file" accept="application/json" class="hidden" />
-        <button class="btn btn-ghost" id="btn-kaggle-push-all">Push all</button>
-        <button class="btn btn-ghost" id="btn-kaggle-refresh-all">Refresh all</button>
-        <button class="btn btn-ghost" id="btn-kaggle-download-all">Download all finished</button>
       </div>
 
       <div class="compute-summary-strip" id="kaggle-summary-strip"></div>
@@ -625,56 +618,6 @@
             </select>
           </div>
           <button class="btn btn-primary" id="btn-kaggle-add-account">Add account</button>
-        </div>
-      </div>
-
-      <!-- Kaggle "workers" (XDASH_V2_PLAN.md §3.7): retired as a management surface —
-           the spine pushes straight to a per-account kernel and never creates or reads
-           a worker record (see backend/kaggle.py's push_experiment_attempt()). Kept in
-           the DOM rather than deleted so nothing here has to be rewired, but hidden:
-           there is no supported way to reach it from the UI any more. -->
-      <div class="panel hidden" style="margin-top:16px;">
-        <div class="panel-header">
-          <div style="display:flex; gap:8px; align-items:center;"><span>Workers</span><span id="kaggle-worker-count"></span></div>
-          <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-add-worker">+ Add worker</button>
-        </div>
-        <div class="kaggle-grid" id="kaggle-workers-body">
-          <div class="empty-state">Loading…</div>
-        </div>
-        <div class="scheduler-add-form hidden" id="kaggle-add-worker-form" style="padding:12px; flex-wrap:wrap;">
-          <div class="field">
-            <label>Account</label>
-            <select id="kaggle-new-worker-account"><option value="">— pick an account —</option></select>
-          </div>
-          <div class="field">
-            <label>Worker id</label>
-            <input class="text-input" id="kaggle-new-worker-id" placeholder="w1" />
-          </div>
-          <div class="field grow">
-            <label>Kernel slug</label>
-            <input class="text-input grow" id="kaggle-new-worker-slug" placeholder="my-worker-1" />
-          </div>
-          <div class="field grow">
-            <label>Results dir (repo-relative)</label>
-            <div class="path-input"><input class="text-input grow" id="kaggle-new-worker-results" placeholder="results/worker1" /><button class="btn btn-sm btn-ghost" data-path-picker="kaggle-new-worker-results" data-path-kind="directory" title="Choose a repo directory">Browse</button></div>
-          </div>
-          <div class="field">
-            <label>Budget (hours)</label>
-            <input class="text-input" id="kaggle-new-worker-budget" placeholder="9.5" />
-          </div>
-          <div class="field grow">
-            <label>Template override (repo-relative, optional)</label>
-            <div class="path-input"><input class="text-input grow" id="kaggle-new-worker-template" placeholder="leave blank to use the default launch template" /><button class="btn btn-sm btn-ghost" data-path-picker="kaggle-new-worker-template" title="Choose a notebook">Browse</button></div>
-          </div>
-          <div class="field grow">
-            <label>Fixed notebook path (repo-relative, optional — legacy)</label>
-            <div class="path-input"><input class="text-input grow" id="kaggle-new-worker-notebook" placeholder="leave blank unless this worker pushes one specific hand-authored notebook, not a per-launch config" /><button class="btn btn-sm btn-ghost" data-path-picker="kaggle-new-worker-notebook" title="Choose a notebook">Browse</button></div>
-          </div>
-          <div class="field grow" title="Kaggle datasets attached to every kernel this worker pushes, as username/dataset-slug, comma-separated. Without at least one, a template-backed push has no data attached and fails at the template's own dataset probe.">
-            <label>Dataset sources (comma-separated username/slug)</label>
-            <input class="text-input grow" id="kaggle-new-worker-datasets" placeholder="syfur007/clinicdb-images, syfur007/busi-images" />
-          </div>
-          <button class="btn btn-primary" id="btn-kaggle-add-worker">Add worker</button>
         </div>
       </div>
 
