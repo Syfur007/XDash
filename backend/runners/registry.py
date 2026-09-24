@@ -37,12 +37,15 @@ def parse_slot_id(slot: str) -> Tuple[str, Optional[str]]:
 
 
 def list_runners() -> List[Runner]:
-    """The local runner (always present) + one KaggleRunner per configured
-    account. Phase 3 adds one runner per registered SSH/Colab host here —
-    this is the only function that needs to change to register a new kind."""
-    from .local import LocalRunner
+    """One MachineRunner per host record (backend/hosts.py — the local
+    machine always present, plus any registered SSH/Colab host) + one
+    KaggleRunner per configured account. This is the only function that
+    needs to change to register a new kind (Multi_runner_XDash.md Phase 3:
+    was one hardcoded LocalRunner() here before SSH hosts existed)."""
+    from .. import hosts
+    from .machine import MachineRunner
     from .kaggle import list_kaggle_runners
-    return [LocalRunner(), *list_kaggle_runners()]
+    return [MachineRunner(h) for h in hosts.list_hosts()] + list_kaggle_runners()
 
 
 def get_runner(slot: str) -> Runner:

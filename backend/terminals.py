@@ -323,17 +323,24 @@ def _unmanaged_entry(name: str) -> Dict[str, Any]:
     }
 
 
-def list_terminals() -> List[Dict[str, Any]]:
+def list_terminals(host_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Every managed terminal, or just *host_id*'s own (Multi_runner_XDash.md
+    Phase 3 — MachineRunner.list_units() passes its own host so N hosts'
+    facades don't each report every other host's units too). The global
+    /api/terminals route passes no host_id, keeping its pre-Phase-3 unscoped
+    behaviour unchanged."""
     records = _load()
+    if host_id is not None:
+        records = [r for r in records if _host_id_of(r) == host_id]
 
     # One tmux query per distinct host actually referenced by a record —
     # never every configured host on every poll, so an offline lab box just
     # makes its own records slow/unknown instead of stalling the whole list.
     alive_by_host: Dict[str, set] = {}
     for r in records:
-        host_id = _host_id_of(r)
-        if host_id not in alive_by_host:
-            alive_by_host[host_id] = set(tmux.list_sessions(host_id=host_id))
+        h = _host_id_of(r)
+        if h not in alive_by_host:
+            alive_by_host[h] = set(tmux.list_sessions(host_id=h))
 
     result = [_status_for(r, alive_by_host[_host_id_of(r)]) for r in records]
     result.sort(key=lambda r: r.get("created_at") or "", reverse=True)
@@ -341,15 +348,17 @@ def list_terminals() -> List[Dict[str, Any]]:
     # Unmanaged-session detection stays local-only: it exists so a tmux
     # session started by hand on *this* machine isn't invisible, not to
     # enumerate every remote host's shell state — that's Machine Stats' job.
-    local_alive = alive_by_host.get(hosts.LOCAL_HOST_ID)
-    if local_alive is None:
-        local_alive = set(tmux.list_sessions(host_id=hosts.LOCAL_HOST_ID))
-    managed_names = {r["session_name"] for r in records}
-    unmanaged = sorted(
-        name for name in (local_alive - managed_names)
-        if not monitors.is_monitor_session(name)
-    )
-    result.extend(_unmanaged_entry(name) for name in unmanaged)
+    # Skipped entirely when scoped to a specific non-local host.
+    if host_id is None or host_id == hosts.LOCAL_HOST_ID:
+        local_alive = alive_by_host.get(hosts.LOCAL_HOST_ID)
+        if local_alive is None:
+            local_alive = set(tmux.list_sessions(host_id=hosts.LOCAL_HOST_ID))
+        managed_names = {r["session_name"] for r in records if _host_id_of(r) == hosts.LOCAL_HOST_ID}
+        unmanaged = sorted(
+            name for name in (local_alive - managed_names)
+            if not monitors.is_monitor_session(name)
+        )
+        result.extend(_unmanaged_entry(name) for name in unmanaged)
     return result
 
 

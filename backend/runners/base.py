@@ -70,7 +70,7 @@ class LaunchSpec:
     config_path: str
     mode: str = "train"
     extra_args: str = ""
-    target: Optional[str] = None   # worker_id for a KaggleRunner; ignored by LocalRunner
+    target: Optional[str] = None   # worker_id for a KaggleRunner; ignored by MachineRunner
 
 
 class RunnerCapabilityError(Exception):

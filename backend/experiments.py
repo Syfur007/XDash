@@ -32,6 +32,7 @@ from . import kaggle as kaggle_backend
 from . import ledger
 from . import notifications as notif
 from . import scheduler
+from . import transport as transport_mod
 from .config import settings
 from .runners import registry
 from .runners.base import Runner
@@ -677,6 +678,15 @@ def _claim_and_dispatch(experiment: Dict[str, Any], attempt: Dict[str, Any], run
     try:
         patch = runner.dispatch(experiment, claimed)
         _update_attempt(attempt["attempt_id"], {"status": "running", **patch})
+    except transport_mod.TransportError as e:
+        # A MachineRunner's push() failed (host went unreachable between
+        # can_accept()'s cached check and this dispatch, rsync error, …) —
+        # transport.TransportError is a shared, kind-agnostic type (any
+        # Transport can raise it), so branching on it here isn't branching on
+        # kind. A distinct code from generic dispatch-failed since "the sync
+        # failed" is a more specific, more actionable diagnosis than "dispatch
+        # failed" (Multi_runner_XDash.md Phase 3).
+        _fail_or_retry(experiment["experiment_id"], attempt["attempt_id"], "dispatching", str(e), "sync-failed")
     except Exception as e:
         _fail_or_retry(experiment["experiment_id"], attempt["attempt_id"], "dispatching", str(e), "dispatch-failed")
 
@@ -768,8 +778,8 @@ def _poll_and_resolve(attempt: Dict[str, Any]) -> None:
     and half of `_reconcile_on_startup`: ask *attempt*'s own runner whether
     its unit has finished; if so, collect its results and resolve it.
     Runner-agnostic — for a runner whose `poll()` never reports `finished`
-    (local: resolved push-style, see LocalRunner.poll()'s own docstring for
-    why that's not a gap), this is a harmless, cheap no-op."""
+    (local/ssh: resolved push-style, see MachineRunner.poll()'s own docstring
+    for why that's not a gap), this is a harmless, cheap no-op."""
     try:
         runner = registry.get_runner(attempt.get("slot") or "")
     except KeyError:
