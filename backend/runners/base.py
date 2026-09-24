@@ -190,3 +190,14 @@ class Runner:
         for it to finish. A no-op wherever `capabilities.live_checkpoints`
         is False (Kaggle: no shell mid-run)."""
         return None
+
+    # ----------------------------------------------------------------
+    # Provisioned-capacity teardown (Multi_runner_XDash.md Phase 4) — a no-op
+    # everywhere `capabilities.provisioned` is False (every kind except
+    # Colab, so far). Called on the same background tick as dispatch/poll;
+    # never anything a caller needs to wait on.
+    def reap_idle(self) -> None:
+        """Reclaims provisioned capacity this runner is no longer using (e.g.
+        `colab stop` on a VM idle past its grace period with nothing queued).
+        Best-effort — a failure here must never interrupt the poll loop."""
+        return None

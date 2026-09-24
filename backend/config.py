@@ -38,6 +38,14 @@ ACTIVE_REPO_FILE = DASHBOARD_DIR / "data" / "_active_repo.json"
 SYSTEM_KAGGLE_ACCOUNTS_FILE = DASHBOARD_DIR / "data" / "kaggle_accounts.json"
 SYSTEM_KAGGLE_CREDS_DIR = DASHBOARD_DIR / "data" / "kaggle_accounts"
 
+# System-wide Colab registry (Multi_runner_XDash.md Phase 4) — same reasoning
+# as the Kaggle one above (a Google account is a property of the person, not
+# the repo), but system-scope *only*: unlike Kaggle, there is no pre-existing
+# repo-scoped registry to stay backward compatible with, so there's no second
+# scope to merge.
+SYSTEM_COLAB_ACCOUNTS_FILE = DASHBOARD_DIR / "data" / "colab_accounts.json"
+SYSTEM_COLAB_CREDS_DIR = DASHBOARD_DIR / "data" / "colab_accounts"
+
 
 def list_profile_names() -> List[str]:
     if not REPOS_DIR.is_dir():
@@ -202,6 +210,24 @@ class Settings:
         self.est_hours_default = float(raw.get("est_hours_default", 6.0))
         self.kaggle_poll_interval_seconds = int(raw.get("kaggle_poll_interval_seconds", 180))
         self.kaggle_webhook_url = (raw.get("kaggle_webhook_url") or "").strip()
+
+        # Colab (Multi_runner_XDash.md Phase 4). Unlike Kaggle's weekly
+        # rolling quota, Colab's real constraint is a per-*session* cap that
+        # differs by account tier (free ~12h, Pro+ ~24h) — set per account
+        # (backend/colab.py's session_limit_hours), this is only the
+        # not-yet-configured fallback. setup/teardown reserve mirror
+        # Kaggle's own split (provisioning + rsync overhead on one side,
+        # `colab stop` + result pull on the other).
+        self.colab_executable = raw.get("colab_executable", "colab")
+        self.colab_default_session_limit_hours = float(raw.get("colab_default_session_limit_hours", 12.0))
+        self.colab_setup_reserve_hours = float(raw.get("colab_setup_reserve_hours", 0.25))
+        self.colab_teardown_reserve_hours = float(raw.get("colab_teardown_reserve_hours", 0.1))
+        self.colab_default_gpu = raw.get("colab_default_gpu", "T4")
+        # How long a VM with nothing queued for its account stays up before
+        # `colab stop` reclaims it — keeps a VM warm across attempts of the
+        # same batch instead of paying the provisioning+rsync cost on every
+        # single attempt (Colab-constraints table: "cold-VM rsync cost").
+        self.colab_idle_grace_minutes = float(raw.get("colab_idle_grace_minutes", 10.0))
         # Filename (not a repo-relative path) of the shared launch-template notebook a
         # template-backed worker renders config/mode/extra_args into before every push, when it
         # has no per-worker `template_path` override — see backend/kaggle.py's

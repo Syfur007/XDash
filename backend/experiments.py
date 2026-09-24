@@ -26,6 +26,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import colab as colab_backend
 from . import configs as cfg
 from . import estimates
 from . import kaggle as kaggle_backend
@@ -678,6 +679,14 @@ def _claim_and_dispatch(experiment: Dict[str, Any], attempt: Dict[str, Any], run
     try:
         patch = runner.dispatch(experiment, claimed)
         _update_attempt(attempt["attempt_id"], {"status": "running", **patch})
+    except colab_backend.NoAcceleratorError as e:
+        # Provisioned, but Colab granted no GPU/TPU this attempt (Colab-
+        # constraints table: "compute units buy a budget, not a GPU") — a
+        # different diagnosis than a bare provisioning failure, so it gets
+        # its own code (Multi_runner_XDash.md Phase 4).
+        _fail_or_retry(experiment["experiment_id"], attempt["attempt_id"], "dispatching", str(e), "no-accelerator")
+    except colab_backend.ProvisionError as e:
+        _fail_or_retry(experiment["experiment_id"], attempt["attempt_id"], "dispatching", str(e), "provision-failed")
     except transport_mod.TransportError as e:
         # A MachineRunner's push() failed (host went unreachable between
         # can_accept()'s cached check and this dispatch, rsync error, …) —
@@ -808,6 +817,18 @@ def _poll_in_flight_attempts() -> None:
         _poll_and_resolve(attempt)
 
 
+def _reap_idle_runners() -> None:
+    """Generic loop over every runner's reap_idle() (Multi_runner_XDash.md
+    Phase 4) — a no-op for every kind except Colab today, same shape as
+    _poll_in_flight_attempts: kind-agnostic here, the one kind that actually
+    does something owns that behaviour itself."""
+    for r in registry.list_runners():
+        try:
+            r.reap_idle()
+        except Exception:
+            pass  # best-effort — see Runner.reap_idle()'s own docstring
+
+
 # --------------------------------------------------------------------------- reconciliation + poller
 def _reconcile_on_startup() -> None:
     """A crash between claiming an attempt and recording its unit_ref leaves
@@ -839,6 +860,7 @@ def _poll_loop() -> None:
         try:
             _poll_in_flight_attempts()
             _dispatch_tick()
+            _reap_idle_runners()
         except Exception:
             pass  # one bad tick must never kill the whole poller
         time.sleep(30)

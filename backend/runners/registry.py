@@ -38,14 +38,25 @@ def parse_slot_id(slot: str) -> Tuple[str, Optional[str]]:
 
 def list_runners() -> List[Runner]:
     """One MachineRunner per host record (backend/hosts.py — the local
-    machine always present, plus any registered SSH/Colab host) + one
-    KaggleRunner per configured account. This is the only function that
-    needs to change to register a new kind (Multi_runner_XDash.md Phase 3:
-    was one hardcoded LocalRunner() here before SSH hosts existed)."""
+    machine always present, plus any registered SSH host, plus any Colab
+    account currently mid-attempt with a live, upsert_host()-registered VM)
+    + one KaggleRunner per configured Kaggle account + one ColabRunner per
+    configured Colab account (idle or not — unlike its host record, a
+    ColabRunner itself always exists so an idle account still shows up and
+    can be dispatched to). This is the only function that needs to change to
+    register a new kind (Multi_runner_XDash.md Phase 3/4)."""
     from .. import hosts
     from .machine import MachineRunner
     from .kaggle import list_kaggle_runners
-    return [MachineRunner(h) for h in hosts.list_hosts()] + list_kaggle_runners()
+    from .colab import list_colab_runners
+    colab_runners = list_colab_runners()
+    # A live Colab VM's host record (registered by ColabRunner.dispatch() via
+    # hosts.upsert_host()) must not ALSO surface as a plain MachineRunner
+    # here — that would double-list one VM under two different slot ids and
+    # let the dispatch loop target the same machine twice.
+    colab_host_ids = {r.host.id for r in colab_runners}
+    machine_runners = [MachineRunner(h) for h in hosts.list_hosts() if h.id not in colab_host_ids]
+    return machine_runners + list_kaggle_runners() + colab_runners
 
 
 def get_runner(slot: str) -> Runner:

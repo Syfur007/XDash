@@ -19,6 +19,19 @@ data/_active_repo.json
 # data/kaggle_accounts/<name>/ holds real credentials.
 data/kaggle_accounts.json
 data/kaggle_accounts/
+
+# System-wide Colab registry (Multi_runner_XDash.md Phase 4) — same scope
+# reasoning as Kaggle above. data/colab_accounts/<name>/ holds real
+# sessions.json/oauth-config.json credentials.
+data/colab_accounts.json
+data/colab_accounts/
+
+# Machine registry + ssh multiplexing sockets (Multi_runner_XDash.md Phase 1)
+# — hosts.json can carry per-machine identity_file paths, and .ssh-control/
+# holds live ControlMaster sockets, neither of which belongs in the repo.
+data/hosts.json
+data/.ssh-control/
+
 __pycache__/
 *.pyc
 .venv/

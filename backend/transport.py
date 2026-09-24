@@ -198,7 +198,13 @@ class SshTransport(Transport):
             return False
 
 
+def for_host_record(host) -> Transport:
+    """The transport for an already-resolved host object, without a second
+    hosts.get_host() lookup — what a ColabRunner needs (Multi_runner_XDash.md
+    Phase 4) before its VM has a persisted host record to be looked up by."""
+    return LocalTransport(host.id) if host.is_local else SshTransport(host)
+
+
 def for_host(host_id: Optional[str] = None) -> Transport:
     """The transport for *host_id* (None/"local" -> LocalTransport)."""
-    host = hosts.get_host(host_id)
-    return LocalTransport(host.id) if host.is_local else SshTransport(host)
+    return for_host_record(hosts.get_host(host_id))

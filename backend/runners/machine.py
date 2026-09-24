@@ -117,7 +117,12 @@ class MachineRunner(Runner):
         self.kind = host.kind
         self.id = slot_id(host.kind, host.id)
         self.label = host.label
-        self._transport = transport_mod.for_host(host.id)
+        # for_host_record(), not for_host(host.id): a ColabRunner (Phase 4)
+        # constructs a host that may not be registered in hosts.json yet (no
+        # VM provisioned), so resolving the transport must work from the
+        # object already in hand rather than requiring a second, registry-
+        # backed lookup by id.
+        self._transport = transport_mod.for_host_record(host)
 
     # ------------------------------------------------------------ presentation
     def list_units(self) -> List[RunUnit]:
