@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 import yaml
 
+from . import hosts
 from . import monitors
 from . import tmux_runner as tmux
 from . import terminals as terminals_mod
@@ -81,7 +82,7 @@ def _snapshot(name: str) -> Settings:
     return Settings(name)
 
 
-def _local_sessions_for_profile(name: str, snap: Settings, alive_sessions: set) -> List[Dict[str, Any]]:
+def _local_sessions_for_profile(name: str, snap: Settings, alive_by_host: Dict[str, set]) -> List[Dict[str, Any]]:
     if not snap.state_file.exists():
         records = []
     else:
@@ -95,10 +96,13 @@ def _local_sessions_for_profile(name: str, snap: Settings, alive_sessions: set) 
         session_name = r.get("session_name")
         if not session_name:
             continue
-        alive = session_name in alive_sessions
+        host_id = r.get("host_id") or hosts.LOCAL_HOST_ID
+        if host_id not in alive_by_host:
+            alive_by_host[host_id] = set(tmux.list_sessions(host_id=host_id))
+        alive = session_name in alive_by_host[host_id]
         status = "ended"
         if alive:
-            text = tmux.capture_pane_tail(session_name, lines=50) or ""
+            text = tmux.capture_pane_tail(session_name, lines=50, host_id=host_id) or ""
             code = terminals_mod._marker_code(text, session_name)
             if code is None:
                 status = "running"
@@ -109,7 +113,7 @@ def _local_sessions_for_profile(name: str, snap: Settings, alive_sessions: set) 
             else:
                 status = "failed"
         out.append({
-            "profile": name, "kind": "local", "unit_id": session_name,
+            "profile": name, "kind": "local", "unit_id": session_name, "host_id": host_id,
             "label": r.get("experiment_name") or session_name,
             "config_path": r.get("config_path"), "mode": r.get("mode"),
             "status": status, "alive": alive, "created_at": r.get("created_at"),
@@ -158,28 +162,35 @@ def list_global_sessions() -> List[Dict[str, Any]]:
     under another one (MULTI_REPO_PLAN.md §6 option B)."""
     names = list_profile_names()
     snapshots = {name: _snapshot(name) for name in names}
-    alive_sessions = set(tmux.list_sessions())
+    # One tmux query per distinct host actually referenced by some profile's
+    # records, populated lazily by _local_sessions_for_profile — never every
+    # configured host on every call.
+    alive_by_host: Dict[str, set] = {}
 
     sessions: List[Dict[str, Any]] = []
     for name in names:
         snap = snapshots[name]
-        sessions += _local_sessions_for_profile(name, snap, alive_sessions)
+        sessions += _local_sessions_for_profile(name, snap, alive_by_host)
         sessions += _kaggle_sessions_for_profile(name, snap)
 
-    # tmux sessions alive but not recorded in any profile's own state file:
-    # best-effort attribute to whichever profile's tmux_session_prefix is
-    # the longest match, else leave profile unset ("unknown").
+    # Local tmux sessions alive but not recorded in any profile's own state
+    # file: best-effort attribute to whichever profile's tmux_session_prefix
+    # is the longest match, else leave profile unset ("unknown"). Scoped to
+    # the local host only — same reasoning as terminals.py's own unmanaged
+    # detection: this surfaces a session started by hand on *this* machine,
+    # not a census of every remote host's shell state.
+    alive_local = alive_by_host.setdefault(hosts.LOCAL_HOST_ID, set(tmux.list_sessions(host_id=hosts.LOCAL_HOST_ID)))
     managed_names = {s["unit_id"] for s in sessions if s["kind"] == "local"}
     prefixes = sorted(
         ((name, snapshots[name].tmux_session_prefix) for name in names),
         key=lambda np: -len(np[1]),
     )
-    for session_name in sorted(alive_sessions - managed_names):
+    for session_name in sorted(alive_local - managed_names):
         if monitors.is_monitor_session(session_name):
             continue
         owner = next((n for n, p in prefixes if session_name.startswith(p)), None)
         sessions.append({
-            "profile": owner, "kind": "local", "unit_id": session_name,
+            "profile": owner, "kind": "local", "unit_id": session_name, "host_id": hosts.LOCAL_HOST_ID,
             "label": session_name, "config_path": None, "mode": None,
             "status": "unmanaged", "alive": True, "created_at": None,
         })

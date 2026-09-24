@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import settings
 from . import configs as cfg
+from . import hosts
 from . import terminals
 from . import notifications as notif
 
@@ -54,7 +55,10 @@ def _save(data: Dict[str, Any]):
     settings.scheduler_file.write_text(json.dumps(data, indent=2))
 
 
-def _new_item(config_path: str, mode: str, extra_args: str, depends_on: Optional[str] = None) -> Dict[str, Any]:
+def _new_item(
+    config_path: str, mode: str, extra_args: str,
+    depends_on: Optional[str] = None, host_id: Optional[str] = None,
+) -> Dict[str, Any]:
     return {
         "id": uuid.uuid4().hex[:10],
         "config_path": config_path,
@@ -62,6 +66,7 @@ def _new_item(config_path: str, mode: str, extra_args: str, depends_on: Optional
         "extra_args": extra_args.strip(),
         "experiment_name": cfg.get_experiment_name(config_path),
         "depends_on": depends_on,
+        "host_id": host_id or hosts.LOCAL_HOST_ID,
         "status": "pending",  # pending | running | cancelling | completed | failed | cancelled | skipped
         "session_name": None,
         "created_at": _now(),
@@ -72,10 +77,17 @@ def _new_item(config_path: str, mode: str, extra_args: str, depends_on: Optional
 
 
 # ------------------------------------------------------------------- write API
-def add_item(config_path: str, mode: str, extra_args: str = "") -> List[Dict[str, Any]]:
+def add_item(config_path: str, mode: str, extra_args: str = "", host_id: Optional[str] = None) -> List[Dict[str, Any]]:
+    """*host_id* defaults to the local machine — every pre-existing caller
+    (the Configs-page "Add to schedule" button, backend/experiments.py's
+    local dispatch) keeps queueing local work exactly as before. Passing a
+    remote host_id queues it against *that* host's own concurrency limit
+    (hosts.get_host(host_id).max_concurrent) instead of the local one — one
+    FIFO, host-partitioned, rather than a second queueing mechanism per host."""
     if mode not in ("train", "eval", "both"):
         raise ValueError("mode must be 'train', 'eval', or 'both'")
     cfg.read_config(config_path)  # raises if the config doesn't exist / is invalid
+    host = hosts.get_host(host_id)  # raises HostError on an unknown host
 
     with _lock:
         data = _load()
@@ -86,12 +98,12 @@ def add_item(config_path: str, mode: str, extra_args: str = "") -> List[Dict[str
                 "Remove some completed/cancelled items before adding more."
             )
         if mode == "both":
-            train_item = _new_item(config_path, "train", extra_args)
-            eval_item = _new_item(config_path, "eval", extra_args, depends_on=train_item["id"])
+            train_item = _new_item(config_path, "train", extra_args, host_id=host.id)
+            eval_item = _new_item(config_path, "eval", extra_args, depends_on=train_item["id"], host_id=host.id)
             data["items"] += [train_item, eval_item]
             created = [train_item, eval_item]
         else:
-            item = _new_item(config_path, mode, extra_args)
+            item = _new_item(config_path, mode, extra_args, host_id=host.id)
             data["items"].append(item)
             created = [item]
         _save(data)
@@ -100,6 +112,9 @@ def add_item(config_path: str, mode: str, extra_args: str = "") -> List[Dict[str
 
 
 def set_max_concurrent(value: int) -> int:
+    """The *local* machine's concurrency — the only one this legacy field
+    ever meant. A remote host's limit lives on its own host record
+    (backend/hosts.py), set via the Compute tab, not here."""
     value = max(1, min(int(value), settings.scheduler_max_concurrent_limit))
     with _lock:
         data = _load()
@@ -265,20 +280,38 @@ def list_items() -> Dict[str, Any]:
 
 
 # ----------------------------------------------------------------- scheduling
+def _item_host_id(item: Dict[str, Any]) -> str:
+    return item.get("host_id") or hosts.LOCAL_HOST_ID
+
+
+def _host_limit(host_id: str) -> int:
+    try:
+        return hosts.get_host(host_id).max_concurrent
+    except hosts.HostError:
+        # The host was removed out from under an already-queued item — treat
+        # it as full rather than raising out of a background tick; the item
+        # stays pending, visibly stuck, instead of the tick loop dying.
+        return 0
+
+
 def _tick():
     """Advance the schedule: notice finished/cancelled items, chain a 'both'
     mode's eval half once its train half completes (or skip it if the train
-    half didn't succeed), and launch new pending items up to max_concurrent.
-    Safe to call frequently and from multiple threads (guarded by _lock).
+    half didn't succeed), and launch new pending items up to each item's own
+    host's concurrency limit. One flat queue, partitioned by host_id — not a
+    separate queue per host — so item order (and reorder_pending) still means
+    one thing. Safe to call frequently and from multiple threads (guarded by
+    _lock).
     """
     with _lock:
         data = _load()
         items = data["items"]
         changed = False
-        running_count = 0
+        running_by_host: Dict[str, int] = {}
         just_finished: List[Dict[str, Any]] = []
 
         for item in items:
+            host_id = _item_host_id(item)
             if item["status"] == "running" and item.get("session_name"):
                 term = terminals.get_terminal(item["session_name"])
                 tstatus = term.get("status") if term else "interrupted"
@@ -289,7 +322,7 @@ def _tick():
                     changed = True
                     just_finished.append(item)
                 else:
-                    running_count += 1
+                    running_by_host[host_id] = running_by_host.get(host_id, 0) + 1
             elif item["status"] == "cancelling":
                 term = terminals.get_terminal(item["session_name"]) if item.get("session_name") else None
                 if not term or term.get("status") != "running":
@@ -298,7 +331,7 @@ def _tick():
                     changed = True
                     just_finished.append(item)
                 else:
-                    running_count += 1
+                    running_by_host[host_id] = running_by_host.get(host_id, 0) + 1
 
         # a 'both'-mode eval half only makes sense if its train half succeeded
         for item in items:
@@ -311,20 +344,23 @@ def _tick():
                     just_finished.append(item)
 
         # Paused: everything above (noticing completions, skipping dependents)
-        # still runs — pausing only withholds *new* launches.
-        max_concurrent = data.get("max_concurrent", 1)
+        # still runs — pausing only withholds *new* launches. Pause is still a
+        # single flag: pausing the queue pauses every host queued through it.
         if not data.get("paused"):
             for item in items:
-                if running_count >= max_concurrent:
-                    break
                 if item["status"] != "pending":
                     continue
+                host_id = _item_host_id(item)
+                if running_by_host.get(host_id, 0) >= _host_limit(host_id):
+                    continue  # this host is full; a later item may target a different one
                 if item.get("depends_on"):
                     dep = next((i for i in items if i["id"] == item["depends_on"]), None)
                     if not dep or dep["status"] != "completed":
                         continue
                 try:
-                    launched = terminals.launch(item["config_path"], item["mode"], item.get("extra_args", ""))
+                    launched = terminals.launch(
+                        item["config_path"], item["mode"], item.get("extra_args", ""), host_id=host_id,
+                    )
                 except Exception:
                     item["status"] = "failed"
                     item["ended_at"] = _now()
@@ -333,7 +369,7 @@ def _tick():
                 item["session_name"] = launched["session_name"]
                 item["status"] = "running"
                 item["started_at"] = _now()
-                running_count += 1
+                running_by_host[host_id] = running_by_host.get(host_id, 0) + 1
                 changed = True
 
         if changed:

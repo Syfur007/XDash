@@ -1,16 +1,25 @@
 """Tracks experiments as tmux sessions instead of a job queue.
 
 There is deliberately no background worker thread here. Starting an
-experiment just creates a tmux session and records what config/mode launched
-it; everything else (is it still running? did it finish? with what exit
-code?) is computed on demand by reading the tmux pane when the frontend
+experiment just creates a tmux session and records what config/mode/host
+launched it; everything else (is it still running? did it finish? with what
+exit code?) is computed on demand by reading the tmux pane when the frontend
 asks — via a small sentinel line (`echo __EXPDASH_DONE__<session>:$?`)
 appended to the launched command, the same trick as before, just without a
 thread continuously watching it.
 
 This also means restarting the dashboard process loses nothing: there's no
 in-memory state to reconstruct, only the small metadata file recording which
-sessions were launched for which config.
+sessions were launched for which config, on which host.
+
+**Host-aware since backend/hosts.py + backend/transport.py landed.** Every
+record now carries `host_id` ("local" when absent, for every pre-existing
+record); tmux calls take that host_id and run over ssh for a remote one via
+tmux_runner's own transport lookup, with zero branching here. What *is*
+branched here: machine facts (repo_root/python_executable/env_activate_cmd)
+resolve from the host, but repo facts (train_script/eval_script/
+eval_default_args) stay on the active profile — a host runs a checkout of a
+repo, it does not redefine what that repo's scripts are.
 """
 from __future__ import annotations
 
@@ -24,6 +33,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import settings
 from . import configs as cfg
+from . import hosts
 from . import tmux_runner as tmux
 from . import reports
 from . import monitors
@@ -38,6 +48,10 @@ def _now() -> str:
 
 def marker_for(session_name: str) -> str:
     return f"{tmux.DONE_MARKER}_{session_name}"
+
+
+def _host_id_of(record: Dict[str, Any]) -> str:
+    return record.get("host_id") or hosts.LOCAL_HOST_ID
 
 
 # ------------------------------------------------------------------ storage
@@ -60,34 +74,38 @@ def _slugify(name: str) -> str:
     return slug[:40] or "run"
 
 
-def _start_session(session_name: str, config_path: str, mode: str, extra_args: str) -> str:
+def _start_session(session_name: str, config_path: str, mode: str, extra_args: str, host: "hosts._Host") -> str:
     """Creates the tmux session and types the launch command. Returns the
-    exact command string that was run (for display)."""
+    exact command string that was run (for display). Repo facts come from
+    the active profile; machine facts come from *host* (identical to the
+    profile's own for the local host, since that's what it falls back to)."""
     script = settings.train_script if mode == "train" else settings.eval_script
     extra_flags = list(settings.eval_default_args) if mode == "eval" else []
     cli_config_path = cfg.repo_relative_path(config_path)
     launch_cmd = tmux.build_launch_command(
-        settings.python_executable, script, cli_config_path, extra_flags, extra_args
+        host.python_executable, script, cli_config_path, extra_flags, extra_args
     )
     marker = marker_for(session_name)
 
-    tmux.new_session(session_name)
-    tmux.send_keys(session_name, f"cd {settings.repo_root}")
-    if settings.env_activate_cmd:
-        tmux.send_keys(session_name, settings.env_activate_cmd)
-    tmux.send_keys(session_name, f"{launch_cmd}; echo {marker}:$?")
+    tmux.new_session(session_name, host_id=host.id)
+    tmux.send_keys(session_name, f"cd {host.repo_root}", host_id=host.id)
+    if host.env_activate_cmd:
+        tmux.send_keys(session_name, host.env_activate_cmd, host_id=host.id)
+    tmux.send_keys(session_name, f"{launch_cmd}; echo {marker}:$?", host_id=host.id)
     return launch_cmd
 
 
-def launch(config_path: str, mode: str, extra_args: str = "") -> Dict[str, Any]:
+def launch(config_path: str, mode: str, extra_args: str = "", host_id: Optional[str] = None) -> Dict[str, Any]:
     cfg.read_config(config_path)  # raises FileNotFoundError / ValueError if bad
+    host = hosts.get_host(host_id)
     experiment_name = cfg.get_experiment_name(config_path)
-    session_name = f"{settings.tmux_session_prefix}_{_slugify(experiment_name)}_{uuid.uuid4().hex[:6]}"
+    session_name = f"{host.tmux_session_prefix}_{_slugify(experiment_name)}_{uuid.uuid4().hex[:6]}"
 
-    command = _start_session(session_name, config_path, mode, extra_args)
+    command = _start_session(session_name, config_path, mode, extra_args, host)
 
     record = {
         "session_name": session_name,
+        "host_id": host.id,
         "config_path": config_path,
         "mode": mode,
         "extra_args": extra_args.strip(),
@@ -95,6 +113,7 @@ def launch(config_path: str, mode: str, extra_args: str = "") -> Dict[str, Any]:
         "command": command,
         "created_at": _now(),
         "restart_count": 0,
+        "return_code": None,
     }
     with _lock:
         records = _load()
@@ -109,24 +128,26 @@ def restart(session_name: str) -> Dict[str, Any]:
         record = next((r for r in records if r["session_name"] == session_name), None)
         if record is None:
             raise ValueError("Unknown terminal")
+        host = hosts.get_host(_host_id_of(record))
 
-        alive_sessions = set(tmux.list_sessions())
+        alive_sessions = set(tmux.list_sessions(host_id=host.id))
         if session_name in alive_sessions:
             current = _status_for(record, alive_sessions)
             if current["status"] == "running":
                 raise ValueError("This terminal is still running — stop or kill it before restarting.")
             # Alive but idle (stopped/completed/failed): snapshot and clear it
             # out first so we can relaunch under the same session name.
-            text = tmux.capture_pane(session_name)
+            text = tmux.capture_pane(session_name, host_id=host.id)
             if text:
                 _save_snapshot(session_name, text)
-            tmux.kill_session(session_name)
+            tmux.kill_session(session_name, host_id=host.id)
 
         cfg.read_config(record["config_path"])  # re-validate the config still exists
-        command = _start_session(session_name, record["config_path"], record["mode"], record["extra_args"])
+        command = _start_session(session_name, record["config_path"], record["mode"], record["extra_args"], host)
         record["command"] = command
         record["created_at"] = _now()
         record["restart_count"] = record.get("restart_count", 0) + 1
+        record["return_code"] = None
         _save(records)
     return _status_for(record)
 
@@ -140,15 +161,21 @@ def _is_managed(session_name: str) -> bool:
     return any(r["session_name"] == session_name for r in _load())
 
 
+def _record_for(session_name: str) -> Optional[Dict[str, Any]]:
+    return next((r for r in _load() if r["session_name"] == session_name), None)
+
+
 def stop(session_name: str) -> bool:
     """Interrupt the running command (Ctrl-C) but keep the session/shell alive."""
-    if not _is_managed(session_name):
+    record = _record_for(session_name)
+    if record is None:
         raise ValueError("This session was not launched by the dashboard and cannot be stopped from here.")
-    if session_name not in tmux.list_sessions():
+    host_id = _host_id_of(record)
+    if session_name not in tmux.list_sessions(host_id=host_id):
         return False
-    tmux.send_ctrl_c(session_name)
+    tmux.send_ctrl_c(session_name, host_id=host_id)
     time.sleep(0.4)
-    tmux.send_keys(session_name, f"echo {marker_for(session_name)}:130")
+    tmux.send_keys(session_name, f"echo {marker_for(session_name)}:130", host_id=host_id)
     return True
 
 
@@ -156,13 +183,15 @@ def kill(session_name: str) -> bool:
     """Kill the tmux session entirely and forget about it. Best-effort saves
     a final snapshot of its output first, so the last thing it printed isn't
     just lost."""
-    if not _is_managed(session_name):
+    record = _record_for(session_name)
+    if record is None:
         raise ValueError("This session was not launched by the dashboard and cannot be killed from here.")
-    if session_name in tmux.list_sessions():
-        text = tmux.capture_pane(session_name)
+    host_id = _host_id_of(record)
+    if session_name in tmux.list_sessions(host_id=host_id):
+        text = tmux.capture_pane(session_name, host_id=host_id)
         if text:
             _save_snapshot(session_name, text)
-        tmux.kill_session(session_name)
+        tmux.kill_session(session_name, host_id=host_id)
     with _lock:
         records = _load()
         records = [r for r in records if r["session_name"] != session_name]
@@ -195,35 +224,70 @@ def _marker_code(text: str, session_name: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def _status_from_code(code: int) -> tuple:
+    """(status, restart_available) for a resolved exit code — the one
+    mapping both the "still watching the pane" and "session is gone but we
+    remembered its last code" paths below share."""
+    if code == 0:
+        return "completed", False
+    if code == 130:
+        return "stopped", True
+    return "failed", True
+
+
+def _remember_return_code(session_name: str, code: int) -> None:
+    """Persists the sentinel's exit code onto the record while the session is
+    still alive, so a later poll — after the session (and, for a remote host,
+    its pane) is gone — can classify from this instead of guessing. This is
+    what makes a finished *remote* run report `completed` rather than
+    `interrupted` before its results have been pulled back: the report-probe
+    fallback below only ever reads the *local* filesystem, which has nothing
+    to say about a run that hasn't been collected yet."""
+    with _lock:
+        records = _load()
+        changed = False
+        for r in records:
+            if r["session_name"] == session_name and r.get("return_code") != code:
+                r["return_code"] = code
+                changed = True
+        if changed:
+            _save(records)
+
+
 def _status_for(record: Dict[str, Any], alive_sessions: Optional[set] = None) -> Dict[str, Any]:
     session_name = record["session_name"]
-    alive = session_name in (alive_sessions if alive_sessions is not None else set(tmux.list_sessions()))
+    host_id = _host_id_of(record)
+    alive = session_name in (
+        alive_sessions if alive_sessions is not None else set(tmux.list_sessions(host_id=host_id))
+    )
     latest_metrics = None
     restart_available = False
     return_code = None
 
     if alive:
-        text = tmux.capture_pane_tail(session_name, lines=300) or ""
+        text = tmux.capture_pane_tail(session_name, lines=300, host_id=host_id) or ""
         code = _marker_code(text, session_name)
         if code is None:
             status = "running"
-        elif code == 0:
-            status = "completed"
-            return_code = 0
-        elif code == 130:
-            status = "stopped"
-            return_code = 130
-            restart_available = True
         else:
-            status = "failed"
+            status, restart_available = _status_from_code(code)
             return_code = code
-            restart_available = True
+            _remember_return_code(session_name, code)
         series = parse_log_text(text)["series"]
         latest_metrics = series[-1] if series else None
     else:
-        report = reports.find_latest_report_for_experiment(record.get("experiment_name") or "")
-        if report:
-            status = "completed"
+        stored_code = record.get("return_code")
+        if stored_code is not None:
+            status, restart_available = _status_from_code(stored_code)
+            return_code = stored_code
+        elif host_id == hosts.LOCAL_HOST_ID:
+            # Local only: reconciling after a dashboard restart, before this
+            # module ever got to see the session alive and remember its code.
+            # A remote host has no local report to read yet — see the
+            # docstring above — so it goes straight to "interrupted" instead.
+            report = reports.find_latest_report_for_experiment(record.get("experiment_name") or "")
+            status = "completed" if report else "interrupted"
+            restart_available = status == "interrupted"
         else:
             status = "interrupted"
             restart_available = True
@@ -239,58 +303,71 @@ def _status_for(record: Dict[str, Any], alive_sessions: Optional[set] = None) ->
     }
 
 
+def _unmanaged_entry(name: str) -> Dict[str, Any]:
+    return {
+        "session_name": name,
+        "managed": False,
+        "host_id": hosts.LOCAL_HOST_ID,
+        "config_path": None,
+        "mode": None,
+        "extra_args": "",
+        "experiment_name": None,
+        "command": None,
+        "created_at": None,
+        "restart_count": 0,
+        "alive": True,
+        "status": "unmanaged",
+        "return_code": None,
+        "latest_metrics": None,
+        "restart_available": False,
+    }
+
+
 def list_terminals() -> List[Dict[str, Any]]:
     records = _load()
-    alive_sessions = set(tmux.list_sessions())
-    managed_names = {r["session_name"] for r in records}
 
-    result = [_status_for(r, alive_sessions) for r in records]
+    # One tmux query per distinct host actually referenced by a record —
+    # never every configured host on every poll, so an offline lab box just
+    # makes its own records slow/unknown instead of stalling the whole list.
+    alive_by_host: Dict[str, set] = {}
+    for r in records:
+        host_id = _host_id_of(r)
+        if host_id not in alive_by_host:
+            alive_by_host[host_id] = set(tmux.list_sessions(host_id=host_id))
+
+    result = [_status_for(r, alive_by_host[_host_id_of(r)]) for r in records]
     result.sort(key=lambda r: r.get("created_at") or "", reverse=True)
 
+    # Unmanaged-session detection stays local-only: it exists so a tmux
+    # session started by hand on *this* machine isn't invisible, not to
+    # enumerate every remote host's shell state — that's Machine Stats' job.
+    local_alive = alive_by_host.get(hosts.LOCAL_HOST_ID)
+    if local_alive is None:
+        local_alive = set(tmux.list_sessions(host_id=hosts.LOCAL_HOST_ID))
+    managed_names = {r["session_name"] for r in records}
     unmanaged = sorted(
-        name for name in (alive_sessions - managed_names)
+        name for name in (local_alive - managed_names)
         if not monitors.is_monitor_session(name)
     )
-    for name in unmanaged:
-        result.append({
-            "session_name": name,
-            "managed": False,
-            "config_path": None,
-            "mode": None,
-            "extra_args": "",
-            "experiment_name": None,
-            "command": None,
-            "created_at": None,
-            "restart_count": 0,
-            "alive": True,
-            "status": "unmanaged",
-            "return_code": None,
-            "latest_metrics": None,
-            "restart_available": False,
-        })
+    result.extend(_unmanaged_entry(name) for name in unmanaged)
     return result
 
 
 def get_terminal(session_name: str, include_log: bool = False) -> Optional[Dict[str, Any]]:
-    records = _load()
-    record = next((r for r in records if r["session_name"] == session_name), None)
-    alive_sessions = set(tmux.list_sessions())
+    record = _record_for(session_name)
+    host_id = _host_id_of(record) if record is not None else hosts.LOCAL_HOST_ID
+    alive_sessions = set(tmux.list_sessions(host_id=host_id))
 
     if record is not None:
         enriched = _status_for(record, alive_sessions)
     elif session_name in alive_sessions:
-        enriched = {
-            "session_name": session_name, "managed": False, "config_path": None,
-            "mode": None, "extra_args": "", "experiment_name": None, "command": None,
-            "created_at": None, "restart_count": 0, "alive": True, "status": "unmanaged",
-            "return_code": None, "latest_metrics": None, "restart_available": False,
-        }
+        enriched = _unmanaged_entry(session_name)
     else:
         return None
 
     if include_log:
         if enriched["alive"]:
-            text = tmux.capture_pane(session_name) or ""
+            text = tmux.capture_pane(session_name, host_id=host_id) or ""
         else:
             snap = _snapshot_path(session_name)
             text = snap.read_text() if snap.exists() else ""

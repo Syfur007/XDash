@@ -24,6 +24,7 @@ from flask import Flask, request, jsonify, send_from_directory, send_file
 from backend.config import settings
 from backend import configs as cfg
 from backend import terminals
+from backend import hosts
 from backend import reports
 from backend import history
 from backend import monitors
@@ -337,21 +338,22 @@ def api_launch_terminal():
     config_path = body.get("config_path")
     mode = body.get("mode", "train")
     extra_args = body.get("extra_args", "")
+    host_id = body.get("host_id")  # omitted/None -> local, unchanged from before hosts existed
     if not config_path:
         return err("Missing 'config_path'", 400)
     if mode not in ("train", "eval"):
         return err("mode must be 'train' or 'eval'", 400)
-    if not tmux.tmux_available():
+    if not tmux.tmux_available(host_id=host_id):
         return err(
             "'tmux' was not found on PATH. Install it (e.g. `sudo apt install tmux`) "
             "to run experiments from the dashboard.",
             400,
         )
     try:
-        return jsonify(terminals.launch(config_path, mode, extra_args))
+        return jsonify(terminals.launch(config_path, mode, extra_args, host_id=host_id))
     except FileNotFoundError:
         return err(f"Config not found: {config_path}", 404)
-    except ValueError as e:
+    except (ValueError, hosts.HostError) as e:
         return err(str(e), 400)
     except tmux.TmuxError as e:
         return err(str(e), 400)
@@ -403,10 +405,10 @@ def api_scheduler_add():
     if not config_path:
         return err("Missing 'config_path'", 400)
     try:
-        created = scheduler.add_item(config_path, mode, extra_args)
+        created = scheduler.add_item(config_path, mode, extra_args, host_id=body.get("host_id"))
     except FileNotFoundError:
         return err(f"Config not found: {config_path}", 404)
-    except ValueError as e:
+    except (ValueError, hosts.HostError) as e:
         return err(str(e), 400)
     return jsonify({"items": created})
 
@@ -549,6 +551,49 @@ def api_kaggle_set_weekly_budget(name):
         return jsonify(kaggle_ops.set_weekly_budget(name, float(hours) if hours is not None else None))
     except (kaggle_ops.KaggleOpsError, TypeError, ValueError) as e:
         return err(str(e), 400)
+
+
+# --------------------------------------------------------------------------- hosts (Multi_runner_XDash.md Phase 1)
+# Machines XDash can open a tmux session on — the local device (always
+# present, synthesized if data/hosts.json has no entry for it) plus any
+# registered SSH boxes. See backend/hosts.py.
+@app.route("/api/hosts", methods=["GET"])
+def api_list_hosts():
+    return jsonify({"hosts": [h.as_dict() for h in hosts.list_hosts()]})
+
+
+@app.route("/api/hosts", methods=["POST"])
+def api_upsert_host():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(hosts.upsert_host(body).as_dict())
+    except hosts.HostError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/hosts/<host_id>", methods=["DELETE"])
+def api_remove_host(host_id):
+    try:
+        if not hosts.remove_host(host_id):
+            return err("Unknown host", 404)
+    except hosts.HostError as e:
+        return err(str(e), 400)
+    return jsonify({"removed": True})
+
+
+@app.route("/api/hosts/<host_id>/test", methods=["POST"])
+def api_test_host(host_id):
+    try:
+        host = hosts.get_host(host_id)
+    except hosts.HostError as e:
+        return err(str(e), 404)
+    from backend import transport as transport_mod
+    t = transport_mod.for_host(host.id)
+    reachable = t.available()
+    return jsonify({
+        "reachable": reachable,
+        "tmux_available": tmux.tmux_available(host_id=host.id) if reachable else False,
+    })
 
 
 # --------------------------------------------------------------------------- runners (DASHBOARD_REDESIGN_PLAN.md Phase 0)
@@ -820,8 +865,10 @@ def api_list_monitors():
 def api_add_monitor():
     body = request.get_json(silent=True) or {}
     try:
-        return jsonify(monitors.add_monitor(body.get("name", ""), body.get("command", ""), body.get("watch_interval", 0)))
-    except ValueError as e:
+        return jsonify(monitors.add_monitor(
+            body.get("name", ""), body.get("command", ""), body.get("watch_interval", 0), body.get("host_id"),
+        ))
+    except (ValueError, hosts.HostError) as e:
         return err(str(e), 400)
 
 
