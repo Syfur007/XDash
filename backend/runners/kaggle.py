@@ -10,15 +10,25 @@ longer any per-worker record to enumerate, so `list_units()` projects
 experiments.list_experiments(slot=...) instead. Launching is likewise no
 longer this facade's job: it is `POST /api/experiments`, which goes through
 the one dispatcher rather than around it.
+
+Since Multi_runner_XDash.md Phase 2, this is also where the Kaggle half of
+the old `_claim_and_dispatch_kaggle`/`_kaggle_candidate_accounts`/
+`_kaggle_block`/`_pick_kaggle_account`/`_poll_kaggle_attempts` logic in
+backend/experiments.py now lives — moved, not duplicated. `can_accept()`
+below does the job both `_kaggle_candidate_accounts()` (silently filter) and
+`_kaggle_block()` (explain why none qualified) used to do separately, since
+an eligibility check and its own rejection reason are the same computation.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from datetime import timedelta
+from typing import Any, Dict, List, Optional, Tuple
 
 from .. import kaggle as kaggle_backend
 from .base import CapacitySnapshot, LaunchSpec, Runner, RunnerCapabilities, RunnerCapabilityError, RunUnit
+from .registry import slot_id
 
-RUNNER_ID_PREFIX = "kaggle:"
+RUNNER_KIND = "kaggle"
 
 # Confirmed against the current official `kaggle` CLI (Kaggle/kaggle-cli,
 # 2026 — DASHBOARD_REDESIGN_PLAN.md §2.1's fact-check): `kernels` has no
@@ -44,7 +54,7 @@ def _to_unit(account_name: str, view: Dict[str, Any]) -> RunUnit:
     unit_ref = attempt.get("unit_ref") or {}
     return RunUnit(
         unit_id=attempt.get("attempt_id") or view["experiment_id"],
-        runner_id="%s%s" % (RUNNER_ID_PREFIX, account_name),
+        runner_id=slot_id(RUNNER_KIND, account_name),
         label=view["experiment_id"],
         status=attempt.get("status") or "unknown",
         raw_status=attempt.get("raw_status") or attempt.get("status") or "unknown",
@@ -64,30 +74,39 @@ def _to_unit(account_name: str, view: Dict[str, Any]) -> RunUnit:
 
 
 class KaggleRunner(Runner):
-    kind = "kaggle"
+    kind = RUNNER_KIND
     capabilities = RunnerCapabilities(
         # direct_launch is False now: this facade no longer pushes. Launching a
         # Kaggle experiment means creating one (POST /api/experiments) and
         # letting the dispatcher claim this slot.
         direct_launch=False, live_log=False, stop=_STOP_KILL_SUPPORTED, kill=_STOP_KILL_SUPPORTED,
         restart=False, queue=True, budget_metered=True,
+        # No mid-run heartbeat: a running kernel gives XDash no shell, only a
+        # status string and, once it finishes, one zip — see the module
+        # docstring's closing sentence.
+        live_checkpoints=False,
     )
 
     def __init__(self, account_name: str):
         self.account_name = account_name
-        self.id = "%s%s" % (RUNNER_ID_PREFIX, account_name)
+        self.id = slot_id(RUNNER_KIND, account_name)
         self.label = "Kaggle · %s" % account_name
 
     def _account(self) -> Optional[Dict[str, Any]]:
         return next((a for a in kaggle_backend.list_accounts() if a["name"] == self.account_name), None)
 
     def _views(self) -> List[Dict[str, Any]]:
-        # Imported here, not at module scope: experiments.py imports
-        # backend/kaggle.py, so a top-level import would close a cycle through
-        # this package's __init__.
+        # Imported here, not at module scope: experiments.py imports this
+        # package (for the slot registry), so a top-level import back would
+        # close a cycle.
         from .. import experiments
         return experiments.list_experiments(slot=self.id)
 
+    def _busy(self) -> bool:
+        from .. import experiments
+        return experiments.is_slot_busy(self.id)
+
+    # ------------------------------------------------------------ presentation
     def list_units(self) -> List[RunUnit]:
         return [_to_unit(self.account_name, v) for v in self._views()]
 
@@ -128,6 +147,110 @@ class KaggleRunner(Runner):
                 "usage_history": account.get("usage_history"),
             },
         )
+
+    # ---------------------------------------------------------------- dispatch
+    def can_accept(self, experiment: Dict[str, Any], est_hours: float) -> Optional[Dict[str, Any]]:
+        """Both selects (None = eligible) and explains (the block code) in
+        one pass — the account-level half of what used to be two separate
+        functions (_kaggle_candidate_accounts filtering silently,
+        _kaggle_block separately re-deriving why). The config-level check
+        (no-dataset-mapping) is identical for every account, so every
+        blocked Kaggle runner for the same experiment agrees on it —
+        exactly the earlier "every account uniformly blocked" behaviour."""
+        account = self._account()
+        if account is None:
+            return {"code": "no-account", "detail": "Account not found"}
+
+        from .. import dataset_map
+        required_dataset = dataset_map.resolve_kaggle_dataset(experiment["config_path"])
+        if required_dataset is None:
+            name, _explicit = dataset_map.config_dataset_identity(experiment["config_path"])
+            return {
+                "code": "no-dataset-mapping",
+                "detail": f"'{name}' has no Kaggle dataset mapping" if name else "Config declares no dataset",
+            }
+
+        if self._busy():
+            return {"code": "pool-busy", "detail": "This account is currently busy"}
+
+        session_cap = float(account.get("weekly_budget_hours") or kaggle_backend.settings.kaggle_default_budget_hours)
+        if est_hours > session_cap:
+            return {
+                "code": "exceeds-session-cap",
+                "detail": f"Estimated {est_hours:.1f}h exceeds this account's session cap ({session_cap:.1f}h)",
+            }
+
+        remaining = (account.get("usage_estimate") or {}).get("remaining_hours")
+        if remaining is not None and est_hours > remaining:
+            clears_at = (kaggle_backend._utc_week_start() + timedelta(weeks=1)).isoformat()
+            return {
+                "code": "quota-exhausted", "detail": "This account is over its weekly budget",
+                "clears_at": clears_at,
+            }
+        return None
+
+    def dispatch_priority(self, experiment: Dict[str, Any], est_hours: float) -> Tuple:
+        """Best-fit, not round robin: prefer the account with the most
+        headroom left, breaking ties toward whichever has gone longest
+        without activity — same Rule 3 the old _pick_kaggle_account() used."""
+        account = self._account() or {}
+        usage = account.get("usage_estimate") or {}
+        remaining = usage.get("remaining_hours")
+        remaining_key = remaining if remaining is not None else float("inf")
+        return (remaining_key, self._last_activity())
+
+    def _last_activity(self) -> str:
+        from .. import experiments
+        times = [a.get("started_at") for a in experiments.attempts_for_slot(self.id) if a.get("started_at")]
+        return max(times) if times else ""
+
+    def dispatch(self, experiment: Dict[str, Any], attempt: Dict[str, Any]) -> Dict[str, Any]:
+        from .. import dataset_map
+        required_dataset = dataset_map.resolve_kaggle_dataset(experiment["config_path"])
+        result = kaggle_backend.push_experiment_attempt(
+            self.account_name, experiment["experiment_id"], experiment["config_path"],
+            experiment.get("extra_args") or "", [required_dataset] if required_dataset else [],
+        )
+        return {
+            "unit_ref": {
+                "account": self.account_name,
+                "kernel_slug": result["kernel_slug"], "results_dir": result["results_dir"],
+            },
+            "stages": [{"name": "run", "status": "running"}],
+        }
+
+    def poll(self, attempt: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        unit_ref = attempt.get("unit_ref") or {}
+        if not unit_ref.get("kernel_slug"):
+            return None
+        try:
+            result = kaggle_backend.refresh_experiment_status(unit_ref["account"], unit_ref["kernel_slug"])
+        except kaggle_backend.KaggleOpsError:
+            return {"raw_status": None, "stages": [{"name": "run", "status": "unknown"}], "finished": False, "succeeded": None}
+        raw = result.get("status")
+        finished = raw in kaggle_backend.FINAL_STATUSES
+        return {
+            "raw_status": raw,
+            "stages": [{"name": "run", "status": raw or "unknown"}],
+            "finished": finished,
+            "succeeded": (raw == "complete") if finished else None,
+        }
+
+    def collect(self, attempt: Dict[str, Any]) -> Optional[str]:
+        unit_ref = attempt.get("unit_ref") or {}
+        if not unit_ref.get("kernel_slug"):
+            return None
+        try:
+            result = kaggle_backend.download_experiment(unit_ref["account"], unit_ref["kernel_slug"], unit_ref["results_dir"])
+        except kaggle_backend.KaggleOpsError:
+            return None
+        return result.get("results_dir")
+
+    def cancel(self, attempt: Dict[str, Any]) -> bool:
+        # No cooperative stop exists (see the class's stop()/kill() above) —
+        # the caller has already marked the Attempt cancelled; there is
+        # nothing more this runner can do to the kernel itself.
+        return True
 
 
 def list_kaggle_runners() -> List[KaggleRunner]:

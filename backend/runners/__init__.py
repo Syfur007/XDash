@@ -1,36 +1,22 @@
-"""Runner abstraction (DASHBOARD_REDESIGN_PLAN.md §2): one shared shape every
-lifecycle view can render (status, capacity, "can I do X here") over the two
-execution backends this dashboard drives — the local device (`local.py`, a thin facade
-over terminals.py/tmux_runner.py) and each configured Kaggle account
-(`kaggle.py`, a thin facade over backend/kaggle.py). Neither facade holds its
-own state or duplicates logic; they call the existing, already-tested
-functions verbatim and translate their native status vocabularies into one
-canonical set (see base.CANONICAL_STATUSES) so a single status-badge
-component can render every runner consistently. Every pre-existing route
-(`/api/terminals/*`, `/api/scheduler/*`, `/api/kaggle/*`) keeps working
-unchanged — this package is purely additive.
+"""Runner abstraction (DASHBOARD_REDESIGN_PLAN.md §2, extended to a real
+write path by Multi_runner_XDash.md Phase 2): one shared shape every
+lifecycle view — and, since Phase 2, the dispatcher itself — can drive over
+every execution backend this dashboard controls. `local.py` is a thin facade
+over terminals.py/tmux_runner.py/scheduler.py; `kaggle.py` is a thin facade
+over backend/kaggle.py, Attempt-backed since the worker registry retired
+(§3.7). Neither facade holds its own state or duplicates logic. `registry.py`
+is the single source of truth for slot identity (`slot_id`/`parse_slot_id`)
+and for listing/looking up runners — the thing a fifth kind needs to touch.
 """
 from __future__ import annotations
 
-from typing import List
-
 from .base import CapacitySnapshot, LaunchSpec, Runner, RunnerCapabilities, RunnerCapabilityError, RunUnit
+from .registry import LOCAL, get_runner, list_runners, parse_slot_id, slot_id
 from .local import LocalRunner
 from .kaggle import KaggleRunner, list_kaggle_runners
 
 __all__ = [
     "CapacitySnapshot", "LaunchSpec", "Runner", "RunnerCapabilities", "RunnerCapabilityError", "RunUnit",
     "LocalRunner", "KaggleRunner", "list_runners", "get_runner",
+    "LOCAL", "slot_id", "parse_slot_id",
 ]
-
-
-def list_runners() -> List[Runner]:
-    """The local runner (always present) + one KaggleRunner per configured account."""
-    return [LocalRunner(), *list_kaggle_runners()]
-
-
-def get_runner(runner_id: str) -> Runner:
-    for r in list_runners():
-        if r.id == runner_id:
-            return r
-    raise KeyError(f"Unknown runner '{runner_id}'")

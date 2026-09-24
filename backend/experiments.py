@@ -27,20 +27,35 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import configs as cfg
-from . import dataset_map
 from . import estimates
 from . import kaggle as kaggle_backend
 from . import ledger
 from . import notifications as notif
 from . import scheduler
 from .config import settings
+from .runners import registry
+from .runners.base import Runner
 
 _lock = threading.RLock()          # guards experiments.json
-_dispatch_lock = threading.Lock()  # serializes _dispatch_tick() — see batch_runner.py's twin
+_dispatch_lock = threading.Lock()  # serializes _dispatch_tick()
 
 PRE_DISPATCH_STATUSES = {"pending", "blocked"}      # not yet claimed by a slot
 IN_FLIGHT_STATUSES = {"dispatching", "running"}     # claimed; a unit exists or is being created
 TERMINAL_STATUSES = {"done", "failed", "cancelled"}
+
+# Priority order for picking the single most-informative blocked reason when
+# every candidate runner for an experiment's pool refuses it — lower index
+# wins (matches the old, kaggle-only _kaggle_block()'s own ordering). A code
+# a runner returns that isn't listed here (forward-compat for a new kind)
+# sorts last, never crashes.
+_BLOCK_PRIORITY = {
+    "no-account": 0, "no-dataset-mapping": 1, "pool-busy": 2,
+    "exceeds-session-cap": 3, "quota-exhausted": 4,
+}
+
+
+def _block_severity(block: Dict[str, Any]) -> int:
+    return _BLOCK_PRIORITY.get(block.get("code"), 99)
 
 
 class ExperimentError(Exception):
@@ -109,42 +124,25 @@ def _find_run_id_for(experiment_name: str, seed: Optional[Any]) -> Optional[str]
     return None
 
 
-def _live_local_stage(item_id: Optional[str]) -> Optional[Dict[str, Any]]:
-    if not item_id:
-        return None
-    item = next((i for i in scheduler.list_items()["items"] if i["id"] == item_id), None)
-    if item is None:
-        return None
-    return {"item_id": item_id, "status": item["status"]}
-
-
 def _resolve_attempt_live(attempt: Dict[str, Any]) -> Dict[str, Any]:
-    """Attempt as stored, with its `stages`/`raw_status` re-derived from its
-    unit_ref when still in flight — mirrors how the old system always
-    computed a worker's/item's status fresh rather than trusting a
-    continuously-synced mirror (kaggle.list_accounts(), scheduler.list_items()).
-    Terminal/pre-dispatch attempts are returned unchanged; there is nothing
-    live left to resolve."""
+    """Attempt as stored, with its `stages`/`raw_status` re-derived by its
+    own runner's `poll()` when still in flight — replaces what used to be an
+    inline `slot == "local"` vs `unit_ref.get("kernel_slug")` branch here
+    with one call through the Runner interface (Multi_runner_XDash.md
+    Phase 2). Terminal/pre-dispatch attempts are returned unchanged; there is
+    nothing live left to resolve."""
     if attempt["status"] not in IN_FLIGHT_STATUSES:
         return attempt
-    unit_ref = attempt.get("unit_ref") or {}
+    try:
+        runner = registry.get_runner(attempt.get("slot") or "")
+    except KeyError:
+        return attempt
+    live = runner.poll(attempt)
+    if live is None:
+        return attempt
     out = dict(attempt)
-    if attempt["slot"] == "local" and "eval_item_id" in unit_ref:
-        train = _live_local_stage(unit_ref.get("train_item_id"))
-        evalu = _live_local_stage(unit_ref.get("eval_item_id"))
-        out["stages"] = [
-            {"name": "train", "status": (train or {}).get("status", "unknown")},
-            {"name": "eval", "status": (evalu or {}).get("status", "unknown")},
-        ]
-        out["raw_status"] = (evalu or {}).get("status")
-    elif unit_ref.get("account") and unit_ref.get("kernel_slug"):
-        try:
-            result = kaggle_backend.refresh_experiment_status(unit_ref["account"], unit_ref["kernel_slug"])
-            raw = result.get("status")
-        except kaggle_backend.KaggleOpsError:
-            raw = None
-        out["raw_status"] = raw
-        out["stages"] = [{"name": "run", "status": raw or "unknown"}]
+    out["raw_status"] = live.get("raw_status")
+    out["stages"] = live.get("stages") or attempt.get("stages") or []
     return out
 
 
@@ -209,7 +207,7 @@ def get_experiment(experiment_id: str) -> Dict[str, Any]:
 
 # --------------------------------------------------------------------------- experiments (write)
 def create_experiments(
-    configs: List[Dict[str, Any]], extra_args: str = "", pool: str = "either",
+    configs: List[Dict[str, Any]], extra_args: str = "", pool: Any = "either",
     batch_name: Optional[str] = None, max_retries: int = 1, force_on_retry: bool = True,
 ) -> List[Dict[str, Any]]:
     """`POST /api/experiments` — the single launch verb (§5). *configs* is a
@@ -221,9 +219,15 @@ def create_experiments(
     If its current attempt is pending/blocked, it's left alone (already
     queued); if terminal, a fresh Attempt is queued (the same effect as
     `POST /api/experiments/<id>/retry`); if in flight, it's left alone.
+
+    *pool* accepts the original 3-value enum ('either'/'local_only'/
+    'kaggle_only'), '*', a bare runner kind ('ssh'), an exact slot id
+    ('kaggle:tanvir'), or a list of any of those — see _normalize_pool().
+    Stored exactly as given; normalized only when read, so an experiment
+    created before a new runner kind existed keeps meaning what it always
+    meant.
     """
-    if pool not in ("either", "local_only", "kaggle_only"):
-        raise ExperimentError(f"pool must be 'either', 'local_only' or 'kaggle_only', got {pool!r}")
+    _validate_pool(pool)
     if not configs:
         raise ExperimentError("configs must declare at least one entry")
 
@@ -321,10 +325,9 @@ def retry_experiment(experiment_id: str) -> Dict[str, Any]:
 
 def cancel_experiment(experiment_id: str) -> Dict[str, Any]:
     """`POST /api/experiments/<id>/cancel`. Pending/blocked: just marks the
-    attempt cancelled. In flight: stops the underlying unit the same way
-    the old Assignments board's cancel did (local: scheduler.cancel_item()
-    on the eval item, which stops the terminal per scheduler.py's own
-    cancel semantics; Kaggle: no cooperative stop exists in the CLI, so this
+    attempt cancelled. In flight: marks it cancelled, then best-effort asks
+    its runner to stop the underlying unit (`Runner.cancel()` — local
+    actually stops the tmux session; Kaggle has no cooperative stop, so this
     only stops the dashboard from tracking it further — Kaggle's own
     `kernels status` may keep reporting it running until it finishes or
     times out, matching backend/runners/base.py's documented `stop`/`kill`
@@ -337,21 +340,15 @@ def cancel_experiment(experiment_id: str) -> Dict[str, Any]:
         attempt = data["attempts"].get(experiment.get("current_attempt_id") or "")
         if attempt is None or attempt["status"] in TERMINAL_STATUSES:
             return get_experiment(experiment_id)
-        unit_ref = attempt.get("unit_ref") or {}
+        slot = attempt.get("slot")
         attempt["status"] = "cancelled"
         attempt["ended_at"] = _now_iso()
         attempt["updated_at"] = _now_iso()
         _save(data)
-    if unit_ref.get("eval_item_id"):
-        try:
-            scheduler.cancel_item(unit_ref["eval_item_id"])
-        except ValueError:
-            pass
-        if unit_ref.get("train_item_id"):
-            try:
-                scheduler.cancel_item(unit_ref["train_item_id"])
-            except ValueError:
-                pass
+    try:
+        registry.get_runner(slot or "").cancel(attempt)
+    except KeyError:
+        pass
     return get_experiment(experiment_id)
 
 
@@ -464,134 +461,61 @@ def set_batch_paused(name: str, paused: bool) -> Dict[str, Any]:
 
 
 # --------------------------------------------------------------------------- capacity + feasibility
-def _local_free_slots() -> int:
-    """Identical accounting to batch_runner.py's own (XDASH_V2_PLAN.md D9's
-    fix, ported) — deliberately reads scheduler.list_items() fresh rather
-    than any dashboard-local mirror, so this and the old dispatcher always
-    see the same shared, live number."""
-    data = scheduler.list_items()
-    items = data["items"]
-    if data.get("paused"):
-        return 0
-    running = sum(1 for i in items if i["status"] == "running")
-    by_id = {i["id"]: i for i in items}
-
-    def launch_eligible(item: Dict[str, Any]) -> bool:
-        dep_id = item.get("depends_on")
-        if not dep_id:
-            return True
-        dep = by_id.get(dep_id)
-        return dep is not None and dep["status"] == "completed"
-
-    pending = sum(1 for i in items if i["status"] == "pending" and launch_eligible(i))
-    return max(0, data["max_concurrent"] - running - pending)
+# Pool generalizes from a 3-value enum ("either"/"local_only"/"kaggle_only")
+# to an allow-list of runner kinds or exact slot ids — "*", ["local", "ssh"],
+# ["kaggle:tanvir"]. Normalized ON READ, never migrated: a persisted
+# "kaggle_only" from before this landed reads exactly the same as ["kaggle"]
+# forever, so no on-disk record ever needs rewriting.
+_LEGACY_POOL_MAP = {"either": ["*"], "local_only": ["local"], "kaggle_only": ["kaggle"]}
 
 
-def _kaggle_account_busy(account: Dict[str, Any]) -> bool:
-    """Is *account*'s one real slot occupied? Attempts are now the only thing
-    that can occupy it — the worker registry this also had to check is gone
-    (XDASH_V2_PLAN.md §3.7), so this no longer reads any second system's
-    state."""
+def _validate_pool(pool: Any) -> None:
+    # isinstance checks first, deliberately: `pool in _LEGACY_POOL_MAP` below
+    # hashes its left operand, which raises on an unhashable list/tuple — so
+    # a list must be recognized and returned on before any dict/tuple
+    # membership test ever sees it.
+    if isinstance(pool, str):
+        return  # covers None-like "", "*", every legacy string, and any forward-compat bare kind/slot id
+    if pool is None:
+        return
+    if isinstance(pool, (list, tuple)) and all(isinstance(p, str) for p in pool):
+        return
+    raise ExperimentError(
+        "pool must be 'either'/'local_only'/'kaggle_only', '*', a runner kind/slot id, "
+        f"or a list of them — got {pool!r}"
+    )
+
+
+def _normalize_pool(pool: Any) -> List[str]:
+    if pool is None or pool == "":
+        return ["*"]
+    if isinstance(pool, (list, tuple)):
+        return list(pool) or ["*"]
+    if pool in _LEGACY_POOL_MAP:  # pool is a plain (hashable) string past this point
+        return _LEGACY_POOL_MAP[pool]
+    return [pool]
+
+
+def _runner_allowed(pool_list: List[str], runner: Runner) -> bool:
+    return "*" in pool_list or runner.kind in pool_list or runner.id in pool_list
+
+
+def attempts_for_slot(slot: str) -> List[Dict[str, Any]]:
+    """Every Attempt currently on *slot*, regardless of status — the one
+    place any runner needs to look at another Attempt's record (its own
+    dispatch_priority()'s "last activity" tie-break, e.g.), so it never has
+    to reach into this module's storage internals directly."""
     with _lock:
         data = _load()
-    slot = f"kaggle:{account['name']}"
-    for attempt in data["attempts"].values():
-        if attempt.get("slot") == slot and attempt["status"] in IN_FLIGHT_STATUSES:
-            return True
-    return False
+    return [a for a in data["attempts"].values() if a.get("slot") == slot]
 
 
-def _kaggle_candidate_accounts(est: float, config_path: str) -> List[Dict[str, Any]]:
-    """Ported from batch_runner.py's own (same name, same contract) —
-    accounts with budget headroom for *est* hours this week, a session cap
-    that fits it, and — now that no worker exists to attach a dataset to —
-    ANY idle account is a candidate as long as the config's dataset
-    resolves at all (§3.4); dataset *attachment* itself happens at push
-    time via push_experiment_attempt's own dataset_sources argument, not by
-    matching a pre-registered worker's dataset_sources list the way the old
-    dispatcher must."""
-    required_dataset = dataset_map.resolve_kaggle_dataset(config_path)
-    if required_dataset is None:
-        return []
-    out = []
-    for account in kaggle_backend.list_accounts():
-        if _kaggle_account_busy(account):
-            continue
-        session_cap = float(account.get("weekly_budget_hours") or settings.kaggle_default_budget_hours)
-        if est > session_cap:
-            continue
-        usage = account.get("usage_estimate") or {}
-        remaining = usage.get("remaining_hours")
-        if remaining is not None and est > remaining:
-            continue
-        out.append(account)
-    return out
-
-
-def _account_last_activity(account: Dict[str, Any]) -> str:
-    times = [w.get("pushed_at") for w in account.get("workers", []) if w.get("pushed_at")]
-    with _lock:
-        data = _load()
-    for attempt in data["attempts"].values():
-        if attempt.get("slot") == f"kaggle:{account['name']}" and attempt.get("started_at"):
-            times.append(attempt["started_at"])
-    return max(times) if times else ""
-
-
-def _pick_kaggle_account(est: float, config_path: str) -> Optional[Dict[str, Any]]:
-    """Best-fit, not round robin — same Rule 3 as batch_runner.py's twin."""
-    candidates = _kaggle_candidate_accounts(est, config_path)
-    if not candidates:
-        return None
-
-    def sort_key(account: Dict[str, Any]):
-        usage = account.get("usage_estimate") or {}
-        remaining = usage.get("remaining_hours")
-        remaining_key = remaining if remaining is not None else float("inf")
-        return (remaining_key, _account_last_activity(account))
-
-    return min(candidates, key=sort_key)
-
-
-def _kaggle_block(est: float, config_path: str) -> Dict[str, Any]:
-    """§3.5's structured blocked codes, generalized from batch_runner.py's
-    _kaggle_block_code() — returns the fuller {code, detail, since,
-    clears_at} shape now that this is the real, persisted object model."""
-    accounts = kaggle_backend.list_accounts()
-    if not accounts:
-        return {"code": "no-account", "detail": "No Kaggle accounts are registered"}
-    required_dataset = dataset_map.resolve_kaggle_dataset(config_path)
-    if required_dataset is None:
-        name, _ = dataset_map.config_dataset_identity(config_path)
-        return {
-            "code": "no-dataset-mapping",
-            "detail": f"'{name}' has no Kaggle dataset mapping" if name else "Config declares no dataset",
-        }
-    idle = [a for a in accounts if not _kaggle_account_busy(a)]
-    if not idle:
-        return {"code": "pool-busy", "detail": "Every Kaggle account is currently busy"}
-    session_ok = [
-        a for a in idle
-        if est <= float(a.get("weekly_budget_hours") or settings.kaggle_default_budget_hours)
-    ]
-    if not session_ok:
-        return {
-            "code": "exceeds-session-cap",
-            "detail": f"Estimated {est:.1f}h exceeds every idle account's session cap",
-        }
-
-    def _fits_quota(account: Dict[str, Any]) -> bool:
-        remaining = (account.get("usage_estimate") or {}).get("remaining_hours")
-        return remaining is None or est <= remaining
-
-    quota_ok = [a for a in session_ok if _fits_quota(a)]
-    if not quota_ok:
-        clears_at = (kaggle_backend._utc_week_start() + timedelta(weeks=1)).isoformat()
-        return {
-            "code": "quota-exhausted", "detail": "Every session-eligible account is over its weekly budget",
-            "clears_at": clears_at,
-        }
-    return {"code": "pool-busy", "detail": "Feasible, but lost a race with another attempt for the slot"}
+def is_slot_busy(slot: str) -> bool:
+    """Is *slot*'s capacity currently claimed by an in-flight Attempt? The
+    one occupancy check every 1-slot runner kind (Kaggle today; Colab once
+    Phase 4 lands) needs, and the only place that ever reads IN_FLIGHT_STATUSES
+    against a slot."""
+    return any(a["status"] in IN_FLIGHT_STATUSES for a in attempts_for_slot(slot))
 
 
 # --------------------------------------------------------------------------- dispatch
@@ -605,6 +529,12 @@ def _dispatch_tick() -> None:
 
 
 def _dispatch_tick_locked() -> None:
+    """Loops over every registered runner instead of branching on kind — the
+    old `("local", None) | ("kaggle", account)` target tuple and its
+    dedicated `_claim_and_dispatch_local`/`_claim_and_dispatch_kaggle` pair
+    are gone; a runner is a runner regardless of what it's called
+    (Multi_runner_XDash.md Phase 2). Adding a kind means registering it in
+    backend/runners/registry.py — nothing here changes."""
     with _lock:
         data = _load()
         pending_pairs: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
@@ -625,18 +555,33 @@ def _dispatch_tick_locked() -> None:
             est_cache[config_path] = estimates.est_hours(config_path)
         return est_cache[config_path]
 
-    local_free = _local_free_slots()
+    runners_by_kind: Dict[str, List[Runner]] = {}
+    for r in registry.list_runners():
+        runners_by_kind.setdefault(r.kind, []).append(r)
 
-    def feasibility(experiment: Dict[str, Any]) -> Tuple[int, float]:
-        pool = experiment.get("pool") or "either"
-        est = est_for(experiment["config_path"])["hours"]
-        local_ok = pool != "kaggle_only"
-        kaggle_ok = pool != "local_only" and bool(
-            _kaggle_candidate_accounts(est, experiment["config_path"])
-        )
-        return (int(local_ok) + int(kaggle_ok), est)
+    def candidates_for(experiment: Dict[str, Any]) -> List[Runner]:
+        pool = _normalize_pool(experiment.get("pool"))
+        return [r for insts in runners_by_kind.values() for r in insts if _runner_allowed(pool, r)]
 
-    feasibility_by_id = {e["experiment_id"]: feasibility(e) for e, _ in pending_pairs}
+    def feasible_kind_count(experiment: Dict[str, Any], est: float) -> int:
+        # How many *kinds* (not runner instances) have at least one runner
+        # willing to take this experiment right now — used only to order the
+        # tick's greedy pass (constrained experiments first), never to pick
+        # the actual target.
+        pool = _normalize_pool(experiment.get("pool"))
+        count = 0
+        for kind, insts in runners_by_kind.items():
+            if not any(_runner_allowed(pool, r) for r in insts):
+                continue
+            if any(r.can_accept(experiment, est) is None for r in insts):
+                count += 1
+        return count
+
+    feasibility_by_id = {}
+    for e, _a in pending_pairs:
+        est = est_for(e["config_path"])["hours"]
+        feasibility_by_id[e["experiment_id"]] = (feasible_kind_count(e, est), est)
+
     scored = sorted(
         pending_pairs,
         key=lambda pair: (
@@ -646,28 +591,32 @@ def _dispatch_tick_locked() -> None:
     )
 
     for experiment, attempt in scored:
-        pool = experiment.get("pool") or "either"
         est = est_for(experiment["config_path"])["hours"]
+        candidates = candidates_for(experiment)
 
-        target: Optional[Tuple[str, Any]] = None  # ("local", None) | ("kaggle", account)
-        if pool != "local_only":
-            account = _pick_kaggle_account(est, experiment["config_path"])
-            if account:
-                target = ("kaggle", account)
-        if target is None and pool != "kaggle_only" and local_free > 0:
-            target = ("local", None)
+        eligible: List[Runner] = []
+        worst_block: Optional[Dict[str, Any]] = None
+        for r in candidates:
+            block = r.can_accept(experiment, est)
+            if block is None:
+                eligible.append(r)
+            elif worst_block is None or _block_severity(block) > _block_severity(worst_block):
+                worst_block = block
 
-        if target is None:
-            block = {"code": "pool-busy", "detail": "Nothing free this tick"} if pool == "local_only" \
-                else _kaggle_block(est, experiment["config_path"])
-            _set_blocked(experiment["experiment_id"], attempt["attempt_id"], block)
+        if not candidates:
+            _set_blocked(experiment["experiment_id"], attempt["attempt_id"], {
+                "code": "no-account", "detail": "No runner matches this experiment's pool",
+            })
+            continue
+        if not eligible:
+            _set_blocked(
+                experiment["experiment_id"], attempt["attempt_id"],
+                worst_block or {"code": "pool-busy", "detail": "Nothing free this tick"},
+            )
             continue
 
-        if target[0] == "local":
-            _claim_and_dispatch_local(experiment, attempt)
-            local_free -= 1
-        else:
-            _claim_and_dispatch_kaggle(experiment, attempt, target[1])
+        chosen = min(eligible, key=lambda r: r.dispatch_priority(experiment, est))
+        _claim_and_dispatch(experiment, attempt, chosen)
 
 
 def _set_blocked(experiment_id: str, attempt_id: str, block: Dict[str, Any]) -> None:
@@ -711,46 +660,23 @@ def _update_attempt(attempt_id: str, patch: Dict[str, Any]) -> None:
         _save(data)
 
 
-def _claim_and_dispatch_local(experiment: Dict[str, Any], attempt: Dict[str, Any]) -> None:
+def _claim_and_dispatch(experiment: Dict[str, Any], attempt: Dict[str, Any], runner: Runner) -> None:
+    """Replaces the old `_claim_and_dispatch_local`/`_claim_and_dispatch_kaggle`
+    pair — claim, then delegate the actual launch to *runner*.dispatch(),
+    whatever kind it is."""
+    # started_at is set here, at claim time, not only on a confirmed launch —
+    # this is also what lets a Kaggle runner's dispatch_priority() tell two
+    # never-yet-succeeded accounts apart, so a failing account isn't picked
+    # again on every single retry (see _fail_or_retry's docstring).
     claimed = _claim_attempt(
         attempt["attempt_id"], attempt["status"],
-        {"status": "dispatching", "slot": "local", "started_at": _now_iso()},
+        {"status": "dispatching", "slot": runner.id, "started_at": _now_iso()},
     )
     if claimed is None:
         return
     try:
-        items = scheduler.add_item(experiment["config_path"], "both", experiment.get("extra_args") or "")
-        unit_ref = {"train_item_id": items[0]["id"], "eval_item_id": items[1]["id"]}
-        _update_attempt(attempt["attempt_id"], {
-            "status": "running", "unit_ref": unit_ref,
-            "stages": [{"name": "train", "status": "pending"}, {"name": "eval", "status": "pending"}],
-        })
-    except Exception as e:
-        _fail_or_retry(experiment["experiment_id"], attempt["attempt_id"], "dispatching", str(e), "dispatch-failed")
-
-
-def _claim_and_dispatch_kaggle(experiment: Dict[str, Any], attempt: Dict[str, Any], account: Dict[str, Any]) -> None:
-    slot = f"kaggle:{account['name']}"
-    # started_at is set here, at claim time, not only on a confirmed push — this is also what
-    # lets _account_last_activity() tell two never-yet-succeeded accounts apart, so a failing
-    # account isn't picked again on every single retry (see _fail_or_retry's docstring).
-    claimed = _claim_attempt(
-        attempt["attempt_id"], attempt["status"],
-        {"status": "dispatching", "slot": slot, "started_at": _now_iso()},
-    )
-    if claimed is None:
-        return
-    try:
-        required_dataset = dataset_map.resolve_kaggle_dataset(experiment["config_path"])
-        result = kaggle_backend.push_experiment_attempt(
-            account["name"], experiment["experiment_id"], experiment["config_path"],
-            experiment.get("extra_args") or "", [required_dataset] if required_dataset else [],
-        )
-        unit_ref = {"account": account["name"], "kernel_slug": result["kernel_slug"], "results_dir": result["results_dir"]}
-        _update_attempt(attempt["attempt_id"], {
-            "status": "running", "unit_ref": unit_ref,
-            "stages": [{"name": "run", "status": "running"}],
-        })
+        patch = runner.dispatch(experiment, claimed)
+        _update_attempt(attempt["attempt_id"], {"status": "running", **patch})
     except Exception as e:
         _fail_or_retry(experiment["experiment_id"], attempt["attempt_id"], "dispatching", str(e), "dispatch-failed")
 
@@ -837,38 +763,49 @@ def _resolve_attempt(attempt: Dict[str, Any], succeeded: bool, raw_status: str) 
     notif.send_all(f"Experiment '{experiment['experiment_id']}' attempt ended: {raw_status}.")
 
 
-def _poll_kaggle_attempts() -> None:
-    """Kaggle attempts have no worker registry entry, so kaggle.py's own
-    _tick() poller never sees them — this is the only place that polls a
-    worker-less push's status and resolves it on completion."""
+def _poll_and_resolve(attempt: Dict[str, Any]) -> None:
+    """The generic core of what used to be Kaggle-only `_poll_kaggle_attempts`
+    and half of `_reconcile_on_startup`: ask *attempt*'s own runner whether
+    its unit has finished; if so, collect its results and resolve it.
+    Runner-agnostic — for a runner whose `poll()` never reports `finished`
+    (local: resolved push-style, see LocalRunner.poll()'s own docstring for
+    why that's not a gap), this is a harmless, cheap no-op."""
+    try:
+        runner = registry.get_runner(attempt.get("slot") or "")
+    except KeyError:
+        return
+    try:
+        live = runner.poll(attempt)
+    except Exception:
+        return
+    if live is None or not live.get("finished"):
+        return
+    try:
+        runner.collect(attempt)
+    except Exception:
+        pass  # still resolve below — a collection failure shouldn't strand it forever
+    _resolve_attempt(attempt, bool(live.get("succeeded")), live.get("raw_status"))
+
+
+def _poll_in_flight_attempts() -> None:
+    """Every `running` Attempt, regardless of kind — replaces the old
+    Kaggle-only `_poll_kaggle_attempts` (local attempts pass through
+    _poll_and_resolve() as a no-op; see its docstring)."""
     with _lock:
         data = _load()
-        in_flight = [
-            a for a in data["attempts"].values()
-            if a["status"] == "running" and (a.get("unit_ref") or {}).get("kernel_slug")
-        ]
+        in_flight = [a for a in data["attempts"].values() if a["status"] == "running"]
     for attempt in in_flight:
-        unit_ref = attempt["unit_ref"]
-        try:
-            result = kaggle_backend.refresh_experiment_status(unit_ref["account"], unit_ref["kernel_slug"])
-        except kaggle_backend.KaggleOpsError:
-            continue
-        status = result.get("status")
-        if status not in kaggle_backend.FINAL_STATUSES:
-            continue
-        try:
-            kaggle_backend.download_experiment(unit_ref["account"], unit_ref["kernel_slug"], unit_ref["results_dir"])
-        except kaggle_backend.KaggleOpsError:
-            pass  # still resolve the attempt below — a download failure shouldn't strand it forever
-        _resolve_attempt(attempt, status == "complete", status)
+        _poll_and_resolve(attempt)
 
 
 # --------------------------------------------------------------------------- reconciliation + poller
 def _reconcile_on_startup() -> None:
-    """Mirrors batch_runner.py's own (XDASH_V2_PLAN.md D5) — a crash between
-    claiming an attempt and recording its unit_ref leaves it "dispatching"
-    with nothing to resolve against; hand it back to the pool. A crash after
-    the unit_ref landed is re-resolved against that unit."""
+    """A crash between claiming an attempt and recording its unit_ref leaves
+    it "dispatching" with nothing to resolve against; hand it back to the
+    pool. A crash after the unit_ref landed is re-resolved against that unit
+    via the same generic `_poll_and_resolve` the background loop uses —
+    replacing what used to be separate eval_item_id/kernel_slug branches
+    here."""
     with _lock:
         data = _load()
         attempts = list(data["attempts"].values())
@@ -880,21 +817,7 @@ def _reconcile_on_startup() -> None:
         if status == "dispatching" and not unit_ref:
             _update_attempt(attempt["attempt_id"], {"status": "pending", "slot": None})
             continue
-        if "eval_item_id" in unit_ref:
-            item = next((i for i in scheduler.list_items()["items"] if i["id"] == unit_ref["eval_item_id"]), None)
-            if item and item["status"] in ("completed", "failed", "cancelled", "skipped"):
-                _resolve_attempt({**attempt, "status": "running"}, item["status"] == "completed", item["status"])
-        elif unit_ref.get("kernel_slug"):
-            try:
-                result = kaggle_backend.refresh_experiment_status(unit_ref["account"], unit_ref["kernel_slug"])
-            except kaggle_backend.KaggleOpsError:
-                continue
-            if result.get("status") in kaggle_backend.FINAL_STATUSES:
-                try:
-                    kaggle_backend.download_experiment(unit_ref["account"], unit_ref["kernel_slug"], unit_ref["results_dir"])
-                except kaggle_backend.KaggleOpsError:
-                    pass
-                _resolve_attempt({**attempt, "status": "running"}, result.get("status") == "complete", result.get("status"))
+        _poll_and_resolve({**attempt, "status": "running"})
 
 
 _poller_started = False
@@ -904,7 +827,7 @@ _poller_lock = threading.Lock()
 def _poll_loop() -> None:
     while True:
         try:
-            _poll_kaggle_attempts()
+            _poll_in_flight_attempts()
             _dispatch_tick()
         except Exception:
             pass  # one bad tick must never kill the whole poller
@@ -927,19 +850,25 @@ def ensure_dispatcher_started() -> None:
 # --------------------------------------------------------------------------- slots
 def list_slots() -> List[Dict[str, Any]]:
     """The one capacity concept (§3.3) — `local` (scheduler.max_concurrent)
-    plus one entry per Kaggle account (exactly 1 slot, platform-limited)."""
+    plus one entry per Kaggle account (exactly 1 slot, platform-limited).
+    Kept as its own dedicated shape (not yet folded into a generic loop over
+    Runner.capacity()) since the frontend's Lab/Compute cards read specific
+    keys per kind (`paused` for local, `hours_this_week`/`clears_at` for
+    Kaggle) that a fully generic merge would rename or lose — Phase 6's
+    Compute redesign is where that unification belongs."""
     scheduler_data = scheduler.list_items()
     running_local = sum(1 for i in scheduler_data["items"] if i["status"] == "running")
     slots = [{
-        "slot": "local", "kind": "local",
+        "slot": registry.LOCAL, "kind": "local",
         "used": running_local, "limit": scheduler_data["max_concurrent"],
         "paused": scheduler_data.get("paused", False),
     }]
     for account in kaggle_backend.list_accounts():
         usage = account.get("usage_estimate") or {}
+        slot = registry.slot_id("kaggle", account["name"])
         slots.append({
-            "slot": f"kaggle:{account['name']}", "kind": "kaggle", "account": account["name"],
-            "used": 1 if _kaggle_account_busy(account) else 0, "limit": 1,
+            "slot": slot, "kind": "kaggle", "account": account["name"],
+            "used": 1 if is_slot_busy(slot) else 0, "limit": 1,
             "hours_this_week": usage.get("hours_this_week"),
             "weekly_budget_hours": usage.get("weekly_budget_hours"),
             "remaining_hours": usage.get("remaining_hours"),
