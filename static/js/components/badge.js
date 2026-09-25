@@ -27,6 +27,13 @@ const STATUS_BADGE_CLASS = {
   blocked: "red",
   dispatching: "amber",
   cancelled: "slate",
+  // backend/runners/base.py's CANONICAL_STATUSES entries this map was still missing
+  // (Multi_runner_XDash.md Phase 6) — "interrupted" grouped with failed/stopped to match
+  // .entity-card-accent.interrupted's own red already in styles.css.
+  stopping: "amber",
+  interrupted: "red",
+  skipped: "slate",
+  unmanaged: "slate",
   // Kaggle kernel statuses (backend/kaggle.py) — "complete" is Kaggle's own
   // spelling, kept distinct from the local-run "completed"/"done" above.
   queued: "slate",

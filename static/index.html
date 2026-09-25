@@ -444,190 +444,238 @@
       <div class="view-header">
         <div>
           <div class="view-title">Compute</div>
-          <div class="view-sub">Local + Kaggle capacity, the local queue, machine stats, TensorBoard, and alert channels.</div>
+          <div class="view-sub">Every runner kind — local, SSH, Colab, Kaggle — real fleet capacity, the local queue, and machine stats.</div>
         </div>
       </div>
 
       <div class="panel" style="margin-bottom:16px;">
-        <div class="panel-header"><span>Local device</span></div>
-        <div id="runner-local-body" style="padding:14px 16px;">
+        <div class="panel-header"><span>Capacity</span></div>
+        <div class="entity-grid" id="compute-capacity-body" style="padding:12px 16px;">
           <div class="empty-state">Loading…</div>
         </div>
       </div>
 
-      <div class="view-sub" style="margin:4px 0 12px; font-weight:600; color:var(--text);">Local scheduler</div>
-
-      <div class="job-actions" style="margin-bottom:12px;">
-        <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-pause" title="Pause to stop new items launching — already-running items keep going">Queue: running</button>
-        <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-notify" title="Send a notification (via the channels configured below) when a scheduled item finishes or fails">Notify on finish: off</button>
-        <button class="btn btn-ghost" id="btn-refresh-scheduler">Refresh</button>
+      <div class="subtab-strip" id="compute-subtabs">
+        <button class="subtab-btn active" data-subtab="queue">Queue</button>
+        <button class="subtab-btn" data-subtab="machines">Machines</button>
+        <button class="subtab-btn" data-subtab="kaggle">Kaggle</button>
+        <button class="subtab-btn" data-subtab="colab">Colab</button>
+        <button class="subtab-btn" data-subtab="monitors">Monitors</button>
       </div>
 
-      <div class="compute-summary-strip" id="scheduler-summary-strip"></div>
+      <!-- ····························································· Queue -->
+      <div class="subtab-panel active" data-subtab="queue">
+        <div class="job-actions" style="margin-bottom:12px;">
+          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-pause" title="Pause to stop new items launching — already-running items keep going">Queue: running</button>
+          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-notify" title="Send a notification (via the channels configured in Settings) when a scheduled item finishes or fails">Notify on finish: off</button>
+          <button class="btn btn-ghost" id="btn-refresh-scheduler">Refresh</button>
+        </div>
 
-      <div class="panel">
-        <div class="panel-header"><span>Concurrency</span></div>
-        <div class="concurrency-row">
-          <span class="concurrency-label">Max experiments running at once</span>
-          <div class="stepper">
-            <button class="stepper-btn" id="btn-concurrency-minus">−</button>
-            <span class="stepper-value" id="concurrency-value">1</span>
-            <button class="stepper-btn" id="btn-concurrency-plus">+</button>
-          </div>
-        </div>
-        <div style="padding:0 16px 14px;">
-          <div class="concurrency-bar-track"><div class="concurrency-bar-fill" id="concurrency-bar-fill" style="width:0%;"></div></div>
-        </div>
-      </div>
+        <div class="compute-summary-strip" id="scheduler-summary-strip"></div>
 
-      <div class="panel" style="margin-top:16px;">
-        <div class="panel-header">
-          <span>Add to schedule</span>
-          <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-more">More ways to add</button>
-        </div>
-        <div class="scheduler-add-form">
-          <div class="field grow">
-            <label>Config</label>
-            <select id="scheduler-config-select"><option value="">— pick a config —</option></select>
-          </div>
-          <div class="field">
-            <label>Mode</label>
-            <select id="scheduler-mode-select">
-              <option value="train">Train</option>
-              <option value="eval">Eval</option>
-              <option value="both">Train + Eval</option>
-            </select>
-          </div>
-          <div class="field grow">
-            <label>Extra args</label>
-            <input class="text-input grow" id="scheduler-extra-args" placeholder="--epochs 10 --lr 0.0005" />
-          </div>
-          <button class="btn btn-primary" id="btn-schedule-add">Add to schedule</button>
-          <button class="btn btn-sm btn-ghost" id="btn-schedule-save-template" title="Save the fields above as a reusable template">Save as template</button>
-        </div>
-        <div class="hidden" id="scheduler-more-panel">
-          <div class="scheduler-add-form" style="padding-top:0; border-top:1px dashed var(--border-soft);">
-            <div class="field grow">
-              <label>Bulk add — every config in a category</label>
-              <select id="scheduler-bulk-category"><option value="">— pick a category —</option></select>
+        <div class="panel">
+          <div class="panel-header"><span>Concurrency</span></div>
+          <div class="concurrency-row">
+            <span class="concurrency-label">Max experiments running at once (this machine)</span>
+            <div class="stepper">
+              <button class="stepper-btn" id="btn-concurrency-minus">−</button>
+              <span class="stepper-value" id="concurrency-value">1</span>
+              <button class="stepper-btn" id="btn-concurrency-plus">+</button>
             </div>
-            <button class="btn btn-ghost" id="btn-scheduler-bulk-add">Add all in category</button>
           </div>
-          <div class="view-sub" style="padding:4px 16px 0;">Saved templates</div>
-          <div id="scheduler-templates-body" class="entity-list" style="padding:10px 16px 16px;"></div>
+          <div style="padding:0 16px 14px;">
+            <div class="concurrency-bar-track"><div class="concurrency-bar-fill" id="concurrency-bar-fill" style="width:0%;"></div></div>
+          </div>
         </div>
-      </div>
 
-      <div class="scheduler-section">
-        <h3 class="scheduler-section-title">Running <span class="count-badge" id="count-running-sched">0</span></h3>
-        <div id="scheduler-running-list" class="entity-grid"><div class="empty-state">Nothing running.</div></div>
-      </div>
-      <div class="scheduler-section">
-        <h3 class="scheduler-section-title">Scheduled <span class="count-badge" id="count-pending-sched">0</span> <span class="bulk-bar" id="scheduler-pending-bulk-bar"></span></h3>
-        <div id="scheduler-pending-list" class="entity-list"><div class="empty-state">Nothing queued.</div></div>
-      </div>
-      <div class="scheduler-section">
-        <h3 class="scheduler-section-title">Past <span class="count-badge" id="count-past-sched">0</span> <span class="bulk-bar" id="scheduler-past-bulk-bar"></span></h3>
-        <div id="scheduler-past-list" class="entity-grid"><div class="empty-state">No history yet.</div></div>
-      </div>
-
-      <div class="panel" style="margin:20px 0 16px;">
-        <div class="panel-header">
-          <span>Machine Stats</span>
-          <button class="btn btn-ghost" id="btn-refresh-monitors">Refresh</button>
-        </div>
-        <div class="monitor-list" id="monitor-list-body" style="padding:12px 16px;">
-          <div class="empty-state">Loading…</div>
-        </div>
-        <div style="padding:0 16px 16px;">
-          <div class="panel-header" style="padding-left:0;"><span>Add a new metric</span></div>
-          <div class="add-monitor-form">
-            <div class="field">
-              <label>Name</label>
-              <input class="text-input" id="monitor-name-input" placeholder="e.g. GPU processes" />
-            </div>
+        <div class="panel" style="margin-top:16px;">
+          <div class="panel-header">
+            <span>Add to schedule</span>
+            <button class="btn btn-sm btn-ghost" id="btn-scheduler-toggle-more">More ways to add</button>
+          </div>
+          <div class="scheduler-add-form">
             <div class="field grow">
-              <label>Command</label>
-              <input class="text-input grow" id="monitor-command-input" placeholder="e.g. iostat -x 1" />
+              <label>Config</label>
+              <select id="scheduler-config-select"><option value="">— pick a config —</option></select>
             </div>
             <div class="field">
-              <label>Watch interval (s, 0 = self-refreshing)</label>
-              <input class="text-input" id="monitor-interval-input" type="number" min="0" value="2" style="width:100%;" />
+              <label>Mode</label>
+              <select id="scheduler-mode-select">
+                <option value="train">Train</option>
+                <option value="eval">Eval</option>
+                <option value="both">Train + Eval</option>
+              </select>
             </div>
-            <button class="btn btn-primary" id="btn-add-monitor">Add metric</button>
+            <div class="field grow">
+              <label>Extra args</label>
+              <input class="text-input grow" id="scheduler-extra-args" placeholder="--epochs 10 --lr 0.0005" />
+            </div>
+            <button class="btn btn-primary" id="btn-schedule-add">Add to schedule</button>
+            <button class="btn btn-sm btn-ghost" id="btn-schedule-save-template" title="Save the fields above as a reusable template">Save as template</button>
+          </div>
+          <div class="hidden" id="scheduler-more-panel">
+            <div class="scheduler-add-form" style="padding-top:0; border-top:1px dashed var(--border-soft);">
+              <div class="field grow">
+                <label>Bulk add — every config in a category</label>
+                <select id="scheduler-bulk-category"><option value="">— pick a category —</option></select>
+              </div>
+              <button class="btn btn-ghost" id="btn-scheduler-bulk-add">Add all in category</button>
+            </div>
+            <div class="view-sub" style="padding:4px 16px 0;">Saved templates</div>
+            <div id="scheduler-templates-body" class="entity-list" style="padding:10px 16px 16px;"></div>
+          </div>
+        </div>
+
+        <div class="scheduler-section">
+          <h3 class="scheduler-section-title">Running <span class="count-badge" id="count-running-sched">0</span></h3>
+          <div id="scheduler-running-list" class="entity-grid"><div class="empty-state">Nothing running.</div></div>
+        </div>
+        <div class="scheduler-section">
+          <h3 class="scheduler-section-title">Scheduled <span class="count-badge" id="count-pending-sched">0</span> <span class="bulk-bar" id="scheduler-pending-bulk-bar"></span></h3>
+          <div id="scheduler-pending-list" class="entity-list"><div class="empty-state">Nothing queued.</div></div>
+        </div>
+        <div class="scheduler-section">
+          <h3 class="scheduler-section-title">Past <span class="count-badge" id="count-past-sched">0</span> <span class="bulk-bar" id="scheduler-past-bulk-bar"></span></h3>
+          <div id="scheduler-past-list" class="entity-grid"><div class="empty-state">No history yet.</div></div>
+        </div>
+      </div>
+
+      <!-- ····························································· Machines -->
+      <div class="subtab-panel" data-subtab="machines">
+        <div class="job-actions" style="margin-bottom:12px; justify-content:flex-end;">
+          <button class="btn btn-sm btn-ghost" id="btn-compute-toggle-add-host">+ Add SSH host</button>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><span>Hosts</span><span id="compute-machines-count"></span></div>
+          <div class="kaggle-grid" id="compute-machines-body" style="padding:12px 16px;">
+            <div class="empty-state">Loading…</div>
+          </div>
+          <div class="scheduler-add-form hidden" id="compute-add-host-form" style="padding:12px;">
+            <div class="field grow"><label>Host id</label><input class="text-input grow" id="compute-new-host-id" placeholder="e.g. mclab-gpu2" autocomplete="off" /></div>
+            <div class="field grow"><label>Label</label><input class="text-input grow" id="compute-new-host-label" placeholder="e.g. MCLab A6000" autocomplete="off" /></div>
+            <div class="field grow"><label>SSH host</label><input class="text-input grow" id="compute-new-host-ssh-host" placeholder="10.0.0.7 or a hostname" autocomplete="off" /></div>
+            <div class="field grow"><label>SSH user</label><input class="text-input grow" id="compute-new-host-ssh-user" placeholder="e.g. syfur" autocomplete="off" /></div>
+            <div class="field grow"><label>Identity file (optional)</label><input class="text-input grow" id="compute-new-host-identity" placeholder="~/.ssh/id_ed25519" autocomplete="off" /></div>
+            <button class="btn btn-primary" id="btn-compute-add-host">Add host</button>
           </div>
         </div>
       </div>
 
-      <div class="panel" style="margin-bottom:20px;">
-        <div class="panel-header"><span>TensorBoard</span></div>
-        <div class="tb-panel" style="border:none; padding:14px 16px;">
-          <div class="tb-status-row">
-            <div class="pulse-dot" id="tb-dot"></div>
-            <div>
-              <div class="tb-status-label" id="tb-status-label">Not running</div>
-              <div class="tb-status-sub" id="tb-status-sub">Starts a tensorboard process on the server and opens it in a new browser tab, reading from <span id="tb-logdir" style="font-family:var(--mono)"></span>.</div>
+      <!-- ····························································· Kaggle -->
+      <div class="subtab-panel" data-subtab="kaggle">
+        <div class="job-actions" style="margin-bottom:12px; flex-wrap:wrap;">
+          <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-autorefresh" title="Poll and re-render this section automatically">Auto-refresh: off</button>
+        </div>
+
+        <div class="compute-summary-strip" id="kaggle-summary-strip"></div>
+
+        <div class="panel">
+          <div class="panel-header">
+            <div style="display:flex; gap:8px; align-items:center;"><span>Accounts</span><span id="kaggle-account-count"></span></div>
+            <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-add-account">+ Add account</button>
+          </div>
+          <div class="kaggle-grid" id="kaggle-accounts-body">
+            <div class="empty-state">Loading…</div>
+          </div>
+          <div class="scheduler-add-form hidden" id="kaggle-add-account-form" style="padding:12px;">
+            <div class="field grow">
+              <label>Account name</label>
+              <input class="text-input grow" id="kaggle-new-account-name" placeholder="e.g. teammate-a" autocomplete="off" />
+            </div>
+            <div class="field grow">
+              <label>Kaggle username</label>
+              <input class="text-input grow" id="kaggle-new-account-username" placeholder="e.g. teammateA" autocomplete="off" />
+            </div>
+            <div class="field grow">
+              <label>Classic API key (optional if a token is given below)</label>
+              <input class="text-input grow" id="kaggle-new-account-key" type="password" placeholder="paste the key from kaggle.json" autocomplete="off" />
+            </div>
+            <div class="field grow">
+              <label>API token (optional if a classic key is given above)</label>
+              <input class="text-input grow" id="kaggle-new-account-token" type="password" placeholder="paste the new-format token" autocomplete="off" />
+            </div>
+            <div class="field">
+              <label>Availability</label>
+              <select id="kaggle-new-account-scope" title="A Kaggle account's credentials and weekly GPU quota belong to the account itself, not to a repo — register it system-wide unless it should only ever serve this repo.">
+                <option value="system">System-wide — every repo</option>
+                <option value="repo" selected>This repo only</option>
+              </select>
+            </div>
+            <button class="btn btn-primary" id="btn-kaggle-add-account">Add account</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ····························································· Colab -->
+      <div class="subtab-panel" data-subtab="colab">
+        <div class="job-actions" style="margin-bottom:12px; justify-content:flex-end;">
+          <button class="btn btn-sm btn-ghost" id="btn-colab-toggle-add-account">+ Add account</button>
+        </div>
+        <div class="panel">
+          <div class="panel-header"><span>Accounts</span><span id="compute-colab-count"></span></div>
+          <div class="kaggle-grid" id="compute-colab-body" style="padding:12px 16px;">
+            <div class="empty-state">Loading…</div>
+          </div>
+          <div class="scheduler-add-form hidden" id="colab-add-account-form" style="padding:12px;">
+            <div class="field grow"><label>Account name</label><input class="text-input grow" id="colab-new-account-name" placeholder="e.g. teammate-a" autocomplete="off" /></div>
+            <div class="field grow"><label>Label (optional)</label><input class="text-input grow" id="colab-new-account-label" placeholder="e.g. Teammate A" autocomplete="off" /></div>
+            <div class="field"><label>Preferred GPU</label><input class="text-input" id="colab-new-account-gpu" placeholder="T4" autocomplete="off" /></div>
+            <div class="field"><label>Session cap (hours, optional)</label><input class="text-input" id="colab-new-account-limit" placeholder="12" autocomplete="off" /></div>
+            <button class="btn btn-primary" id="btn-colab-add-account">Add account</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- ····························································· Monitors -->
+      <div class="subtab-panel" data-subtab="monitors">
+        <div class="panel">
+          <div class="panel-header">
+            <span>Machine Stats</span>
+            <button class="btn btn-ghost" id="btn-refresh-monitors">Refresh</button>
+          </div>
+          <div class="monitor-list" id="monitor-list-body" style="padding:12px 16px;">
+            <div class="empty-state">Loading…</div>
+          </div>
+          <div style="padding:0 16px 16px;">
+            <div class="panel-header" style="padding-left:0;"><span>Add a new metric</span></div>
+            <div class="add-monitor-form">
+              <div class="field">
+                <label>Name</label>
+                <input class="text-input" id="monitor-name-input" placeholder="e.g. GPU processes" />
+              </div>
+              <div class="field grow">
+                <label>Command</label>
+                <input class="text-input grow" id="monitor-command-input" placeholder="e.g. iostat -x 1" />
+              </div>
+              <div class="field">
+                <label>Watch interval (s, 0 = self-refreshing)</label>
+                <input class="text-input" id="monitor-interval-input" type="number" min="0" value="2" style="width:100%;" />
+              </div>
+              <div class="field">
+                <label>Host</label>
+                <select id="monitor-host-select" style="width:100%;"><option value="local">This machine</option></select>
+              </div>
+              <button class="btn btn-primary" id="btn-add-monitor">Add metric</button>
             </div>
           </div>
-          <div class="tb-toolbar">
-            <button class="btn btn-primary" id="btn-tb-start">Start TensorBoard</button>
-            <button class="btn btn-danger hidden" id="btn-tb-stop">Stop</button>
-            <a class="btn btn-ghost hidden" id="btn-tb-open" target="_blank" rel="noopener">Open in new tab ↗</a>
-          </div>
         </div>
-      </div>
 
-      <div class="view-sub" style="margin:4px 0 12px; font-weight:600; color:var(--text);">Kaggle accounts</div>
-
-      <div class="job-actions" style="margin-bottom:12px; flex-wrap:wrap;">
-        <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-autorefresh" title="Poll and re-render this section automatically">Auto-refresh: off</button>
-      </div>
-
-      <div class="compute-summary-strip" id="kaggle-summary-strip"></div>
-
-      <div class="panel">
-        <div class="panel-header">
-          <div style="display:flex; gap:8px; align-items:center;"><span>Accounts</span><span id="kaggle-account-count"></span></div>
-          <button class="btn btn-sm btn-ghost" id="btn-kaggle-toggle-add-account">+ Add account</button>
-        </div>
-        <div class="kaggle-grid" id="kaggle-accounts-body">
-          <div class="empty-state">Loading…</div>
-        </div>
-        <div class="scheduler-add-form hidden" id="kaggle-add-account-form" style="padding:12px;">
-          <div class="field grow">
-            <label>Account name</label>
-            <input class="text-input grow" id="kaggle-new-account-name" placeholder="e.g. teammate-a" />
+        <div class="panel" style="margin-top:16px;">
+          <div class="panel-header"><span>TensorBoard</span></div>
+          <div class="tb-panel" style="border:none; padding:14px 16px;">
+            <div class="tb-status-row">
+              <div class="pulse-dot" id="tb-dot"></div>
+              <div>
+                <div class="tb-status-label" id="tb-status-label">Not running</div>
+                <div class="tb-status-sub" id="tb-status-sub">Starts a tensorboard process on the server and opens it in a new browser tab, reading from <span id="tb-logdir" style="font-family:var(--mono)"></span>.</div>
+              </div>
+            </div>
+            <div class="tb-toolbar">
+              <button class="btn btn-primary" id="btn-tb-start">Start TensorBoard</button>
+              <button class="btn btn-danger hidden" id="btn-tb-stop">Stop</button>
+              <a class="btn btn-ghost hidden" id="btn-tb-open" target="_blank" rel="noopener">Open in new tab ↗</a>
+            </div>
           </div>
-          <div class="field grow">
-            <label>Kaggle username</label>
-            <input class="text-input grow" id="kaggle-new-account-username" placeholder="e.g. teammateA" autocomplete="off" />
-          </div>
-          <div class="field grow">
-            <label>Classic API key (optional if a token is given below)</label>
-            <input class="text-input grow" id="kaggle-new-account-key" type="password" placeholder="paste the key from kaggle.json" autocomplete="off" />
-          </div>
-          <div class="field grow">
-            <label>API token (optional if a classic key is given above)</label>
-            <input class="text-input grow" id="kaggle-new-account-token" type="password" placeholder="paste the new-format token" autocomplete="off" />
-          </div>
-          <div class="field">
-            <label>Availability</label>
-            <select id="kaggle-new-account-scope" title="A Kaggle account's credentials and weekly GPU quota belong to the account itself, not to a repo — register it system-wide unless it should only ever serve this repo.">
-              <option value="system">System-wide — every repo</option>
-              <option value="repo" selected>This repo only</option>
-            </select>
-          </div>
-          <button class="btn btn-primary" id="btn-kaggle-add-account">Add account</button>
-        </div>
-      </div>
-
-      <div class="panel" style="margin-top:16px;">
-        <div class="panel-header">
-          <div style="display:flex; gap:8px; align-items:center;"><span>Notifications</span><span id="kaggle-notif-count"></span></div>
-        </div>
-        <div class="view-sub" style="padding:0 14px 10px;">Server-side alerts the background poller sends when a worker finishes or errors — these fire even when nobody has this tab open, on top of the browser notification toggle above. Also drives the local scheduler's "Notify on finish" toggle above.</div>
-        <div class="kaggle-grid" id="kaggle-notif-body">
-          <div class="empty-state">Loading…</div>
         </div>
       </div>
     </section>
@@ -716,7 +764,7 @@
       <div class="view-header">
         <div>
           <div class="view-title">Settings</div>
-          <div class="view-sub">Active repo profile, launch paths, runtime defaults, and notebook templates.</div>
+          <div class="view-sub">Active repo profile, launch paths, runtime defaults, notebook templates, and alert channels.</div>
         </div>
         <button class="btn btn-ghost" id="btn-refresh-settings">Refresh</button>
       </div>
@@ -731,6 +779,15 @@
           <button class="btn btn-ghost" id="btn-refresh-templates">Refresh</button>
         </div>
         <div class="template-list" id="template-list-body"><div class="empty-state">Loading…</div></div>
+      </div>
+      <div class="panel" style="margin-top:16px;">
+        <div class="panel-header">
+          <div style="display:flex; gap:8px; align-items:center;"><span>Notifications</span><span id="kaggle-notif-count"></span></div>
+        </div>
+        <div class="view-sub" style="padding:0 14px 10px;">Server-side alerts the dispatcher sends when an Attempt finishes, fails, or gets blocked/stalled (Multi_runner_XDash.md Phase 6) — these fire even when nobody has this tab open. The local scheduler's own "Notify on finish" toggle (Compute → Queue) reuses these same channels for scheduled local/SSH items specifically.</div>
+        <div class="kaggle-grid" id="kaggle-notif-body">
+          <div class="empty-state">Loading…</div>
+        </div>
       </div>
     </section>
 
@@ -845,17 +902,17 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/yaml/yaml.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
-<script src="app.js?v=8"></script>
-<script src="js/components/badge.js?v=1"></script>
+<script src="app.js?v=9"></script>
+<script src="js/components/badge.js?v=2"></script>
 <script src="js/components/heatmap-grid.js?v=1"></script>
 <script src="js/views/runs.js?v=2"></script>
 <script src="js/views/data.js?v=2"></script>
-<script src="js/views/kaggle.js?v=2"></script>
-<script src="js/views/runners.js?v=1"></script>
+<script src="js/views/compute.js?v=1"></script>
+<script src="js/views/settings.js?v=1"></script>
 <script src="js/views/experiments.js?v=2"></script>
-<script src="js/views/spine.js?v=1"></script>
+<script src="js/views/spine.js?v=2"></script>
 <script src="js/views/lab.js?v=1"></script>
-<script src="js/palette.js?v=2"></script>
+<script src="js/palette.js?v=3"></script>
 <script>
   initSubtabStrip("configs-subtabs", (key) => { if (key === "create") initCreatorView(); });
   initSubtabStrip("results-subtabs", (key) => {

@@ -66,6 +66,13 @@ function spineRowHtml(exp) {
   } else if (a.raw_status) {
     slotOrWhy += ` <span class="settings-profile-path">(${escapeHtml(a.raw_status)})</span>`;
   }
+  // A chained (Multi_runner_XDash.md Phase 5) multi-leg experiment must read
+  // as one row with its chain visible — leg_index > 1 means this attempt
+  // is resuming a previous one on the same run_id, not a fresh start.
+  if (a.leg_index && a.leg_index > 1) {
+    const maxLegs = exp.max_legs || 6;
+    slotOrWhy = `<span class="mode-tag" title="Leg ${a.leg_index} of at most ${maxLegs}, resumed from a previous attempt">leg ${a.leg_index}/${maxLegs}</span> ${slotOrWhy}`;
+  }
   // Any non-in-flight status is deletable (2026-09-22: "failed" used to have no delete switch
   // at all — the backend only allowed pending/blocked — which left failed experiments with no
   // way to ever clear them). Only dispatching/running is refused, so this can never orphan a

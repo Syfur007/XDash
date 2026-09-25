@@ -317,9 +317,9 @@ function switchView(view) {
   document.querySelectorAll(".view").forEach((el) => el.classList.toggle("active", el.id === `view-${view}`));
   if (view === "lab") { loadLab(); startLabPolling(); } else { stopLabPolling(); }
   if (view === "data") loadDataView();
-  if (view === "compute") { loadMonitors(); refreshTensorboardStatus(); loadKaggle(); loadRunnersOverview(); }
+  if (view === "compute") { loadComputeCapacity(); }
   if (view === "experiments") { loadSpine(); loadExperimentsKaggleActive(); loadExperimentsOtherRepos(); }
-  if (view === "settings") { renderSettings(); loadTemplates(); }
+  if (view === "settings") { renderSettings(); loadTemplates(); loadKaggleNotifications(); }
 }
 
 async function loadTemplates() {
@@ -2467,11 +2467,15 @@ function monitorCardHtml(m) {
   const expanded = state.monitorExpanded.has(m.id);
   const statusClass = m.alive ? "running" : "stopped";
   const intervalTag = m.watch_interval ? `<span class="mode-tag">watch ${m.watch_interval}s</span>` : `<span class="mode-tag">self-refreshing</span>`;
+  // host_id absent/"local" means the local device — matches backend/hosts.py's
+  // own None-means-local convention (Multi_runner_XDash.md Phase 1/6), so
+  // only a genuinely remote host gets a visible tag.
+  const hostTag = m.host_id && m.host_id !== "local" ? `<span class="mode-tag" title="Runs on this host">${escapeHtml(m.host_id)}</span>` : "";
   return `<div class="monitor-card ${expanded ? "expanded" : ""}" data-id="${escapeHtml(m.id)}">
       <div class="monitor-card-row">
         <div class="term-card-accent ${statusClass}"></div>
         <div class="term-card-body">
-          <div class="term-card-title" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}${intervalTag}</div>
+          <div class="term-card-title" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}${hostTag}${intervalTag}</div>
           <div class="term-card-sub" title="${escapeHtml(m.command)}">${escapeHtml(m.command)}</div>
           <div class="term-card-footer">
             <span class="term-card-status ${statusClass}">${m.alive ? "Running" : "Stopped"}</span>
@@ -2610,9 +2614,13 @@ async function addMonitor() {
   const name = document.getElementById("monitor-name-input").value.trim();
   const command = document.getElementById("monitor-command-input").value.trim();
   const interval = parseInt(document.getElementById("monitor-interval-input").value, 10) || 0;
+  const hostSelect = document.getElementById("monitor-host-select");
+  const hostId = hostSelect && hostSelect.value ? hostSelect.value : undefined;
   if (!name || !command) { toast("Name and command are both required", "err"); return; }
   try {
-    await api("/api/monitors", { method: "POST", body: JSON.stringify({ name, command, watch_interval: interval }) });
+    const body = { name, command, watch_interval: interval };
+    if (hostId) body.host_id = hostId;
+    await api("/api/monitors", { method: "POST", body: JSON.stringify(body) });
     document.getElementById("monitor-name-input").value = "";
     document.getElementById("monitor-command-input").value = "";
     toast("Metric added", "ok");

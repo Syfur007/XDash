@@ -839,6 +839,13 @@ select, .text-input{
   gap:12px;
 }
 .entity-list{ display:flex; flex-direction:column; gap:10px; }
+
+/* Used 12x across index.html (toolbars above panels, card action rows) but had no rule of
+   its own until Multi_runner_XDash.md Phase 6 — every instance was relying on browser
+   defaults for a bare div holding buttons, i.e. an unstyled block stack. A real flex row,
+   matching every other action-row class in this file (.kaggle-card-footer etc). */
+.job-actions{ display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+
 .entity-card{
   display:flex; flex-direction:column;
   border-radius: var(--radius-lg); border:1px solid var(--border-soft); background: var(--surface-2);

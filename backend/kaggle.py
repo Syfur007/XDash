@@ -114,6 +114,12 @@ _LAUNCH_PLACEHOLDERS = {
     # or Kaggle simply not mounting it under /kaggle/input/ for this kernel). Empty string when
     # nothing resolved, in which case the template cell keeps its old attach-only behavior.
     "dataset_source": "__DASHBOARD_DATASET_SOURCE__",
+    # Multi_runner_XDash.md Phase 5 — resume support. `resume` is a bool (repr() renders it as
+    # the bare Python literal True/False, not a string); `snapshot_source` is the same
+    # "{owner}/{slug}" shape as dataset_source, for the previous leg's checkpoint snapshot
+    # (backend/snapshot.py) rather than the training data.
+    "resume": "__DASHBOARD_RESUME__",
+    "snapshot_source": "__DASHBOARD_SNAPSHOT_SOURCE__",
 }
 
 class KaggleOpsError(Exception):
@@ -533,6 +539,9 @@ def _render_launch_notebook(
     config_path: str,
     extra_args: str,
     dataset_source: str = "",
+    budget_hours: Optional[float] = None,
+    resume: bool = False,
+    snapshot_source: str = "",
 ) -> bytes:
     """Loads *template_abs* (nbformat JSON), finds the single cell carrying
     LAUNCH_SPEC_MARKER, and substitutes its `__DASHBOARD_*__` placeholders
@@ -570,21 +579,42 @@ def _render_launch_notebook(
         # runner cell treats both identically (shlex.split before use) rather than needing
         # a second, list-shaped substitution convention just for this one field.
         _LAUNCH_PLACEHOLDERS["eval_extra_flags"]: " ".join(shlex.quote(a) for a in settings.eval_default_args),
+        # Multi_runner_XDash.md Phase 5 — *budget_hours* is the caller's already-resolved
+        # session cap (push_experiment_attempt's own `budget` local, which is also what sets
+        # the CLI's own --timeout below): previously this recomputed from the global
+        # settings.kaggle_default_budget_hours instead, so an account's own weekly_budget_hours
+        # override gated can_accept()'s exceeds-session-cap check but was silently ignored by
+        # the notebook's own self-limit — the two could disagree.
         _LAUNCH_PLACEHOLDERS["max_hours"]: max(
             0.1,
-            float(settings.kaggle_default_budget_hours)
+            float(budget_hours if budget_hours is not None else settings.kaggle_default_budget_hours)
             - float(settings.kaggle_setup_reserve_hours)
             - float(settings.kaggle_teardown_reserve_hours),
         ),
         _LAUNCH_PLACEHOLDERS["dataset_source"]: dataset_source or "",
+        _LAUNCH_PLACEHOLDERS["resume"]: bool(resume),
+        _LAUNCH_PLACEHOLDERS["snapshot_source"]: snapshot_source or "",
     }
 
-    def substitute(line: str) -> str:
+    def substitute(text: str) -> str:
         for token, real_value in values.items():
-            line = line.replace(f'"{token}"', repr(real_value))
-        return line
+            text = text.replace(f'"{token}"', repr(real_value))
+        return text
 
-    cell["source"] = [substitute(line) for line in cell["source"]]
+    # nbformat allows a cell's `source` to be either one string or a list of
+    # per-line strings, and this template's own marker cell is stored as the
+    # former — iterating it as if it were the latter (the previous version
+    # of this function) walks *characters*, not lines, so no single
+    # character can ever contain a 20+-char placeholder token and every
+    # substitution silently no-ops. That made every push through this
+    # template fail its own "CONFIG_PATH was never substituted" assert on
+    # the notebook side (Multi_runner_XDash.md Phase 5 — found while adding
+    # the max_hours/resume/snapshot_source placeholders, not something this
+    # phase set out to fix, but nothing downstream can work without it).
+    # Preserves whichever shape was already there rather than normalizing
+    # to one, since a hand-edited cell may use either.
+    source = cell["source"]
+    cell["source"] = [substitute(line) for line in source] if isinstance(source, list) else substitute(source)
     return json.dumps(notebook, indent=1).encode()
 
 
@@ -648,10 +678,18 @@ def results_dir_for_experiment(experiment_id: str) -> str:
 def push_experiment_attempt(
     account_name: str, experiment_id: str, config_path: str, extra_args: str,
     dataset_sources: List[str], budget_hours: Optional[float] = None,
+    resume: bool = False, snapshot_source: str = "",
 ) -> Dict[str, Any]:
     """Pushes one Attempt's kernel for *experiment_id* under *account_name*. Always
     template-backed (the escape hatch for a hand-authored notebook stays a worker-only action,
-    §3.3) and always fresh — there is no resume contract here either (§4.A1)."""
+    §3.3).
+
+    *resume*/*snapshot_source* (Multi_runner_XDash.md Phase 5): a resumed leg passes
+    resume=True and the account's own resume-snapshot slug (backend/snapshot.py) as
+    *snapshot_source* — the caller (KaggleRunner.dispatch) is responsible for having already
+    appended that slug onto *dataset_sources* too, so the declarative attach mounts it
+    alongside the training dataset; **training dataset first, snapshot second** is the ordering
+    contract dataset_source below relies on (it always reads dataset_sources[0])."""
     data = _load_accounts()
     account = _find_account(data, account_name)
     if account is None:
@@ -678,7 +716,10 @@ def push_experiment_attempt(
     pseudo_worker = {"kernel_slug": kernel_slug, "dataset_sources": list(dataset_sources or [])}
 
     dataset_source = next(iter(pseudo_worker["dataset_sources"]), "")
-    push_bytes = _render_launch_notebook(template_abs, cli_config_path, extra_args, dataset_source)
+    push_bytes = _render_launch_notebook(
+        template_abs, cli_config_path, extra_args, dataset_source,
+        budget_hours=budget, resume=resume, snapshot_source=snapshot_source,
+    )
     push_name = template_abs.name
 
     tmpdir = tempfile.mkdtemp(prefix="kaggle_push_")

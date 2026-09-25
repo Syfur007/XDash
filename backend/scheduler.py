@@ -77,13 +77,23 @@ def _new_item(
 
 
 # ------------------------------------------------------------------- write API
-def add_item(config_path: str, mode: str, extra_args: str = "", host_id: Optional[str] = None) -> List[Dict[str, Any]]:
+def add_item(
+    config_path: str, mode: str, extra_args: str = "", host_id: Optional[str] = None,
+    train_extra_args: Optional[str] = None,
+) -> List[Dict[str, Any]]:
     """*host_id* defaults to the local machine — every pre-existing caller
     (the Configs-page "Add to schedule" button, backend/experiments.py's
     local dispatch) keeps queueing local work exactly as before. Passing a
     remote host_id queues it against *that* host's own concurrency limit
     (hosts.get_host(host_id).max_concurrent) instead of the local one — one
-    FIFO, host-partitioned, rather than a second queueing mechanism per host."""
+    FIFO, host-partitioned, rather than a second queueing mechanism per host.
+
+    *train_extra_args*, mode="both" only (Multi_runner_XDash.md Phase 5):
+    overrides *extra_args* for the train half alone, defaulting to
+    *extra_args* itself so every pre-existing caller is unaffected. Needed
+    because eval.py has no --resume/--max-hours of its own — a resumed
+    leg's MachineRunner.dispatch() must pass --resume to train without also
+    handing it to eval, which would reject it as an unrecognized flag."""
     if mode not in ("train", "eval", "both"):
         raise ValueError("mode must be 'train', 'eval', or 'both'")
     cfg.read_config(config_path)  # raises if the config doesn't exist / is invalid
@@ -98,7 +108,8 @@ def add_item(config_path: str, mode: str, extra_args: str = "", host_id: Optiona
                 "Remove some completed/cancelled items before adding more."
             )
         if mode == "both":
-            train_item = _new_item(config_path, "train", extra_args, host_id=host.id)
+            train_args = train_extra_args if train_extra_args is not None else extra_args
+            train_item = _new_item(config_path, "train", train_args, host_id=host.id)
             eval_item = _new_item(config_path, "eval", extra_args, depends_on=train_item["id"], host_id=host.id)
             data["items"] += [train_item, eval_item]
             created = [train_item, eval_item]

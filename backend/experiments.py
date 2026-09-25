@@ -24,6 +24,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import colab as colab_backend
@@ -32,7 +33,9 @@ from . import estimates
 from . import kaggle as kaggle_backend
 from . import ledger
 from . import notifications as notif
+from . import results_ingest
 from . import scheduler
+from . import snapshot
 from . import transport as transport_mod
 from .config import settings
 from .runners import registry
@@ -211,6 +214,7 @@ def get_experiment(experiment_id: str) -> Dict[str, Any]:
 def create_experiments(
     configs: List[Dict[str, Any]], extra_args: str = "", pool: Any = "either",
     batch_name: Optional[str] = None, max_retries: int = 1, force_on_retry: bool = True,
+    max_legs: int = 6,
 ) -> List[Dict[str, Any]]:
     """`POST /api/experiments` — the single launch verb (§5). *configs* is a
     list of `{"path": str, "seeds": [int|None, ...]}`; every (path, seed)
@@ -228,6 +232,12 @@ def create_experiments(
     Stored exactly as given; normalized only when read, so an experiment
     created before a new runner kind existed keeps meaning what it always
     meant.
+
+    *max_legs* (Multi_runner_XDash.md Phase 5) caps how many chained legs an
+    interrupted-but-resumable attempt may open before the chain gives up
+    and resolves as failed (`chain-stopped`) instead of opening leg N+1 —
+    see _try_open_next_leg(). Unrelated to max_retries, which counts fresh
+    (non-resumed) attempts after a genuine dispatch/unit failure.
     """
     _validate_pool(pool)
     if not configs:
@@ -265,6 +275,7 @@ def create_experiments(
                         "experiment_id": eid, "config_path": config_path, "seed": seed,
                         "batch_name": batch_name, "pool": pool, "extra_args": row_extra_args,
                         "max_retries": max_retries, "force_on_retry": force_on_retry,
+                        "max_legs": max_legs,
                         "created_at": _now_iso(), "attempt_ids": [], "current_attempt_id": None,
                     }
                     data["experiments"][eid] = experiment
@@ -283,6 +294,17 @@ def _new_attempt(experiment_id: str, attempt_index: int) -> Dict[str, Any]:
         "attempt_id": f"atmpt_{uuid.uuid4().hex[:10]}",
         "experiment_id": experiment_id,
         "attempt_index": attempt_index,
+        # Multi_runner_XDash.md Phase 5 — leg_index counts legs *within* one
+        # continuous resumed chain (reset to 1 by every fresh attempt_index,
+        # since a manual retry starts over, not a resume); resume_of/resumed_by
+        # link a chain's legs both directions. epochs_completed/checkpoint_files
+        # are populated only when this leg resolves as interrupted (see
+        # _try_open_next_leg) — None otherwise, never guessed at.
+        "leg_index": 1,
+        "resume_of": None,
+        "resumed_by": None,
+        "epochs_completed": None,
+        "checkpoint_files": None,
         "slot": None,
         "status": "pending",
         "raw_status": None,
@@ -622,6 +644,7 @@ def _dispatch_tick_locked() -> None:
 
 
 def _set_blocked(experiment_id: str, attempt_id: str, block: Dict[str, Any]) -> None:
+    is_new_reason = False
     with _lock:
         data = _load()
         attempt = data["attempts"].get(attempt_id)
@@ -629,6 +652,7 @@ def _set_blocked(experiment_id: str, attempt_id: str, block: Dict[str, Any]) -> 
             return
         existing = attempt.get("blocked") or {}
         if existing.get("code") != block["code"]:
+            is_new_reason = True
             block = {**block, "since": _now_iso()}
         else:
             block = {**existing, **{k: v for k, v in block.items() if k != "since"}}
@@ -636,6 +660,14 @@ def _set_blocked(experiment_id: str, attempt_id: str, block: Dict[str, Any]) -> 
         attempt["blocked"] = block
         attempt["updated_at"] = _now_iso()
         _save(data)
+    # Multi_runner_XDash.md Phase 6 — the one missing trigger the plan's own
+    # notification audit flagged: previously nothing ever fired for a
+    # dispatch-time block/stall, only for a resolved done/failed attempt.
+    # Gated on is_new_reason so re-affirming the same block every ~30s
+    # dispatch tick doesn't spam a channel with the identical message —
+    # only an actual change (first block, or a different code) notifies.
+    if is_new_reason:
+        notif.send_all(f"Experiment '{experiment_id}' is blocked: {block.get('code')} — {block.get('detail', '')}")
 
 
 def _claim_attempt(attempt_id: str, expected_status: str, patch: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -662,6 +694,12 @@ def _update_attempt(attempt_id: str, patch: Dict[str, Any]) -> None:
         _save(data)
 
 
+def _get_attempt(attempt_id: str) -> Optional[Dict[str, Any]]:
+    with _lock:
+        data = _load()
+    return data["attempts"].get(attempt_id)
+
+
 def _claim_and_dispatch(experiment: Dict[str, Any], attempt: Dict[str, Any], runner: Runner) -> None:
     """Replaces the old `_claim_and_dispatch_local`/`_claim_and_dispatch_kaggle`
     pair — claim, then delegate the actual launch to *runner*.dispatch(),
@@ -677,8 +715,24 @@ def _claim_and_dispatch(experiment: Dict[str, Any], attempt: Dict[str, Any], run
     if claimed is None:
         return
     try:
+        # A resumed leg (Multi_runner_XDash.md Phase 5): seed() first, using
+        # the previous leg's own checkpoint_files, and merge whatever it
+        # returns (Kaggle: a snapshot_slug) into unit_ref before dispatch()
+        # runs — dispatch() itself decides *how* to use that (e.g. attaching
+        # the slug, or adding --resume) by reading claimed/attempt directly,
+        # never from seed()'s return value alone.
+        if claimed.get("resume_of"):
+            prev = _get_attempt(claimed["resume_of"])
+            checkpoint_files = (prev or {}).get("checkpoint_files") or []
+            seed_patch = runner.seed(experiment, claimed, checkpoint_files)
+            if seed_patch:
+                merged_unit_ref = {**(claimed.get("unit_ref") or {}), **seed_patch}
+                _update_attempt(attempt["attempt_id"], {"unit_ref": merged_unit_ref})
+                claimed = {**claimed, "unit_ref": merged_unit_ref}
         patch = runner.dispatch(experiment, claimed)
         _update_attempt(attempt["attempt_id"], {"status": "running", **patch})
+    except snapshot.SnapshotError as e:
+        _fail_or_retry(experiment["experiment_id"], attempt["attempt_id"], "dispatching", str(e), "snapshot-failed")
     except colab_backend.NoAcceleratorError as e:
         # Provisioned, but Colab granted no GPU/TPU this attempt (Colab-
         # constraints table: "compute units buy a budget, not a GPU") — a
@@ -755,13 +809,132 @@ def on_scheduler_item_finished(item_id: str) -> None:
     _resolve_attempt(attempt, item["status"] == "completed", item["status"])
 
 
-def _resolve_attempt(attempt: Dict[str, Any], succeeded: bool, raw_status: str) -> None:
+def _previous_leg_epochs(attempt: Dict[str, Any]) -> Optional[int]:
+    prev_id = attempt.get("resume_of")
+    if not prev_id:
+        return None
+    prev = _get_attempt(prev_id)
+    return prev.get("epochs_completed") if prev else None
+
+
+def _try_open_next_leg(attempt: Dict[str, Any], experiment: Dict[str, Any], classification: Dict[str, Any]) -> bool:
+    """Attempt-record half of the leg loop (Multi_runner_XDash.md Phase 5c):
+    if *classification* (describe_run()'s own verdict) says this leg ended
+    interrupted-but-resumable and the loop guards allow it, resolves this
+    leg as done-but-continuing and opens a fresh Attempt (leg_index+1,
+    resume_of this one, same run_id) for the dispatcher to pick up on its
+    next tick. Returns False (opens nothing) when any guard fails — the
+    caller then resolves this attempt as a stopped, not finished, failure.
+
+    Guards, carried over from XDASH_V2_PLAN.md §7 (the soundest part of the
+    spec Multi_runner_XDash.md otherwise supersedes): not resumable, no
+    checkpoint_files, zero epochs_completed, max_legs reached, or no
+    progress since the previous leg — each one a real "don't loop forever
+    burning compute for nothing" case, not an arbitrary cap."""
+    if not classification.get("resumable"):
+        return False
+    checkpoint_files = classification.get("checkpoint_files") or []
+    if not checkpoint_files:
+        return False
+    epochs_completed = classification.get("epochs_completed") or 0
+    if epochs_completed <= 0:
+        return False
+    leg_index = attempt.get("leg_index", 1)
+    max_legs = experiment.get("max_legs", 6)
+    if leg_index >= max_legs:
+        return False
+    prev_epochs = _previous_leg_epochs(attempt)
+    if prev_epochs is not None and epochs_completed <= prev_epochs:
+        return False  # no progress since the last leg — looping further would just burn compute
+
+    run_id = classification.get("run_id") or attempt.get("run_id")
+    with _lock:
+        data = _load()
+        exp = data["experiments"].get(experiment["experiment_id"])
+        cur = data["attempts"].get(attempt["attempt_id"])
+        if exp is None or cur is None or cur["status"] != "running":
+            return False  # resolved by someone else concurrently (e.g. a cancel)
+
+        cur["status"] = "done"
+        cur["ended_at"] = _now_iso()
+        cur["raw_status"] = "interrupted"
+        cur["epochs_completed"] = epochs_completed
+        cur["checkpoint_files"] = checkpoint_files
+        cur["run_id"] = run_id
+        cur["updated_at"] = _now_iso()
+
+        new_attempt = _new_attempt(exp["experiment_id"], len(exp["attempt_ids"]) + 1)
+        new_attempt["leg_index"] = leg_index + 1
+        new_attempt["resume_of"] = attempt["attempt_id"]
+        new_attempt["run_id"] = run_id
+        data["attempts"][new_attempt["attempt_id"]] = new_attempt
+        exp["attempt_ids"].append(new_attempt["attempt_id"])
+        exp["current_attempt_id"] = new_attempt["attempt_id"]
+        cur["resumed_by"] = new_attempt["attempt_id"]
+        _save(data)
+
+    notif.send_all(
+        f"Experiment '{experiment['experiment_id']}' leg {leg_index} interrupted @ "
+        f"{epochs_completed} epochs — opening leg {leg_index + 1}/{max_legs}."
+    )
+    _dispatch_tick()
+    return True
+
+
+def _chain_stop_reason(attempt: Dict[str, Any], experiment: Dict[str, Any], classification: Dict[str, Any]) -> str:
+    """Human-readable reason _try_open_next_leg refused, for the blocked
+    detail shown on the attempt that stopped the chain — computed
+    separately from the guard itself so the guard stays a single early-exit
+    pass and this stays purely descriptive."""
+    if not classification.get("resumable"):
+        return "Manifest reports this leg is not resumable"
+    if not classification.get("checkpoint_files"):
+        return "No checkpoint files to resume from"
+    epochs_completed = classification.get("epochs_completed") or 0
+    if epochs_completed <= 0:
+        return "No epochs completed this leg"
+    leg_index = attempt.get("leg_index", 1)
+    max_legs = experiment.get("max_legs", 6)
+    if leg_index >= max_legs:
+        return f"Reached max_legs ({max_legs})"
+    prev_epochs = _previous_leg_epochs(attempt)
+    if prev_epochs is not None and epochs_completed <= prev_epochs:
+        return f"No progress since the previous leg ({prev_epochs} -> {epochs_completed} epochs)"
+    return "Chain stopped"  # guard passed after all (a concurrent resolve) — generic fallback
+
+
+def _resolve_attempt(
+    attempt: Dict[str, Any], succeeded: bool, raw_status: str,
+    classification: Optional[Dict[str, Any]] = None,
+) -> None:
     with _lock:
         data = _load()
         experiment = data["experiments"].get(attempt["experiment_id"])
+
+    # Multi_runner_XDash.md Phase 5 — a self-limited leg exits 0 exactly like
+    # a genuinely finished one (both are "succeeded" from the runner's own
+    # poll()), so only classify_run()'s manifest-level verdict can tell them
+    # apart. Only reachable when the caller actually classified (currently
+    # Kaggle's poll-style path) and got an "interrupted" verdict back.
+    if succeeded and classification is not None and classification.get("status") == "interrupted" and experiment is not None:
+        if _try_open_next_leg(attempt, experiment, classification):
+            return
+        _claim_attempt(attempt["attempt_id"], "running", {
+            "status": "failed", "ended_at": _now_iso(), "raw_status": raw_status,
+            "blocked": {
+                "code": "chain-stopped",
+                "detail": _chain_stop_reason(attempt, experiment, classification),
+                "since": _now_iso(),
+            },
+        })
+        notif.send_all(f"Experiment '{experiment['experiment_id']}' resume chain stopped without finishing.")
+        return
+
     if succeeded:
-        run_id = _find_run_id_for(cfg.get_experiment_name(experiment["config_path"]), experiment.get("seed")) \
+        run_id = (classification or {}).get("run_id") or (
+            _find_run_id_for(cfg.get_experiment_name(experiment["config_path"]), experiment.get("seed"))
             if experiment is not None else None
+        )
         claimed = _claim_attempt(attempt["attempt_id"], "running", {
             "status": "done", "ended_at": _now_iso(), "raw_status": raw_status, "run_id": run_id,
         })
@@ -785,10 +958,13 @@ def _resolve_attempt(attempt: Dict[str, Any], succeeded: bool, raw_status: str) 
 def _poll_and_resolve(attempt: Dict[str, Any]) -> None:
     """The generic core of what used to be Kaggle-only `_poll_kaggle_attempts`
     and half of `_reconcile_on_startup`: ask *attempt*'s own runner whether
-    its unit has finished; if so, collect its results and resolve it.
-    Runner-agnostic — for a runner whose `poll()` never reports `finished`
-    (local/ssh: resolved push-style, see MachineRunner.poll()'s own docstring
-    for why that's not a gap), this is a harmless, cheap no-op."""
+    its unit has finished; if so, collect its results, classify the result
+    (Multi_runner_XDash.md Phase 5 — done vs. interrupted-and-resumable,
+    only answerable from the collected manifest, never from poll() alone),
+    and resolve it. Runner-agnostic — for a runner whose `poll()` never
+    reports `finished` (local/ssh: resolved push-style, see
+    MachineRunner.poll()'s own docstring for why that's not a gap), this is
+    a harmless, cheap no-op."""
     try:
         runner = registry.get_runner(attempt.get("slot") or "")
     except KeyError:
@@ -799,11 +975,18 @@ def _poll_and_resolve(attempt: Dict[str, Any]) -> None:
         return
     if live is None or not live.get("finished"):
         return
+
+    results_dir = None
     try:
-        runner.collect(attempt)
+        results_dir = runner.collect(attempt)
     except Exception:
         pass  # still resolve below — a collection failure shouldn't strand it forever
-    _resolve_attempt(attempt, bool(live.get("succeeded")), live.get("raw_status"))
+
+    succeeded = bool(live.get("succeeded"))
+    classification = None
+    if succeeded and results_dir:
+        classification = results_ingest.classify_run(Path(results_dir), attempt["experiment_id"])
+    _resolve_attempt(attempt, succeeded, live.get("raw_status"), classification)
 
 
 def _poll_in_flight_attempts() -> None:

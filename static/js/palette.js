@@ -32,6 +32,31 @@ function buildPaletteIndex() {
     items.push({ kind: "tab", label: el.textContent.trim(), sub: "Go to tab", action: () => switchView(el.dataset.view) });
   });
 
+  // Compute subtabs (Multi_runner_XDash.md Phase 6) — the nav-item loop above
+  // only reaches top-level tabs, so a fleet subsurface needs its own entries,
+  // same as Experiments' Configs/Sessions subtabs get via switchToSubtab().
+  [
+    ["machines", "Machines"], ["kaggle", "Kaggle"], ["colab", "Colab"], ["monitors", "Monitors"],
+  ].forEach(([key, label]) => {
+    items.push({
+      kind: "tab", label: `Compute · ${label}`, sub: "Go to subtab",
+      action: () => switchToSubtab("compute", "compute-subtabs", key),
+    });
+  });
+
+  for (const h of state.computeHosts || []) {
+    items.push({
+      kind: "host", label: h.label || h.id, sub: h.id,
+      action: () => switchToSubtab("compute", "compute-subtabs", "machines"),
+    });
+  }
+  for (const a of state.kaggleAccounts || []) {
+    items.push({
+      kind: "kaggle account", label: a.name, sub: a.kaggle_username || "",
+      action: () => switchToSubtab("compute", "compute-subtabs", "kaggle"),
+    });
+  }
+
   for (const group of state.configs) {
     for (const c of group.configs) {
       items.push({ kind: "config", label: c.name, sub: c.path, action: () => { switchToSubtab("experiments", "experiments-subtabs", "configs"); selectConfig(c.path); } });

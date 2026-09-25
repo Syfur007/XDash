@@ -35,6 +35,8 @@ from backend import ledger
 from backend import bridge
 from backend import datasets_info
 from backend import kaggle as kaggle_ops
+from backend import colab as colab_ops
+from backend import snapshot as snapshot_ops
 from backend import notifications
 from backend import run_notes
 from backend import repos as repos_ops
@@ -553,6 +555,79 @@ def api_kaggle_set_weekly_budget(name):
         return err(str(e), 400)
 
 
+# Resume-snapshot buffer (Multi_runner_XDash.md Phase 5b/6) — read-only diagnostics for
+# an account's own snapshot dataset, so a `snapshot-failed` block is diagnosable from the
+# Compute tab without a shell. A real `kaggle datasets status` call, so the frontend
+# triggers this on demand (a button), never auto-polls it.
+@app.route("/api/kaggle/accounts/<name>/snapshot", methods=["GET"])
+def api_kaggle_snapshot_status(name):
+    try:
+        return jsonify(snapshot_ops.status(name))
+    except snapshot_ops.SnapshotError as e:
+        return err(str(e), 400)
+
+
+# --------------------------------------------------------------------------- colab
+# Account registry only (Multi_runner_XDash.md Phase 4/6) — VM provisioning/teardown is
+# the dispatcher's own job (backend/runners/colab.py's ColabRunner), not something a route
+# here triggers directly; credential capture ("Connect account") stays a documented
+# out-of-band step (backend/colab.py's own module docstring) — no interactive OAuth flow
+# exists to wire a route to yet.
+@app.route("/api/colab/accounts", methods=["GET"])
+def api_colab_list_accounts():
+    return jsonify({"accounts": colab_ops.list_accounts()})
+
+
+@app.route("/api/colab/accounts", methods=["POST"])
+def api_colab_add_account():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(colab_ops.add_account(
+            body.get("name", ""), body.get("label", ""), body.get("gpu", ""),
+            session_limit_hours=body.get("session_limit_hours"),
+        ))
+    except colab_ops.ColabOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/colab/accounts/<name>", methods=["DELETE"])
+def api_colab_remove_account(name):
+    if not colab_ops.remove_account(name):
+        return err("Account not found", 404)
+    return jsonify({"removed": True})
+
+
+@app.route("/api/colab/accounts/<name>/session_limit", methods=["POST"])
+def api_colab_set_session_limit(name):
+    body = request.get_json(silent=True) or {}
+    hours = body.get("hours")
+    try:
+        return jsonify(colab_ops.set_session_limit(name, float(hours) if hours is not None else None))
+    except (colab_ops.ColabOpsError, TypeError, ValueError) as e:
+        return err(str(e), 400)
+
+
+# Live VM state (Multi_runner_XDash.md Phase 6) — a real `colab sessions`/
+# `colab stop` CLI call each, so both are on-demand buttons, never auto-polled.
+# No manual "provision" route: a VM is only ever created by the dispatcher's
+# own can_accept()/dispatch() pipeline for a real experiment (ColabRunner has
+# no direct_launch either, for the same reason) — provisioning real, billable
+# compute with nothing to run on it has no route to trigger it deliberately.
+@app.route("/api/colab/accounts/<name>/session", methods=["GET"])
+def api_colab_session_status(name):
+    # list_sessions() never raises — a CLI/credentials failure degrades to
+    # [] (see its own docstring), same "read-only status must degrade, not
+    # 500" discipline as tmux_runner's own returncode-127 convention.
+    sessions = colab_ops.list_sessions(name)
+    return jsonify({"live": bool(sessions), "sessions": sessions})
+
+
+@app.route("/api/colab/accounts/<name>/stop", methods=["POST"])
+def api_colab_stop_session(name):
+    stopped = colab_ops.stop_session(name)
+    return jsonify({"stopped": stopped})
+
+
 # --------------------------------------------------------------------------- hosts (Multi_runner_XDash.md Phase 1)
 # Machines XDash can open a tmux session on — the local device (always
 # present, synthesized if data/hosts.json has no entry for it) plus any
@@ -673,6 +748,7 @@ def api_create_experiments():
             configs=configs, extra_args=body.get("extra_args", ""),
             pool=body.get("pool", "either"), batch_name=body.get("batch_name"),
             max_retries=int(body.get("max_retries", 1)), force_on_retry=bool(body.get("force_on_retry", True)),
+            max_legs=int(body.get("max_legs", 6)),
         )
     except experiments.ExperimentError as e:
         return err(str(e), 400)

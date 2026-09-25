@@ -173,7 +173,7 @@ class KaggleRunner(Runner):
         if self._busy():
             return {"code": "pool-busy", "detail": "This account is currently busy"}
 
-        session_cap = float(account.get("weekly_budget_hours") or kaggle_backend.settings.kaggle_default_budget_hours)
+        session_cap = self._session_cap_hours(account)
         if est_hours > session_cap:
             return {
                 "code": "exceeds-session-cap",
@@ -204,16 +204,44 @@ class KaggleRunner(Runner):
         times = [a.get("started_at") for a in experiments.attempts_for_slot(self.id) if a.get("started_at")]
         return max(times) if times else ""
 
+    def _session_cap_hours(self, account: Dict[str, Any]) -> float:
+        return float(account.get("weekly_budget_hours") or kaggle_backend.settings.kaggle_default_budget_hours)
+
+    def seed(self, experiment: Dict[str, Any], attempt: Dict[str, Any], checkpoint_files: List[str]) -> Dict[str, Any]:
+        """Uploads the previous leg's checkpoints as this account's resume
+        snapshot (Multi_runner_XDash.md Phase 5b) — Kaggle's only input
+        channel mid-dispatch is an attached dataset, unlike a machine
+        runner's plain rsync. Returns {} for a fresh leg 1 (no checkpoints
+        yet), which dispatch() below reads as "nothing to attach"."""
+        if not checkpoint_files:
+            return {}
+        from .. import snapshot
+        slug = snapshot.push(self.account_name, experiment["experiment_id"], checkpoint_files)
+        return {"snapshot_slug": slug}
+
     def dispatch(self, experiment: Dict[str, Any], attempt: Dict[str, Any]) -> Dict[str, Any]:
         from .. import dataset_map
         required_dataset = dataset_map.resolve_kaggle_dataset(experiment["config_path"])
+        dataset_sources = [required_dataset] if required_dataset else []
+        # Training dataset first, snapshot second — push_experiment_attempt's
+        # own dataset_source placeholder (the training-data fallback) always
+        # reads dataset_sources[0], so this ordering is a real contract, not
+        # cosmetic (see its docstring).
+        snapshot_slug = (attempt.get("unit_ref") or {}).get("snapshot_slug") or ""
+        if snapshot_slug:
+            dataset_sources.append(snapshot_slug)
+
+        account = self._account() or {}
         result = kaggle_backend.push_experiment_attempt(
             self.account_name, experiment["experiment_id"], experiment["config_path"],
-            experiment.get("extra_args") or "", [required_dataset] if required_dataset else [],
+            experiment.get("extra_args") or "", dataset_sources,
+            budget_hours=self._session_cap_hours(account),
+            resume=bool(attempt.get("resume_of")),
+            snapshot_source=snapshot_slug,
         )
         return {
             "unit_ref": {
-                "account": self.account_name,
+                "account": self.account_name, "snapshot_slug": snapshot_slug or None,
                 "kernel_slug": result["kernel_slug"], "results_dir": result["results_dir"],
             },
             "stages": [{"name": "run", "status": "running"}],

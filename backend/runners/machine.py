@@ -10,15 +10,18 @@ backend/transport.py (getting the working tree there and results back) — no
 new state, no behavior change to any of those modules for the local host,
 since LocalTransport's push/pull are no-ops.
 
-`seed`/`heartbeat` (Multi_runner_XDash.md Phase 5) are deliberately left at
-base.Runner's no-op defaults here: the mechanical half (transport.push/pull)
-is ready for Phase 5 to use, but the exact shape of `checkpoint_files` and
-how a seeded resume reaches the launch command's `--resume` flag are leg-loop
-design questions Phase 5 (not yet built — no leg_index/resume_of/max_legs,
-no describe_run.py) has to answer, not this one.
+`seed` is implemented for real as of Multi_runner_XDash.md Phase 5 — stages
+the previous leg's checkpoints (wherever they actually are, possibly a
+Kaggle download) into a canonical tree and transport.push()es it onto this
+host; `dispatch()` adds --resume to the train half alone when the attempt
+is a resume. `heartbeat` (mid-run checkpoint pull for live progress/crash
+resilience) stays at base.Runner's no-op default — not required for legs to
+chain correctly, only for a heartbeat display nothing calls yet.
 """
 from __future__ import annotations
 
+import shutil
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -201,10 +204,15 @@ class MachineRunner(Runner):
         does nothing, so local dispatch is byte-identical to before this
         class existed), then queues both halves through scheduler.py exactly
         as the pre-Phase-3 LocalRunner did — that queue is what actually
-        enforces per-host max_concurrent."""
+        enforces per-host max_concurrent. A resumed leg (attempt.resume_of
+        set) adds --resume to the *train* half only, via scheduler.add_item's
+        train_extra_args — eval.py has no --resume of its own."""
         self._transport.push(settings.repo_root, self.host.repo_root, transport_mod.DEFAULT_PUSH_EXCLUDES)
+        base_extra_args = experiment.get("extra_args") or ""
+        train_extra_args = (base_extra_args + " --resume").strip() if attempt.get("resume_of") else base_extra_args
         items = scheduler.add_item(
-            experiment["config_path"], "both", experiment.get("extra_args") or "", host_id=self.host.id,
+            experiment["config_path"], "both", base_extra_args, host_id=self.host.id,
+            train_extra_args=train_extra_args,
         )
         return {
             "unit_ref": {"train_item_id": items[0]["id"], "eval_item_id": items[1]["id"]},
@@ -281,3 +289,34 @@ class MachineRunner(Runner):
             except ValueError:
                 pass
         return ok
+
+    def seed(self, experiment: Dict[str, Any], attempt: Dict[str, Any], checkpoint_files: List[str]) -> Dict[str, Any]:
+        """Makes the previous leg's checkpoints available on this host before
+        dispatch() runs (Multi_runner_XDash.md Phase 5) — stages them into a
+        canonical outputs/experiments/... tree (results_ingest.stage_checkpoint_files,
+        which re-roots regardless of which runner kind the previous leg
+        actually ran on — a checkpoint being resumed onto a machine may have
+        just been downloaded from Kaggle, not produced locally), then
+        transport.push()es that tree onto this host's own repo_root.
+
+        Local is *not* simply skipped: the previous leg may have run on
+        Kaggle, in which case the files exist only under
+        outputs/kaggle/<experiment_id>/... and still need staging into the
+        canonical local position — only the transport hop is a genuine no-op
+        for local, since LocalTransport.push() is one already. Unlike
+        Kaggle, no snapshot dataset is needed either way: XDash has a real
+        shell on any machine host."""
+        if not checkpoint_files:
+            return {}
+        if self.host.is_local:
+            results_ingest.stage_checkpoint_files(settings.repo_root, checkpoint_files)
+            return {}
+        tmpdir = Path(tempfile.mkdtemp(prefix="xdash_seed_"))
+        try:
+            copied = results_ingest.stage_checkpoint_files(tmpdir, checkpoint_files)
+            if copied == 0:
+                return {}
+            self._transport.push(tmpdir / "outputs", self.host.repo_root / "outputs")
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        return {}
