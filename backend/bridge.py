@@ -90,6 +90,9 @@ def run_bridge_script(
     # from a script that lives inside dashboard/backend/bridge_scripts/.
     existing = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = str(settings.repo_root) + (os.pathsep + existing if existing else "")
+    # A bridge call only reads the host repo; it must not leave __pycache__/
+    # files behind in it either.
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
 
     try:
         proc = subprocess.run(
@@ -129,6 +132,18 @@ def run_bridge_script(
 
 def clear_cache() -> None:
     _cache.clear()
+
+
+def call_hook(spec: str, args: Any = None, timeout: float = 60.0) -> Any:
+    """Runs one framework hook through bridge_scripts/call.py (XDASH_PLAN.md
+    §4.2): *spec* is `module:function` in the host repo or
+    `xdash:<framework>.<function>` for an XDash-shipped adapter, *args* its
+    keyword arguments (a dict) or positional arguments (a list — e.g.
+    `resolve_config`, whose one argument is a config path and whose
+    parameter name is the framework's business). Never cached — hooks answer questions about files
+    that change (configs, run dirs). Raises BridgeError/BridgeUnavailable
+    exactly like run_bridge_script()."""
+    return run_bridge_script("call.py", [spec, json.dumps(args or {})], timeout=timeout, use_cache=False)
 
 
 def bridge_status() -> Dict[str, Any]:

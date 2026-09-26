@@ -8,12 +8,12 @@ load/save-under-a-lock shape as monitors.py.
 """
 from __future__ import annotations
 
-import json
 import threading
 from datetime import datetime
 from typing import Any, Dict
 
 from .config import settings
+from .store import JsonStore
 
 _lock = threading.Lock()
 
@@ -22,18 +22,16 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+_store = JsonStore(lambda: settings.run_notes_file, dict)
+
+
 def _load() -> Dict[str, Any]:
-    if not settings.run_notes_file.exists():
-        return {}
-    try:
-        data = json.loads(settings.run_notes_file.read_text())
-    except Exception:
-        return {}
+    data = _store.load()
     return data if isinstance(data, dict) else {}
 
 
 def _save(data: Dict[str, Any]) -> None:
-    settings.run_notes_file.write_text(json.dumps(data, indent=2))
+    _store.save(data)
 
 
 def list_notes() -> Dict[str, Any]:

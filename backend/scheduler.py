@@ -16,14 +16,14 @@ open in a browser tab.
 """
 from __future__ import annotations
 
-import json
 import threading
 import time
 import uuid
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from .config import settings
+from .config import background_disabled, settings
+from .store import JsonStore
 from . import configs as cfg
 from . import hosts
 from . import terminals
@@ -39,29 +39,37 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+_store = JsonStore(lambda: settings.scheduler_file, lambda: dict(_DEFAULTS, items=[], templates=[]))
+
+
 def _load() -> Dict[str, Any]:
-    if not settings.scheduler_file.exists():
-        return dict(_DEFAULTS, items=[], templates=[])
-    try:
-        data = json.loads(settings.scheduler_file.read_text())
-    except Exception:
-        return dict(_DEFAULTS, items=[], templates=[])
+    data = _store.load()
     for key, default in _DEFAULTS.items():
         data.setdefault(key, [] if isinstance(default, list) else default)
     return data
 
 
 def _save(data: Dict[str, Any]):
-    settings.scheduler_file.write_text(json.dumps(data, indent=2))
+    _store.save(data)
 
 
 def _new_item(
     config_path: str, mode: str, extra_args: str,
     depends_on: Optional[str] = None, host_id: Optional[str] = None,
+    cli_config: Optional[str] = None, full_command: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         "id": uuid.uuid4().hex[:10],
         "config_path": config_path,
+        # What the command line gets as --config when it isn't config_path
+        # itself — an experiment's overlay file (XDASH_PLAN.md §4.3).
+        "cli_config": cli_config,
+        # The exact command line to run, already rendered by
+        # framework.render_command() (XDASH_PLAN.md §4.1) — set by the
+        # Experiment dispatcher (backend/runners/machine.py); None for every
+        # older caller (Configs page ad-hoc launches), which keep building
+        # the command from config_path/mode/extra_args the old way.
+        "full_command": full_command,
         "mode": mode,
         "extra_args": extra_args.strip(),
         "experiment_name": cfg.get_experiment_name(config_path),
@@ -79,7 +87,9 @@ def _new_item(
 # ------------------------------------------------------------------- write API
 def add_item(
     config_path: str, mode: str, extra_args: str = "", host_id: Optional[str] = None,
-    train_extra_args: Optional[str] = None,
+    train_extra_args: Optional[str] = None, cli_config: Optional[str] = None,
+    full_command: Optional[str] = None, train_full_command: Optional[str] = None,
+    eval_full_command: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """*host_id* defaults to the local machine — every pre-existing caller
     (the Configs-page "Add to schedule" button, backend/experiments.py's
@@ -93,7 +103,19 @@ def add_item(
     *extra_args* itself so every pre-existing caller is unaffected. Needed
     because eval.py has no --resume/--max-hours of its own — a resumed
     leg's MachineRunner.dispatch() must pass --resume to train without also
-    handing it to eval, which would reject it as an unrecognized flag."""
+    handing it to eval, which would reject it as an unrecognized flag.
+
+    *cli_config* (XDASH_PLAN.md §4.3): the repo-relative file both halves
+    get as `--config` instead of *config_path* — an experiment's overlay.
+    One value for both halves, which is the point: train and eval resolve
+    the same config, so eval finds train's run.
+
+    *full_command*/*train_full_command*/*eval_full_command* (XDASH_PLAN.md
+    §4.1): a pre-rendered command line (framework.render_command()) to run
+    verbatim instead of building one from config_path/mode/extra_args —
+    *full_command* for a single-mode item, the other two for mode="both"'s
+    train/eval halves respectively. None (every pre-Phase-2 caller) keeps
+    building the command the old way."""
     if mode not in ("train", "eval", "both"):
         raise ValueError("mode must be 'train', 'eval', or 'both'")
     cfg.read_config(config_path)  # raises if the config doesn't exist / is invalid
@@ -109,12 +131,17 @@ def add_item(
             )
         if mode == "both":
             train_args = train_extra_args if train_extra_args is not None else extra_args
-            train_item = _new_item(config_path, "train", train_args, host_id=host.id)
-            eval_item = _new_item(config_path, "eval", extra_args, depends_on=train_item["id"], host_id=host.id)
+            train_item = _new_item(config_path, "train", train_args, host_id=host.id, cli_config=cli_config,
+                                    full_command=train_full_command)
+            eval_item = _new_item(
+                config_path, "eval", extra_args, depends_on=train_item["id"], host_id=host.id, cli_config=cli_config,
+                full_command=eval_full_command,
+            )
             data["items"] += [train_item, eval_item]
             created = [train_item, eval_item]
         else:
-            item = _new_item(config_path, mode, extra_args, host_id=host.id)
+            item = _new_item(config_path, mode, extra_args, host_id=host.id, cli_config=cli_config,
+                              full_command=full_command)
             data["items"].append(item)
             created = [item]
         _save(data)
@@ -270,6 +297,15 @@ def _log_tail(session_name: str, n: int = 6) -> Optional[str]:
 
 
 # -------------------------------------------------------------------- read API
+def items_by_id() -> Dict[str, Dict[str, Any]]:
+    """Every item as stored, keyed by id — no tmux enrichment, unlike
+    list_items(). What a status check needs (MachineRunner.poll(), called
+    for every in-flight attempt on every view and dispatch tick) without
+    capturing a pane per running item."""
+    with _lock:
+        return {i["id"]: dict(i) for i in _load()["items"]}
+
+
 def list_items() -> Dict[str, Any]:
     with _lock:
         data = _load()
@@ -371,6 +407,7 @@ def _tick():
                 try:
                     launched = terminals.launch(
                         item["config_path"], item["mode"], item.get("extra_args", ""), host_id=host_id,
+                        cli_config=item.get("cli_config"), full_command=item.get("full_command"),
                     )
                 except Exception:
                     item["status"] = "failed"
@@ -410,7 +447,7 @@ _worker_started = False
 
 def ensure_worker_started():
     global _worker_started
-    if _worker_started:
+    if _worker_started or background_disabled():
         return
     _worker_started = True
 

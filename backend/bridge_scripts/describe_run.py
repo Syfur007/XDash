@@ -24,7 +24,14 @@ def main(argv):
     run_root = argv[0]
     verify = "--verify" in argv[1:]
 
-    from orchestration.status import describe_run
+    # New package layout first (dissert's src/dissert/ reorg, landed 2026-09-26),
+    # old flat layout as a fallback — see XDASH_PROGRESS.md's Phase 2 section for
+    # the switch-over checklist. Both live at the same dotted path suffix, so this
+    # one try/except covers every bridge script's host-repo import.
+    try:
+        from dissert.orchestration.status import describe_run
+    except ImportError:
+        from orchestration.status import describe_run
 
     return describe_run(run_root, verify=verify)
 

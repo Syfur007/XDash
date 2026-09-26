@@ -14,7 +14,12 @@ from _common import run_main  # noqa: E402
 
 
 def main(argv):
-    from models.registry import MODEL_REGISTRY
+    # New package layout first, old flat layout as a fallback — see
+    # XDASH_PROGRESS.md's Phase 2 section.
+    try:
+        from dissert.models.registry import MODEL_REGISTRY
+    except ImportError:
+        from models.registry import MODEL_REGISTRY
 
     return {"names": sorted(MODEL_REGISTRY.keys())}
 

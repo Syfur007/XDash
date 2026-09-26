@@ -49,10 +49,12 @@ from .config import (
 )
 from . import configs as cfg
 from . import results_ingest
+from .store import JsonStore, StoreCorruptError, atomic_write_text
 
 _lock = threading.Lock()          # guards kaggle_accounts.json
 
 STATUS_RE = re.compile(r'has status "([^"]+)"')
+FAILURE_RE = re.compile(r'Failure message:\s*"?(.*?)"?\s*$', re.MULTILINE)
 _ENUM_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.")
 # Live-verified 2026-09 against the actually-installed `kaggle` CLI (pip package "kaggle" 1.7.4.5,
 # github.com/Kaggle/kaggle-api): `kernels status` prints the Python enum's own repr — e.g.
@@ -85,7 +87,19 @@ FINAL_STATUSES = {"complete", "error", "cancelAcknowledged"}
 LAUNCH_SPEC_MARKER = "# DASHBOARD:LAUNCH_SPEC"
 _LAUNCH_PLACEHOLDERS = {
     "config_path": "__DASHBOARD_CONFIG_PATH__",
+    # Legacy single-string args, still substituted for any template that predates the split
+    # (e.g. data/segpriors/kaggle_worker_template.ipynb) — given the *train* args, which is
+    # exactly what that template used to receive minus any eval-only flag. XDASH_PLAN.md X12:
+    # eval.py's strict parse_args() exits 2 on a train-only flag, so the dissert template reads
+    # the two split placeholders below instead.
     "extra_args": "__DASHBOARD_EXTRA_ARGS__",
+    "train_extra_args": "__DASHBOARD_TRAIN_EXTRA_ARGS__",
+    "eval_extra_args": "__DASHBOARD_EVAL_EXTRA_ARGS__",
+    # XDASH_PLAN.md §4.5 (X6) — the commit the template `git checkout`s right after cloning, so
+    # a Kaggle run executes exactly the code recorded on its attempt instead of whatever the
+    # default branch's HEAD is by the time the kernel starts. Empty = no pin (only when the
+    # profile's allow_unpushed let an unpushed commit through; the attempt records that).
+    "code_commit": "__DASHBOARD_CODE_COMMIT__",
     # Resolved server-side from settings.train_script/eval_script, never hardcoded in the
     # template — a deployment may point these at a wrapper (e.g. this study's own
     # scripts/run_iccit_sweep.py, which loops the pre-registered seeds and writes the
@@ -120,11 +134,31 @@ _LAUNCH_PLACEHOLDERS = {
     # (backend/snapshot.py) rather than the training data.
     "resume": "__DASHBOARD_RESUME__",
     "snapshot_source": "__DASHBOARD_SNAPSHOT_SOURCE__",
+    # XDASH_PLAN.md §4.3 (Phase 1) — an experiment's overlay config, as the file's full text.
+    # The template writes it to CONFIG_PATH (then .xdash/overlays/<experiment_id>.yaml, the same
+    # repo-relative path the overlay has on every runtime) right after the clone, so train and
+    # eval both run on it. Empty = no overlay: CONFIG_PATH is the experiment's own config.
+    "overlay_yaml": "__DASHBOARD_OVERLAY_YAML__",
+    # XDASH_PLAN.md §4.5 — the fully rendered train/eval command lines
+    # (backend/framework.py's render_command(), the same function every other
+    # runtime kind renders its command from), so the template stops rebuilding
+    # a command from TRAIN_SCRIPT/CONFIG_PATH/MAX_HOURS/RESUME/*_EXTRA_ARGS
+    # itself. Those older placeholders are still substituted above (a template
+    # that predates this split, e.g. data/segpriors/kaggle_worker_template.ipynb,
+    # keeps working unrendered by TRAIN_CMD/EVAL_CMD — a no-op replace on a
+    # template that doesn't contain these tokens).
+    "train_cmd": "__DASHBOARD_TRAIN_CMD__",
+    "eval_cmd": "__DASHBOARD_EVAL_CMD__",
 }
 
 class KaggleOpsError(Exception):
     """Expected failure (bad credentials, subprocess error, unknown account/worker) —
     routes map this to a 4xx, not a stack trace."""
+
+
+class KaggleNoOutputError(KaggleOpsError):
+    """`kernels output` succeeded but returned neither a zip nor a log: the kernel produced
+    nothing. A final answer ("empty"), not a transient failure worth retrying."""
 
 
 def _now_iso() -> str:
@@ -157,22 +191,20 @@ def _scope_paths(scope: str):
     return settings.kaggle_accounts_file, settings.kaggle_creds_dir
 
 
+_scope_stores = {
+    SCOPE_SYSTEM: JsonStore(lambda: _scope_paths(SCOPE_SYSTEM)[0], lambda: {"accounts": []}),
+    SCOPE_REPO: JsonStore(lambda: _scope_paths(SCOPE_REPO)[0], lambda: {"accounts": []}),
+}
+
+
 def _load_scope(scope: str) -> Dict[str, Any]:
-    path, _ = _scope_paths(scope)
-    if not path.exists():
-        return {"accounts": []}
-    try:
-        data = json.loads(path.read_text())
-    except Exception:
-        return {"accounts": []}
+    data = _scope_stores[scope].load()
     data.setdefault("accounts", [])
     return data
 
 
 def _save_scope(scope: str, data: Dict[str, Any]) -> None:
-    path, _ = _scope_paths(scope)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2))
+    _scope_stores[scope].save(data)
 
 
 def _load_accounts() -> Dict[str, Any]:
@@ -350,8 +382,7 @@ def add_account(
 
 
 def _write_secret(path: Path, text: str) -> None:
-    path.write_text(text)
-    os.chmod(path, 0o600)
+    atomic_write_text(path, text, mode=0o600)
 
 
 def update_credentials(
@@ -462,13 +493,16 @@ def remove_account(name: str) -> bool:
 
 
 # --------------------------------------------------------------------------- CLI subprocess
-def _run_kaggle(args: List[str], account_name: str, timeout: Optional[float] = None) -> subprocess.CompletedProcess:
-    creds_dir = _creds_dir(account_name)
+def _env_for_creds_dir(creds_dir: Path, account_name: str = "") -> Dict[str, str]:
+    """The env block that isolates one set of credentials — factored out of
+    _run_kaggle so test_credentials() (an Add-runtime wizard live test,
+    XDASH_PLAN.md §8.4, against creds that aren't saved to an account yet)
+    can share the exact same env-var priority the real dispatch path uses,
+    rather than a second hand-rolled copy."""
     legacy_path, token_path = creds_dir / CREDS_FILENAME, creds_dir / TOKEN_FILENAME
     has_legacy, has_token = legacy_path.is_file(), token_path.is_file()
     if not has_legacy and not has_token:
-        raise KaggleOpsError(f"No credentials stored for account '{account_name}'")
-
+        raise KaggleOpsError(f"No credentials stored{' for account ' + repr(account_name) if account_name else ''}")
     # Hand over whatever credentials this account has, in both env-var forms,
     # rather than the dashboard picking one itself. The installed `kaggle`
     # CLI's own auth() already tries an access token first and falls back to
@@ -490,6 +524,10 @@ def _run_kaggle(args: List[str], account_name: str, timeout: Optional[float] = N
             env["KAGGLE_USERNAME"], env["KAGGLE_KEY"] = pair["username"], pair["key"]
         except Exception:
             pass
+    return env
+
+
+def _run_kaggle_argv(args: List[str], env: Dict[str, str], timeout: Optional[float] = None) -> subprocess.CompletedProcess:
     try:
         return subprocess.run(
             [settings.kaggle_executable, *args],
@@ -504,6 +542,11 @@ def _run_kaggle(args: List[str], account_name: str, timeout: Optional[float] = N
         raise KaggleOpsError(f"kaggle {' '.join(args)} timed out after {timeout}s")
 
 
+def _run_kaggle(args: List[str], account_name: str, timeout: Optional[float] = None) -> subprocess.CompletedProcess:
+    env = _env_for_creds_dir(_creds_dir(account_name), account_name)
+    return _run_kaggle_argv(args, env, timeout)
+
+
 def validate_account(account_name: str) -> Dict[str, Any]:
     """Cheapest authenticated call available as a stand-in for a real
     whoami — the CLI has no dedicated credential-check command."""
@@ -511,6 +554,136 @@ def validate_account(account_name: str) -> Dict[str, Any]:
     ok = proc.returncode == 0
     detail = (proc.stdout if ok else (proc.stderr or proc.stdout)).strip()
     return {"ok": ok, "detail": detail}
+
+
+def test_credentials(username: str = "", key: str = "", api_token: str = "") -> Dict[str, Any]:
+    """The Add-runtime wizard's live test for a not-yet-saved Kaggle account
+    (XDASH_PLAN.md §8.4): writes the posted credentials into a *scratch*
+    creds dir (never the account store), runs the same cheap authenticated
+    call validate_account() does, then always cleans the scratch dir up. A
+    real call to Kaggle's API when actually invoked — every test in this
+    suite points settings.kaggle_executable at a local fixture script."""
+    legacy = _validate_legacy_pair(username, key) if (key or "").strip() else None
+    token = _validate_access_token(api_token) if (api_token or "").strip() else None
+    if not legacy and not token:
+        raise KaggleOpsError("Provide a classic username/key pair, an API token, or both")
+    with tempfile.TemporaryDirectory(prefix="xdash-kaggle-test-") as tmp:
+        creds_dir = Path(tmp)
+        if legacy:
+            (creds_dir / CREDS_FILENAME).write_text(json.dumps(legacy))
+        if token:
+            (creds_dir / TOKEN_FILENAME).write_text(token)
+        env = _env_for_creds_dir(creds_dir)
+        proc = _run_kaggle_argv(["kernels", "list", "-m", "--page-size", "1"], env, timeout=30)
+    ok = proc.returncode == 0
+    detail = (proc.stdout if ok else (proc.stderr or proc.stdout)).strip()
+    return {"ok": ok, "detail": detail or ("looks valid" if ok else "authentication failed")}
+
+
+# --------------------------------------------------------------------------- CLI 2.x groundwork (XDASH_PLAN.md §10 Phase 5)
+# `kaggle quota` (CLI >= 2.2.1) replaces the self-tracked weekly-hours estimate
+# with Kaggle's own measured used/reserved/total/refresh numbers (KAGGLE_API.md
+# §"Quota"). The installed 1.7.4.5 has no such command; settings.kaggle_executable
+# (repos/<profile>.yaml, already read at backend/config.py:331 — no new setting
+# needed) is exactly the "separate Python 3.11+ env" pointer the plan asks for.
+# Until that env exists, get_measured_quota() degrades to {"available": False}
+# and every existing self-tracked path (estimate_usage(), list_slots(),
+# runtimes._quota()'s source="self-tracked") is untouched.
+def parse_quota_json(data: Any) -> Optional[Dict[str, Any]]:
+    """*data* is `kaggle quota --format json`'s parsed payload. Its exact key
+    casing/nesting is undocumented (KAGGLE_API.md only names the four RPC
+    fields — time_used/time_reserved/total_time_allowed/quota_refresh_time —
+    not a worked JSON example), so this reads defensively: a top-level "gpu"
+    object, or the fields directly at top level (either shape wins), and
+    returns None rather than guessing further if neither is present. None
+    means "couldn't parse this," never "zero quota used" — get_measured_quota
+    falls back to the self-tracked estimate on None, exactly like a missing
+    command does."""
+    if not isinstance(data, dict):
+        return None
+    gpu = data.get("gpu") if isinstance(data.get("gpu"), dict) else data
+    used, reserved, total, resets = (
+        gpu.get("time_used"), gpu.get("time_reserved"), gpu.get("total_time_allowed"), gpu.get("quota_refresh_time"),
+    )
+    if used is None and total is None:
+        return None
+    try:
+        used_f = float(used) if used is not None else None
+        reserved_f = float(reserved) if reserved is not None else 0.0
+        total_f = float(total) if total is not None else None
+    except (TypeError, ValueError):
+        return None
+    return {
+        "used": round((used_f or 0.0) + reserved_f, 2) if used_f is not None else None,
+        "limit": total_f,
+        "unit": "h/week",
+        "resets_at": resets,
+        "source": "measured",
+    }
+
+
+def get_measured_quota(account_name: str) -> Dict[str, Any]:
+    """`{"available": True, **parse_quota_json(...)}`, or `{"available":
+    False, "detail": ...}` when the installed CLI predates `quota` (old
+    1.7.4.5: "invalid choice: 'quota'"/similar argparse error, non-zero exit)
+    or the account has no credentials yet. Never raises — a Diagnostics
+    panel button, not something that should 500 the page."""
+    try:
+        proc = _run_kaggle(["quota", "--format", "json"], account_name, timeout=30)
+    except KaggleOpsError as e:
+        return {"available": False, "detail": str(e)}
+    if proc.returncode != 0:
+        return {"available": False, "detail": (proc.stderr or proc.stdout or "").strip()[-300:] or "kaggle quota failed"}
+    try:
+        parsed = json.loads(proc.stdout)
+    except ValueError:
+        parsed = None
+    result = parse_quota_json(parsed)
+    if result is None:
+        return {"available": False, "detail": "couldn't parse 'kaggle quota' output"}
+    return {"available": True, **result}
+
+
+# Live `kernels logs -f` (CLI >= 2.0.2, KAGGLE_API.md §4.4) — the same
+# start/poll/stop shape backend/colab.py uses for its OAuth subprocess
+# (backend/procsession.py), reused here for a live log panel instead of an
+# interactive prompt. A real call to Kaggle's API when actually started;
+# tests point settings.kaggle_executable at a local fixture script that just
+# prints a few lines and exits, never at a real kernel.
+def _log_session_key(account_name: str, kernel_slug: str) -> str:
+    return f"kaggle-log:{account_name}:{kernel_slug}"
+
+
+def _kernel_logs_argv(kernel_slug: str) -> List[str]:
+    """Factored out so tests can point this one line at a local fixture
+    script (see tests/test_procsession.py) without also having to fake
+    settings.kaggle_executable's other, unrelated call sites."""
+    return [settings.kaggle_executable, "kernels", "logs", kernel_slug, "-f"]
+
+
+def start_kernel_log_follow(account_name: str, kernel_slug: str) -> Dict[str, Any]:
+    from . import procsession
+    creds_dir = _creds_dir(account_name)
+    env = _env_for_creds_dir(creds_dir, account_name)
+    argv = _kernel_logs_argv(kernel_slug)
+    session = procsession.start(_log_session_key(account_name, kernel_slug), argv, env=env)
+    return read_kernel_log_follow(account_name, kernel_slug) if session.error is None else {
+        "active": False, "error": session.error,
+    }
+
+
+def read_kernel_log_follow(account_name: str, kernel_slug: str) -> Dict[str, Any]:
+    from . import procsession
+    session = procsession.get(_log_session_key(account_name, kernel_slug))
+    if session is None:
+        return {"active": False, "lines": [], "done": True}
+    snap = session.snapshot()
+    return {"active": True, **snap}
+
+
+def stop_kernel_log_follow(account_name: str, kernel_slug: str) -> bool:
+    from . import procsession
+    return procsession.stop(_log_session_key(account_name, kernel_slug))
 
 
 # --------------------------------------------------------------------------- push
@@ -537,11 +710,17 @@ def _kernel_metadata(account: Dict[str, Any], worker: Dict[str, Any], notebook_n
 def _render_launch_notebook(
     template_abs: Path,
     config_path: str,
-    extra_args: str,
+    train_extra_args: str,
     dataset_source: str = "",
     budget_hours: Optional[float] = None,
     resume: bool = False,
     snapshot_source: str = "",
+    eval_extra_args: str = "",
+    code_commit: str = "",
+    overlay_yaml: str = "",
+    seed: Any = None,
+    train_extra_only: str = "",
+    eval_extra_only: str = "",
 ) -> bytes:
     """Loads *template_abs* (nbformat JSON), finds the single cell carrying
     LAUNCH_SPEC_MARKER, and substitutes its `__DASHBOARD_*__` placeholders
@@ -570,9 +749,37 @@ def _render_launch_notebook(
             "notebooks/kaggle_worker_template.ipynb for the expected shape."
         )
     cell = marker_cells[0]
+    if overlay_yaml and _LAUNCH_PLACEHOLDERS["overlay_yaml"] not in "".join(cell.get("source") or []):
+        # A template that predates overlays would run CONFIG_PATH without ever writing it.
+        raise KaggleOpsError(
+            f"Template notebook {template_abs} has no {_LAUNCH_PLACEHOLDERS['overlay_yaml']} placeholder, "
+            "so it can't run an experiment with an overlay (XDASH_PLAN.md §4.3)."
+        )
+    max_hours = max(
+        0.1,
+        float(budget_hours if budget_hours is not None else settings.kaggle_default_budget_hours)
+        - float(settings.kaggle_setup_reserve_hours)
+        - float(settings.kaggle_teardown_reserve_hours),
+    )
+    # XDASH_PLAN.md §4.5 — rendered from the exact same commands.train/eval
+    # templates every other runtime kind uses, with the venv interpreter the
+    # template's own setup cell creates (settings.kaggle_venv_python) and the
+    # *same* max_hours the notebook's own self-limit uses below, so TRAIN_CMD's
+    # `--max-hours` and the kernel's own budget never disagree.
+    from . import framework
+    train_cmd = framework.render_command(
+        config_path, seed, settings.kaggle_venv_python, "train",
+        budget_hours=max_hours, resume=resume, extra=train_extra_only,
+    )
+    eval_cmd = framework.render_command(
+        config_path, seed, settings.kaggle_venv_python, "eval", extra=eval_extra_only,
+    )
     values = {
         _LAUNCH_PLACEHOLDERS["config_path"]: config_path,
-        _LAUNCH_PLACEHOLDERS["extra_args"]: extra_args or "",
+        _LAUNCH_PLACEHOLDERS["extra_args"]: train_extra_args or "",
+        _LAUNCH_PLACEHOLDERS["train_extra_args"]: train_extra_args or "",
+        _LAUNCH_PLACEHOLDERS["eval_extra_args"]: eval_extra_args or "",
+        _LAUNCH_PLACEHOLDERS["code_commit"]: code_commit or "",
         _LAUNCH_PLACEHOLDERS["train_script"]: settings.train_script,
         _LAUNCH_PLACEHOLDERS["eval_script"]: settings.eval_script,
         # Joined into one shell-quoted string, same shape as EXTRA_ARGS, so the template's
@@ -585,15 +792,13 @@ def _render_launch_notebook(
         # settings.kaggle_default_budget_hours instead, so an account's own weekly_budget_hours
         # override gated can_accept()'s exceeds-session-cap check but was silently ignored by
         # the notebook's own self-limit — the two could disagree.
-        _LAUNCH_PLACEHOLDERS["max_hours"]: max(
-            0.1,
-            float(budget_hours if budget_hours is not None else settings.kaggle_default_budget_hours)
-            - float(settings.kaggle_setup_reserve_hours)
-            - float(settings.kaggle_teardown_reserve_hours),
-        ),
+        _LAUNCH_PLACEHOLDERS["max_hours"]: max_hours,
         _LAUNCH_PLACEHOLDERS["dataset_source"]: dataset_source or "",
         _LAUNCH_PLACEHOLDERS["resume"]: bool(resume),
         _LAUNCH_PLACEHOLDERS["snapshot_source"]: snapshot_source or "",
+        _LAUNCH_PLACEHOLDERS["overlay_yaml"]: overlay_yaml or "",
+        _LAUNCH_PLACEHOLDERS["train_cmd"]: train_cmd,
+        _LAUNCH_PLACEHOLDERS["eval_cmd"]: eval_cmd,
     }
 
     def substitute(text: str) -> str:
@@ -675,21 +880,50 @@ def results_dir_for_experiment(experiment_id: str) -> str:
     return f"outputs/kaggle/{experiment_id}"
 
 
+def kernel_url(account_name: str, kernel_slug: Optional[str] = None, edit: bool = False) -> Optional[str]:
+    """The account's kernel page on kaggle.com — the deep link a `kaggle-secret-missing` block
+    carries (XDASH_PLAN.md §4.5), since attaching GITHUB_TOKEN is web-UI only (Add-ons →
+    Secrets, in the editor, hence *edit*). None when the account's username is unknown."""
+    account = _find_account(_load_accounts(), account_name)
+    if account is None or not account.get("kaggle_username"):
+        return None
+    slug = kernel_slug or kernel_slug_for_account(account_name)
+    return "https://www.kaggle.com/code/%s/%s%s" % (account["kaggle_username"], slug, "/edit" if edit else "")
+
+
 def push_experiment_attempt(
-    account_name: str, experiment_id: str, config_path: str, extra_args: str,
+    account_name: str, experiment_id: str, config_path: str, train_extra_args: str,
     dataset_sources: List[str], budget_hours: Optional[float] = None,
     resume: bool = False, snapshot_source: str = "",
+    eval_extra_args: str = "", code_commit: str = "",
+    cli_config: str = "", overlay_yaml: str = "",
+    seed: Any = None, train_extra_only: str = "", eval_extra_only: str = "",
 ) -> Dict[str, Any]:
     """Pushes one Attempt's kernel for *experiment_id* under *account_name*. Always
     template-backed (the escape hatch for a hand-authored notebook stays a worker-only action,
     §3.3).
+
+    *train_extra_args*/*eval_extra_args* (XDASH_PLAN.md X12) are rendered separately into the
+    template, which passes each to its own command only. *code_commit* (X6) is the commit the
+    template checks out after cloning.
 
     *resume*/*snapshot_source* (Multi_runner_XDash.md Phase 5): a resumed leg passes
     resume=True and the account's own resume-snapshot slug (backend/snapshot.py) as
     *snapshot_source* — the caller (KaggleRunner.dispatch) is responsible for having already
     appended that slug onto *dataset_sources* too, so the declarative attach mounts it
     alongside the training dataset; **training dataset first, snapshot second** is the ordering
-    contract dataset_source below relies on (it always reads dataset_sources[0])."""
+    contract dataset_source below relies on (it always reads dataset_sources[0]).
+
+    *cli_config*/*overlay_yaml* (XDASH_PLAN.md §4.3): the repo-relative `--config` both commands
+    get (the experiment's overlay file) and that file's text, which the template writes after
+    cloning. Default: no overlay, *config_path*'s own repo-relative path.
+
+    *seed*/*train_extra_only*/*eval_extra_only* (§4.1/§4.5): render TRAIN_CMD/EVAL_CMD, the
+    fully-rendered command lines a commands.*-aware template runs verbatim instead of rebuilding
+    one from TRAIN_SCRIPT/CONFIG_PATH/MAX_HOURS/RESUME/TRAIN_EXTRA_ARGS itself — see
+    _render_launch_notebook(). *train_extra_only*/*eval_extra_only* are seed-free (unlike
+    *train_extra_args*/*eval_extra_args* above): the command template already spells the seed
+    flag itself."""
     data = _load_accounts()
     account = _find_account(data, account_name)
     if account is None:
@@ -700,9 +934,11 @@ def push_experiment_attempt(
         raise KaggleOpsError("config_path is required")
     try:
         cfg.read_config(config_path)  # raises if the config doesn't exist / isn't valid YAML
-        cli_config_path = cfg.repo_relative_path(config_path)
+        cli_config_path = cli_config or cfg.repo_relative_path(config_path)
     except (FileNotFoundError, ValueError) as e:
         raise KaggleOpsError(f"Config not found: {config_path} ({e})")
+    if overlay_yaml and not cli_config:
+        raise KaggleOpsError("An overlay needs the path it is written to (cli_config)")
 
     template_abs = settings.kaggle_default_template_file
     if not template_abs.is_file():
@@ -717,8 +953,10 @@ def push_experiment_attempt(
 
     dataset_source = next(iter(pseudo_worker["dataset_sources"]), "")
     push_bytes = _render_launch_notebook(
-        template_abs, cli_config_path, extra_args, dataset_source,
+        template_abs, cli_config_path, train_extra_args, dataset_source,
         budget_hours=budget, resume=resume, snapshot_source=snapshot_source,
+        eval_extra_args=eval_extra_args, code_commit=code_commit, overlay_yaml=overlay_yaml,
+        seed=seed, train_extra_only=train_extra_only, eval_extra_only=eval_extra_only,
     )
     push_name = template_abs.name
 
@@ -759,13 +997,25 @@ def refresh_experiment_status(account_name: str, kernel_slug: str) -> Dict[str, 
         return {"status": "unknown", "last_error": (proc.stderr or proc.stdout).strip()}
     m = STATUS_RE.search(proc.stdout)
     kaggle_status = _normalize_kaggle_status(m.group(1)) if m else "unknown"
-    return {"status": kaggle_status, "last_error": None}
+    # KAGGLE_API.md §1: a failed run prints a second line, `Failure message: "..."`, which the
+    # status regex above never read — the reason a run failed was dropped on the floor.
+    fm = FAILURE_RE.search(proc.stdout)
+    return {"status": kaggle_status, "last_error": fm.group(1).strip() if fm else None}
 
 
-def download_experiment(account_name: str, kernel_slug: str, results_dir: str) -> Dict[str, Any]:
+def download_experiment(
+    account_name: str, kernel_slug: str, results_dir: str, log_dir: Optional[Path] = None,
+) -> Dict[str, Any]:
     """Worker-less counterpart to download() — extracts into *results_dir* (already derived by
     the caller from the experiment_id) and reads xdash_status.json for diagnosis exactly like the
-    worker path does (§4.A7)."""
+    worker path does (§4.A7).
+
+    X9: `kernels output` also saves the kernel's own execution log as `<slug>.log` next to the
+    zips. It used to be deleted with the tmpdir; it is now copied into *log_dir* (the attempt's
+    data/<profile>/logs/<attempt_id>/) as `kaggle.log`, so a failed run is diagnosable from the
+    dashboard. Registration into the ledger is no longer done here — the caller canonicalizes the
+    planned run dir first (XDASH_PLAN.md §3.5) and registers the rows with their canonical
+    manifest paths."""
     data = _load_accounts()
     account = _find_account(data, account_name)
     if account is None:
@@ -778,9 +1028,20 @@ def download_experiment(account_name: str, kernel_slug: str, results_dir: str) -
         if proc.returncode != 0:
             detail = (proc.stderr or proc.stdout).strip()
             raise KaggleOpsError(f"Download failed for '{kernel_slug}': {detail}")
+        log_file = None
+        logs = sorted(Path(tmpdir).glob("*.log"))
+        if logs and log_dir is not None:
+            Path(log_dir).mkdir(parents=True, exist_ok=True)
+            log_file = Path(log_dir) / "kaggle.log"
+            shutil.copy2(logs[0], log_file)
         zips = list(Path(tmpdir).glob("*.zip"))
         if not zips:
-            raise KaggleOpsError(f"No output files found for '{kernel_slug}' — has the kernel finished?")
+            if log_file is not None:
+                # A kernel that died before packaging (e.g. the clone cell failed) ships no zip
+                # but still has a log — that log is exactly what diagnoses it, so this is an
+                # empty-but-successful download, not an error.
+                return {"results_dir": None, "log_file": str(log_file), "xdash_status": None}
+            raise KaggleNoOutputError(f"No output files found for '{kernel_slug}' — has the kernel finished?")
         results_dir_abs = (settings.repo_root / results_dir).resolve()
         repo_root = settings.repo_root.resolve()
         if repo_root not in results_dir_abs.parents and results_dir_abs != repo_root:
@@ -792,9 +1053,11 @@ def download_experiment(account_name: str, kernel_slug: str, results_dir: str) -
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
-    registered = results_ingest.register_ledger(results_dir_abs)
     xdash_status = results_ingest.read_xdash_status(results_dir_abs)
-    return {"results_dir": str(results_dir_abs), "registered_runs": registered, "xdash_status": xdash_status}
+    return {
+        "results_dir": str(results_dir_abs), "xdash_status": xdash_status,
+        "log_file": str(log_file) if log_file else None,
+    }
 
 
 # --------------------------------------------------------------------------- quota estimate
@@ -829,15 +1092,15 @@ def _attempts_from_store(path: Path) -> List[Dict[str, Any]]:
     """Every Attempt record out of a profile's experiments.json, read as plain
     JSON rather than through backend/experiments.py — that module imports this
     one to push, so a real import would be circular, and the four fields read
-    here (slot, status, started_at, unit_ref.results_dir) are a stable part of
-    the on-disk shape. Missing/corrupt file reads as "no attempts", never
-    raises: quota accounting degrading to 0 is survivable, a 500 on every
-    account list is not."""
-    if not path.exists():
-        return []
+    here (slot, status, started_at, unit_ref.results_dir, run.gpu_hours) are a
+    stable part of the on-disk shape. Missing file reads as "no attempts". A
+    corrupt one also degrades to "no attempts" here, deliberately — this may
+    be *another* profile's store, and quota accounting degrading to 0 is
+    survivable while a 500 on every account list is not; the owning
+    profile's own reads (backend/experiments.py) still fail loudly."""
     try:
-        data = json.loads(path.read_text())
-    except (ValueError, OSError):
+        data = JsonStore(path, dict).load()
+    except StoreCorruptError:
         return []
     attempts = data.get("attempts") if isinstance(data, dict) else None
     return list(attempts.values()) if isinstance(attempts, dict) else []
@@ -859,7 +1122,7 @@ def _iter_extracted_manifests(base_dir: Path, manifest_layout: str):
         if not base.is_dir():
             return
         seen = set()
-        for pattern in ("*/checkpoints/manifest.json", "*/checkpoints/fold*/manifest.json"):
+        for pattern in results_ingest.EXPERIMENTS_MANIFEST_GLOBS:
             for p in sorted(base.glob(pattern)):
                 if p.is_file() and p not in seen:
                     seen.add(p)
@@ -948,25 +1211,43 @@ def _usage_history_uncached(account_name: str, weeks: int) -> List[Dict[str, Any
     slot = "kaggle:%s" % account_name
     earliest = buckets[0]
     now = datetime.now(timezone.utc)
+
+    def add(start_time: Any, gpu_hours: Any) -> None:
+        if not start_time or not gpu_hours:
+            return
+        try:
+            started = datetime.fromisoformat(str(start_time))
+            hours = float(gpu_hours)
+        except (TypeError, ValueError):
+            return
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
+        if started < earliest:
+            return
+        bucket = _utc_week_start(started)
+        if bucket in totals:
+            totals[bucket] += hours
+
+    seen_manifests = set()
     for attempt, repo_root, manifest_layout in scoped:
         if attempt.get("slot") != slot:
             continue
-        results_dir = (attempt.get("unit_ref") or {}).get("results_dir")
-        if results_dir:
-            base_dir = (repo_root / results_dir).resolve()
-            for _p, _run_id, manifest in _iter_extracted_manifests(base_dir, manifest_layout):
-                start_time, gpu_hours = manifest.get("start_time"), manifest.get("gpu_hours")
-                if not start_time or not gpu_hours:
-                    continue
-                try:
-                    started = datetime.fromisoformat(start_time)
-                except ValueError:
-                    continue
-                if started < earliest:
-                    continue
-                bucket = _utc_week_start(started)
-                if bucket in totals:
-                    totals[bucket] += float(gpu_hours)
+        recorded = attempt.get("run") or {}
+        if recorded.get("gpu_hours") is not None:
+            # Recorded on the attempt when it was collected (XDASH_PLAN.md §3.5): the staging
+            # dir it used to be re-read from is deleted after canonicalization, and every leg of
+            # one run shares one canonical dir whose manifest only holds the latest leg's hours.
+            add(recorded.get("start_time"), recorded.get("gpu_hours"))
+        else:
+            results_dir = (attempt.get("unit_ref") or {}).get("results_dir")
+            if results_dir:
+                base_dir = (repo_root / results_dir).resolve()
+                for p, _run_id, manifest in _iter_extracted_manifests(base_dir, manifest_layout):
+                    # Two attempts of one experiment share a results_dir — count each manifest once.
+                    if p in seen_manifests:
+                        continue
+                    seen_manifests.add(p)
+                    add(manifest.get("start_time"), manifest.get("gpu_hours"))
 
         if attempt.get("status") in _RESERVING_STATUSES and attempt.get("started_at"):
             try:

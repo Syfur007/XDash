@@ -14,7 +14,13 @@ from _common import run_main  # noqa: E402
 
 
 def main(argv):
-    from orchestration.schema import Config
+    # New package layout first, old flat layout as a fallback — see
+    # XDASH_PROGRESS.md's Phase 2 section. The pydantic Config model moved from
+    # orchestration.schema to dissert.config.schema as part of the reorg.
+    try:
+        from dissert.config.schema import Config
+    except ImportError:
+        from orchestration.schema import Config
 
     return Config.model_json_schema()
 

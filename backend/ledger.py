@@ -15,12 +15,14 @@ XDash's dashboard state, so every caller must opt into it explicitly.
 from __future__ import annotations
 
 import csv
+import io
 import json
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from .config import settings
+from .store import atomic_write_text
 
 LEDGER_TABLES = ("runs", "compute", "test_evals", "stats")
 
@@ -42,17 +44,20 @@ def _iter_manifest_paths():
     """Yields every manifest.json on disk, in whichever shape this profile's
     manifest_layout uses (MULTI_REPO_PLAN.md §2/§3):
       "legacy"      artifacts/runs/<run_id>/manifest.json
-      "experiments" outputs/experiments/<experiment_id>/checkpoints/
-                    [fold{N}/]manifest.json — the directory manifest.json
-                    sits in is no longer named after run_id, so callers must
-                    key off the manifest's own run_id field, not p.parent.name.
+      "experiments" outputs/experiments/<experiment_name>/<hash7>-s<seed>/
+                    checkpoints/[fold{N}/]manifest.json (dissert since
+                    52477d1), plus the older flat <name>-s<seed>/checkpoints/
+                    shape — the directory manifest.json sits in is not named
+                    after run_id, so callers must key off the manifest's own
+                    run_id field, not p.parent.name.
     """
     if settings.manifest_layout == "experiments":
+        from .results_ingest import EXPERIMENTS_MANIFEST_GLOBS
         base = settings.experiments_dir
         if not base.is_dir():
             return
         seen = set()
-        for pattern in ("*/checkpoints/manifest.json", "*/checkpoints/fold*/manifest.json"):
+        for pattern in EXPERIMENTS_MANIFEST_GLOBS:
             for p in sorted(base.glob(pattern)):
                 if p.is_file() and p not in seen:
                     seen.add(p)
@@ -129,10 +134,11 @@ def delete_run(run_id: str) -> bool:
         fieldnames = list(rows[0].keys())
         kept = [r for r in rows if r.get("run_id") != run_id]
         if len(kept) != len(rows):
-            with open(runs_csv, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(kept)
+            buf = io.StringIO()
+            writer = csv.DictWriter(buf, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(kept)
+            atomic_write_text(runs_csv, buf.getvalue())
             removed = True
     return removed
 

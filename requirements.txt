@@ -3,7 +3,20 @@
 # pyarrow here: anything needing the host repo's real code and dependencies goes
 # through backend/bridge.py, which shells out to the host repo's own interpreter
 # instead (see IMPLEMENTATION_PLAN.md Phase 1 / design principle 3).
-Flask==2.2.5
-Werkzeug==2.2.3
+#
+# Flask 2.3.3 / Werkzeug 2.3.8 (was 2.2.5 / 2.2.3): Werkzeug 2.2's router builds
+# its URL functions with ast.Str, which Python 3.14 removed, so `import server`
+# failed outright in the xdash env (Python 3.14). 2.3.x still supports Python 3.8.
+Flask==2.3.3
+Werkzeug==2.3.8
 PyYAML>=5.4
 tensorboard>=2.9
+# XDASH_PLAN.md decision #9: PyYAML drops comments on write, and the profile YAML's
+# comments are its documentation (and Settings' help text) — ruamel.yaml round-trips
+# them. Used only by backend/profile_ops.py (GET/PATCH /api/profile, the migration
+# script); every other YAML read in this codebase keeps using plain PyYAML above.
+ruamel.yaml>=0.17
+
+# Dev only (not needed to run the dashboard): the test suite under tests/.
+#   conda run -n xdash python -m pytest tests -q
+pytest>=7

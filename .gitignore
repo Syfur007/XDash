@@ -4,6 +4,8 @@ data/*/terminals_state.json
 data/*/monitors.json
 data/*/scheduler.json
 data/*/dashboard_logs/
+# Per-attempt console logs (XDASH_PLAN.md §3.5): tmux panes, Kaggle <slug>.log.
+data/*/logs/
 data/*/kaggle_state.json
 data/*/kaggle_accounts.json
 data/*/kaggle_accounts/
@@ -32,6 +34,17 @@ data/colab_accounts/
 data/hosts.json
 data/.ssh-control/
 
+# backend/store.py: the last-good .bak of every store, the permanent
+# pre-migration copies (*.pre-v<N>.bak), and a crashed write's temp file.
+data/**/*.bak
+data/**/.*.tmp
+
+# backend/profile_ops.py: the private temp profile a PATCH/PUT validates against
+# before writing the real one — removed in a `finally` block; this only catches
+# one left behind by a hard crash mid-validation.
+repos/.validate_*.yaml
+
 __pycache__/
 *.pyc
 .venv/
+.pytest_cache/

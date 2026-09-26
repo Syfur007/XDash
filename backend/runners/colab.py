@@ -25,7 +25,7 @@ would make an idle Colab fleet slow to even list.
 """
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .. import colab
@@ -56,13 +56,24 @@ def _host_id_for(account_name: str) -> str:
     return "colab-%s" % account_name
 
 
-def _host_record(account_name: str, proxy_command: str = "") -> Dict[str, Any]:
+def _host_record(account_name: str, proxy_command: str = "", identity_file: str = "") -> Dict[str, Any]:
+    ssh: Dict[str, Any] = {
+        # Only an alias (ControlPath key, log label): ProxyCommand does the
+        # actual connecting. `root` is the only user on a Colab VM.
+        "host": _session_name(account_name), "user": "root", "proxy_command": proxy_command,
+        # Every `colab new` is a fresh VM with a fresh host key behind the
+        # same alias — see SshTransport._opts().
+        "options": ["StrictHostKeyChecking=no", "UserKnownHostsFile=/dev/null"],
+    }
+    if identity_file:
+        # The same key `colab ssh -i` announced to the VM (X5).
+        ssh["identity_file"] = identity_file
     return {
         "id": _host_id_for(account_name), "kind": "colab",
         "label": "Colab · %s" % account_name,
         "max_concurrent": 1,  # one ssh connection at a time — Colab-constraints table, not configurable
         "repos": {settings.profile_name: {"repo_root": _REMOTE_REPO_ROOT}},
-        "ssh": {"host": _session_name(account_name), "proxy_command": proxy_command},
+        "ssh": ssh,
     }
 
 
@@ -86,6 +97,11 @@ def _to_unit(account_name: str, runner_id: str, view: Dict[str, Any]) -> RunUnit
             "blocked": attempt.get("blocked"),
         },
     )
+
+
+# Usable memory of the GPUs `colab --gpu` can request (colab-cli-reference.md
+# lists T4 L4 G4 H100 A100). G4 is left unknown rather than guessed.
+_COLAB_VRAM_GB = {"T4": 15.0, "L4": 22.5, "A100": 40.0, "H100": 80.0}
 
 
 class ColabRunner(MachineRunner):
@@ -136,6 +152,15 @@ class ColabRunner(MachineRunner):
             extra={"volatile": True, "provisioned": live},
         )
 
+    def accelerator(self) -> Optional[Dict[str, Any]]:
+        """What this account asks Colab for (its `gpu`), with that GPU's
+        usable memory. Colab may grant less than asked — dispatch records
+        what it actually got on unit_ref.accelerator."""
+        account = colab.find_account(self.account_name) or {}
+        gpu = str(account.get("gpu") or settings.colab_default_gpu or "").upper()
+        vram = _COLAB_VRAM_GB.get(gpu)
+        return {"name": gpu or "unknown", "vram_gb": vram, "source": "account gpu (as requested)"} if gpu else None
+
     # ---------------------------------------------------------------- dispatch
     def can_accept(self, experiment: Dict[str, Any], est_hours: float) -> Optional[Dict[str, Any]]:
         """Colab-specific gates only — deliberately does NOT delegate to
@@ -150,17 +175,26 @@ class ColabRunner(MachineRunner):
         if account is None:
             return {"code": "no-account", "detail": "Account not found"}
 
-        from .. import dataset_map
-        required_dataset = dataset_map.resolve_kaggle_dataset(experiment["config_path"])
-        if required_dataset is None:
-            name, _explicit = dataset_map.config_dataset_identity(experiment["config_path"])
-            return {
-                "code": "no-dataset-mapping",
-                "detail": f"'{name}' has no Kaggle dataset mapping" if name else "Config declares no dataset",
-            }
+        # XDASH_PLAN.md §5, X4: Colab has no data of its own — every dispatch
+        # must resolve a binding (its kind default is `fetch` from a Kaggle
+        # source when the dataset declares one; §5.2's resolution order).
+        from .. import datasets
+        data = datasets.data_mode_for_experiment(experiment["config_path"], self.id, self.kind)
+        if not data.get("mode"):
+            return {"code": data.get("code", "no-dataset-binding"), "detail": data.get("detail", "")}
 
         if not colab.colab_available():
             return {"code": "host-unreachable", "detail": f"'{settings.colab_executable}' is not on PATH"}
+        if not colab.has_credentials(self.account_name, account):
+            return {
+                "code": "colab-not-connected",
+                "detail": "This account has no CLI login yet. Run once: %s" % colab.connect_command(self.account_name),
+            }
+        try:
+            colab.validate_gpu(account.get("gpu") or settings.colab_default_gpu)
+            colab.ssh_key_for(self.account_name)
+        except colab.ColabOpsError as e:
+            return {"code": "colab-misconfigured", "detail": str(e)}
         if self._busy():
             return {"code": "pool-busy", "detail": "This account's one Colab slot is in use"}
 
@@ -179,7 +213,7 @@ class ColabRunner(MachineRunner):
         completely unchanged for the actual push+launch."""
         account = colab.find_account(self.account_name) or {}
         result = colab.ensure_session(self.account_name, gpu=account.get("gpu", ""))
-        self.host = hosts.upsert_host(_host_record(self.account_name, result["proxy_command"]))
+        self.host = hosts.upsert_host(_host_record(self.account_name, result["proxy_command"], result.get("identity_file", "")))
         self._transport = transport_mod.for_host_record(self.host)
 
         patch = super().dispatch(experiment, attempt)
@@ -193,24 +227,38 @@ class ColabRunner(MachineRunner):
         this slot for colab_idle_grace_minutes and nothing is in flight on
         it now. A slot with no Attempt history at all (host record exists
         but was never dispatched through, e.g. a crash mid-provision) is
-        treated as immediately reapable rather than kept forever."""
-        if self._busy():
+        treated as immediately reapable rather than kept forever.
+
+        **Hard guard (XDASH_PLAN.md §6.6, X3):** never while any attempt on
+        this slot is uncollected — in flight, or finished with its outputs
+        still only on the VM (`collect.state == "pending"`). `colab stop`
+        deletes the VM's disk; before this guard, it deleted every Colab
+        run's outputs, because nothing ever collected them first. A VM held
+        by a collection that keeps failing stays up (and is notified about);
+        the manual Stop button (/api/colab/accounts/<n>/stop) is the
+        deliberate way out."""
+        from .. import experiments
+        if experiments.slot_has_uncollected(self.id):
             return
         host_id = _host_id_for(self.account_name)
         if not hosts.host_exists(host_id):
             return
 
-        from .. import experiments
-        timestamps = [
-            a.get("ended_at") or a.get("started_at")
-            for a in experiments.attempts_for_slot(self.id)
-            if a.get("ended_at") or a.get("started_at")
-        ]
-        if timestamps:
+        timestamps = []
+        for a in experiments.attempts_for_slot(self.id):
+            stamp = a.get("ended_at") or a.get("started_at")
+            if not stamp:
+                continue
             try:
-                idle_minutes = (datetime.now() - datetime.fromisoformat(max(timestamps))).total_seconds() / 60.0
+                parsed = datetime.fromisoformat(stamp)
             except ValueError:
-                idle_minutes = float("inf")
+                continue
+            # Attempt timestamps are UTC-aware (experiments._now_iso()); the
+            # previous naive datetime.now() subtraction raised TypeError,
+            # which the poll loop swallowed — no VM was ever reaped.
+            timestamps.append(parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc))
+        if timestamps:
+            idle_minutes = (datetime.now(timezone.utc) - max(timestamps)).total_seconds() / 60.0
         else:
             idle_minutes = float("inf")
 

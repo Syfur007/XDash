@@ -23,11 +23,13 @@ def _importable(module_name: str) -> bool:
 
 
 def main(argv):
+    # Each checks the new src/dissert/ package path first, old flat layout
+    # second — see XDASH_PROGRESS.md's Phase 2 section for the switch-over.
     return {
-        "orchestration": _importable("orchestration.schema"),
-        "models": _importable("models.registry"),
-        "metrics": _importable("metrics.aggregate"),
-        "datasets": _importable("datasets.channels"),
+        "orchestration": _importable("dissert.config.schema") or _importable("orchestration.schema"),
+        "models": _importable("dissert.models.registry") or _importable("models.registry"),
+        "metrics": _importable("dissert.metrics.aggregate") or _importable("metrics.aggregate"),
+        "datasets": _importable("dissert.datasets.channels") or _importable("datasets.channels"),
         "pandas": _importable("pandas"),
     }
 

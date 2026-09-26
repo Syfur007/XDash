@@ -21,14 +21,47 @@ an eligibility check and its own rejection reason are the same computation.
 """
 from __future__ import annotations
 
+import shutil
 from datetime import timedelta
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .. import framework
 from .. import kaggle as kaggle_backend
-from .base import CapacitySnapshot, LaunchSpec, Runner, RunnerCapabilities, RunnerCapabilityError, RunUnit
+from ..config import settings
+from .base import (
+    CapacitySnapshot, LaunchSpec, Runner, RunnerBlocked, RunnerCapabilities, RunnerCapabilityError, RunUnit,
+)
 from .registry import slot_id
 
 RUNNER_KIND = "kaggle"
+
+# What a failed kernel's log or `Failure message` says, mapped to a code the
+# user can act on (XDASH_PLAN.md §4.5). Neither is retried automatically: a
+# retry would fail identically and burn another push's setup time.
+_SECRET_MISSING_TEXT = "No user secrets exist"
+# Printed by the template's clone cell when the pinned commit isn't on GitHub.
+_CODE_MISSING_MARKER = "XDASH_CODE_COMMIT_NOT_FOUND"
+
+
+def _code_block(code: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """`code-not-pushed` for a tree a fresh GitHub clone would not reproduce,
+    None when it would (or when the profile's allow_unpushed accepts the
+    difference)."""
+    if framework.code_is_pinnable(code) or settings.allow_unpushed:
+        return None
+    if not code.get("commit"):
+        why = "the host repo's commit couldn't be read (%s)" % (code.get("error") or "not a git repo")
+    elif code.get("dirty"):
+        why = "the host repo has uncommitted changes to tracked files"
+    else:
+        why = "commit %s is not on any remote branch" % str(code["commit"])[:7]
+    return {
+        "code": "code-not-pushed",
+        "detail": "Kaggle clones the repo from GitHub, but %s — it would run different code." % why,
+        "action": "Commit and push the host repo, then retry (or set allow_unpushed: true in the profile).",
+        "commit": code.get("commit"),
+    }
 
 # Confirmed against the current official `kaggle` CLI (Kaggle/kaggle-cli,
 # 2026 — DASHBOARD_REDESIGN_PLAN.md §2.1's fact-check): `kernels` has no
@@ -148,6 +181,12 @@ class KaggleRunner(Runner):
             },
         )
 
+    def accelerator(self) -> Optional[Dict[str, Any]]:
+        # The kernel metadata asks for "a GPU"; Kaggle grants a T4 (15 GB,
+        # two of them) or a P100 (16 GB). The smaller one is what a
+        # requirement can count on. Phase 5 (CLI 2.x) can request one.
+        return {"name": "Kaggle GPU (T4 or P100)", "vram_gb": 15.0, "source": "platform"}
+
     # ---------------------------------------------------------------- dispatch
     def can_accept(self, experiment: Dict[str, Any], est_hours: float) -> Optional[Dict[str, Any]]:
         """Both selects (None = eligible) and explains (the block code) in
@@ -161,14 +200,19 @@ class KaggleRunner(Runner):
         if account is None:
             return {"code": "no-account", "detail": "Account not found"}
 
-        from .. import dataset_map
-        required_dataset = dataset_map.resolve_kaggle_dataset(experiment["config_path"])
-        if required_dataset is None:
-            name, _explicit = dataset_map.config_dataset_identity(experiment["config_path"])
-            return {
-                "code": "no-dataset-mapping",
-                "detail": f"'{name}' has no Kaggle dataset mapping" if name else "Config declares no dataset",
-            }
+        # XDASH_PLAN.md §5, X4 — `attach` is Kaggle's kind default; the slug
+        # itself still comes from dataset_map.resolve_kaggle_dataset()'s
+        # existing §3.4 precedence (a config's own dataset.kaggle_dataset,
+        # then dataset_map.json, then the profile yaml), via datasets.py's
+        # own fallback to it.
+        from .. import datasets
+        data = datasets.data_mode_for_experiment(experiment["config_path"], self.id, self.kind)
+        if not data.get("mode"):
+            return {"code": data.get("code", "no-dataset-binding"), "detail": data.get("detail", "")}
+
+        block = _code_block(framework.code_state())
+        if block is not None:
+            return block
 
         if self._busy():
             return {"code": "pool-busy", "detail": "This account is currently busy"}
@@ -231,20 +275,54 @@ class KaggleRunner(Runner):
         if snapshot_slug:
             dataset_sources.append(snapshot_slug)
 
+        # X6: pin the exact commit recorded on the attempt at dispatch. A fresh
+        # look, not can_accept()'s cached one — the tree may have changed since.
+        code = attempt.get("code") or framework.code_state(fresh=True)
+        block = _code_block(code)
+        if block is not None:
+            raise RunnerBlocked(block)
+        pinned = code["commit"] if code.get("commit") and code.get("pushed") else ""
+        warnings = []
+        if not framework.code_is_pinnable(code):
+            # Only reachable with allow_unpushed: the block is downgraded to a
+            # warning recorded on the attempt (§4.5).
+            warnings.append({
+                "code": "code-not-pushed",
+                "detail": "Kaggle runs %s, not the local tree (dirty=%s, pushed=%s)" % (
+                    ("pushed commit %s" % pinned[:7]) if pinned else "the default branch's HEAD",
+                    code.get("dirty"), code.get("pushed"),
+                ),
+            })
+
+        # Legacy, seed-inclusive extras (XDASH_PLAN.md X12) — still substituted into
+        # TRAIN_EXTRA_ARGS/EVAL_EXTRA_ARGS for a template that predates TRAIN_CMD/
+        # EVAL_CMD (e.g. data/segpriors/kaggle_worker_template.ipynb).
+        train_args, eval_args = framework.stage_args(experiment)
+        # Seed-free extras (§4.1) — what render_command()'s `{extra}` wants, since
+        # its own template already spells the seed flag.
+        train_extra, eval_extra = framework.extra_only(experiment)
         account = self._account() or {}
+        # XDASH_PLAN.md §4.3: the overlay travels inside the launch spec
+        # (OVERLAY_YAML), and the template writes it to CONFIG_PATH — the
+        # same repo-relative path it has everywhere — right after the clone.
         result = kaggle_backend.push_experiment_attempt(
             self.account_name, experiment["experiment_id"], experiment["config_path"],
-            experiment.get("extra_args") or "", dataset_sources,
+            train_args, dataset_sources,
             budget_hours=self._session_cap_hours(account),
             resume=bool(attempt.get("resume_of")),
             snapshot_source=snapshot_slug,
+            eval_extra_args=eval_args, code_commit=pinned,
+            cli_config=framework.cli_config(experiment), overlay_yaml=framework.overlay_text(experiment),
+            seed=experiment.get("seed"), train_extra_only=train_extra, eval_extra_only=eval_extra,
         )
         return {
             "unit_ref": {
                 "account": self.account_name, "snapshot_slug": snapshot_slug or None,
                 "kernel_slug": result["kernel_slug"], "results_dir": result["results_dir"],
+                "code_commit": pinned or None,
             },
             "stages": [{"name": "run", "status": "running"}],
+            "warnings": warnings,
         }
 
     def poll(self, attempt: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -262,17 +340,57 @@ class KaggleRunner(Runner):
             "stages": [{"name": "run", "status": raw or "unknown"}],
             "finished": finished,
             "succeeded": (raw == "complete") if finished else None,
+            "failure_message": result.get("last_error"),
         }
 
     def collect(self, attempt: Dict[str, Any]) -> Optional[str]:
+        """Downloads the kernel's output into its staging dir
+        (unit_ref.results_dir) and keeps its execution log and
+        xdash_status.json under data/<profile>/logs/<attempt_id>/ (X9) —
+        the staging dir is deleted once canonicalized. Always returns the
+        staging dir (possibly empty: a kernel that died before packaging
+        ships only a log). Raises KaggleOpsError on a download failure, so
+        the dispatcher retries instead of resolving without the outputs."""
         unit_ref = attempt.get("unit_ref") or {}
         if not unit_ref.get("kernel_slug"):
             return None
+        staging = settings.repo_root / unit_ref["results_dir"]
+        log_dir = settings.attempt_log_dir(attempt["attempt_id"])
         try:
-            result = kaggle_backend.download_experiment(unit_ref["account"], unit_ref["kernel_slug"], unit_ref["results_dir"])
-        except kaggle_backend.KaggleOpsError:
-            return None
-        return result.get("results_dir")
+            result = kaggle_backend.download_experiment(
+                unit_ref["account"], unit_ref["kernel_slug"], unit_ref["results_dir"], log_dir=log_dir,
+            )
+        except kaggle_backend.KaggleNoOutputError:
+            staging.mkdir(parents=True, exist_ok=True)
+            return str(staging)
+        status_file = staging / "outputs" / "xdash_status.json"
+        if status_file.is_file():
+            shutil.copy2(str(status_file), str(Path(log_dir) / "xdash_status.json"))
+        staging.mkdir(parents=True, exist_ok=True)
+        return result.get("results_dir") or str(staging)
+
+    def diagnose(self, attempt: Dict[str, Any], live: Dict[str, Any], log_texts: List[str]) -> Optional[Dict[str, Any]]:
+        text = "\n".join([live.get("failure_message") or ""] + list(log_texts))
+        unit_ref = attempt.get("unit_ref") or {}
+        account = unit_ref.get("account") or self.account_name
+        if _SECRET_MISSING_TEXT in text:
+            return {
+                "code": "kaggle-secret-missing",
+                "detail": (
+                    "This account's kernel has no GITHUB_TOKEN secret attached. Kaggle only allows "
+                    "attaching secrets in its web editor (Add-ons → Secrets), once per kernel."
+                ),
+                "action_url": kaggle_backend.kernel_url(account, unit_ref.get("kernel_slug"), edit=True),
+                "retry": False,
+            }
+        if _CODE_MISSING_MARKER in text:
+            return {
+                "code": "code-not-pushed",
+                "detail": "The kernel's clone doesn't contain commit %s — push it, then retry."
+                          % str(unit_ref.get("code_commit") or "?")[:7],
+                "retry": False,
+            }
+        return None
 
     def cancel(self, attempt: Dict[str, Any]) -> bool:
         # No cooperative stop exists (see the class's stop()/kill() above) —

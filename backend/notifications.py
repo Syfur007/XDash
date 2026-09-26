@@ -24,6 +24,7 @@ from email.mime.text import MIMEText
 from typing import Any, Dict
 
 from .config import settings
+from .store import JsonStore
 
 
 class NotificationError(Exception):
@@ -73,14 +74,16 @@ def _default_notifications() -> Dict[str, Any]:
     }
 
 
+# 0o600: this file holds bot tokens, webhook URLs and an SMTP password. The
+# mode is applied to the temp file before the atomic rename, so the real file
+# never exists world-readable, not even for an instant.
+_store = JsonStore(lambda: settings.notifications_file, dict, mode=0o600)
+
+
 def _load_notifications() -> Dict[str, Any]:
-    path = settings.notifications_file
     merged = _default_notifications()
-    if not path.exists():
-        return merged
-    try:
-        stored = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+    stored = _store.load()
+    if not isinstance(stored, dict):
         return merged
     for channel, cfg in merged.items():
         if isinstance(stored.get(channel), dict):
@@ -89,15 +92,7 @@ def _load_notifications() -> Dict[str, Any]:
 
 
 def _save_notifications(data: Dict[str, Any]) -> None:
-    path = settings.notifications_file
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    tmp.replace(path)
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass
+    _store.save(data)
 
 
 def get_notification_settings() -> Dict[str, Any]:

@@ -19,7 +19,6 @@ original case at load, so a mixed-case key never matched the lower-cased
 lookup)."""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -27,6 +26,11 @@ import yaml
 
 from . import configs as cfg
 from .config import settings
+from .store import JsonStore
+
+# No default of its own: "file absent" means "fall back to the profile yaml's
+# kaggle_dataset_map" (rule 3), which load_dataset_map() handles itself.
+_store = JsonStore(lambda: settings.dataset_map_file, lambda: None, sort_keys=True)
 
 
 def _load_config_yaml(path: Path) -> Optional[Dict[str, Any]]:
@@ -94,13 +98,9 @@ def load_dataset_map() -> Dict[str, str]:
     """XDash-owned name->slug map (§3.4 rule 2), falling back to the profile
     yaml's kaggle_dataset_map (rule 3) until data/<profile>/dataset_map.json
     exists."""
-    if settings.dataset_map_file.exists():
-        try:
-            data = json.loads(settings.dataset_map_file.read_text())
-        except (OSError, json.JSONDecodeError):
-            data = None
-        if data is not None:
-            return _normalize_map(data)
+    data = _store.load()
+    if data is not None:
+        return _normalize_map(data)
     return dict(settings.kaggle_dataset_map)
 
 
@@ -109,7 +109,7 @@ def save_dataset_map(entries: Dict[str, str]) -> Dict[str, str]:
     editor (Phase C) sends the full map back on every save, same shape
     load_dataset_map() returns, so there's no partial-update ambiguity."""
     normalized = _normalize_map(entries)
-    settings.dataset_map_file.write_text(json.dumps(normalized, indent=2, sort_keys=True))
+    _store.save(normalized)
     return normalized
 
 
@@ -134,12 +134,7 @@ def map_with_provenance() -> List[Dict[str, Any]]:
     "with provenance per entry"). A name present in the profile yaml but
     overridden in dataset_map.json reports "dataset_map", not "profile
     default", since that's the value actually in effect."""
-    file_map = {}
-    if settings.dataset_map_file.exists():
-        try:
-            file_map = _normalize_map(json.loads(settings.dataset_map_file.read_text()))
-        except (OSError, json.JSONDecodeError):
-            file_map = {}
+    file_map = _normalize_map(_store.load())
     profile_map = dict(settings.kaggle_dataset_map)
     names = sorted(set(file_map) | set(profile_map))
     out = []

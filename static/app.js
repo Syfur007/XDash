@@ -3,7 +3,12 @@
 // No build step, no framework: plain fetch + DOM + CodeMirror + Chart.js.
 // ============================================================================
 
-const LOWER_IS_BETTER = new Set(["hd95", "asd", "mean_ms", "median_ms", "std_ms", "p95_ms", "eval_duration_s", "ece"]);
+// XDASH_PLAN.md §4.1: the profile's own metrics.lower_is_better (repos/<profile>.yaml)
+// is the source of truth as of Phase 2 — loadSystem() below replaces this Set's contents
+// from GET /api/system once the profile answers. This literal stays as the fallback for
+// a profile that hasn't declared one (metrics.lower_is_better defaults to exactly this
+// list server-side too — backend/config.py), so nothing changes before that first load.
+let LOWER_IS_BETTER = new Set(["hd95", "asd", "mean_ms", "median_ms", "std_ms", "p95_ms", "eval_duration_s", "ece"]);
 const RADAR_METRICS = ["dice", "miou", "precision", "recall", "specificity", "f2", "accuracy"];
 const HIGHER_IS_BETTER = new Set(RADAR_METRICS);
 const CHART_COLORS = ["#F5A623", "#4FD1C5", "#E5484D", "#8C97B0", "#7C9CF5", "#C77DFF"];
@@ -236,7 +241,11 @@ function showConfirm(title, body) {
 function initNav() {
   document.querySelectorAll(".nav-item").forEach((item) => {
     item.addEventListener("click", () => {
-      switchView(item.dataset.view);
+      // Bare reference to a function defined in js/lib/router.js, a later
+      // <script> tag — safe because this only runs at click time, long
+      // after every script has loaded (XDASH_PLAN.md §8: nav goes through
+      // the hash router so the URL always reflects what's on screen).
+      navigateToView(item.dataset.view);
       closeSidebar();
     });
   });
@@ -316,10 +325,21 @@ function switchView(view) {
   document.querySelectorAll(".nav-item").forEach((el) => el.classList.toggle("active", el.dataset.view === view));
   document.querySelectorAll(".view").forEach((el) => el.classList.toggle("active", el.id === `view-${view}`));
   if (view === "lab") { loadLab(); startLabPolling(); } else { stopLabPolling(); }
-  if (view === "data") loadDataView();
-  if (view === "compute") { loadComputeCapacity(); }
-  if (view === "experiments") { loadSpine(); loadExperimentsKaggleActive(); loadExperimentsOtherRepos(); }
-  if (view === "settings") { renderSettings(); loadTemplates(); loadKaggleNotifications(); }
+  if (view === "data") { loadDataView(); loadDatasetsScreen(); }
+  if (view === "compute") { loadComputeCapacity(); loadRuntimeBoard(); startComputeBoardPolling(); }
+  else { stopComputeBoardPolling(); }
+  // XDASH_PLAN.md Phase 3: the old flat spine table (loadSpine) is retired —
+  // js/screens/experiments2.js owns the Experiments screen now. Sessions'
+  // glance (also-running-on-Kaggle / also-running-under-other-repos) is kept
+  // as-is (js/views/experiments.js), since it's still a live subtab there.
+  if (view === "experiments") { loadExperiments2Screen(); loadExperimentsKaggleActive(); loadExperimentsOtherRepos(); }
+  else { stopExperiments2Polling(); }
+  if (view === "settings") { renderSettings(); loadTemplates(); loadKaggleNotifications(); loadProfileScreen(); }
+  else { stopProfileMtimePolling(); }
+  // Leaving via the ordinary nav also leaves the Experiment page, wherever
+  // it was reached from (its own route bypasses switchView() entirely — see
+  // js/lib/router.js's handleRoute()).
+  stopExperimentDetailPolling();
 }
 
 async function loadTemplates() {
@@ -401,6 +421,8 @@ function switchToSubtab(view, stripId, key) {
 // ---------------------------------------------------------------- system info
 async function loadSystem() {
   state.system = await api("/api/system");
+  const lowerIsBetter = state.system.metrics && state.system.metrics.lower_is_better;
+  if (Array.isArray(lowerIsBetter)) LOWER_IS_BETTER = new Set(lowerIsBetter);
   document.getElementById("footer-repo").textContent = state.system.repo_root;
   document.getElementById("tb-logdir").textContent = state.system.runs_dir;
   document.getElementById("history-logdir").textContent = historySourceDir();
@@ -581,6 +603,7 @@ async function selectConfig(path) {
   if (!state.runTargetsLoaded) populateRunTargetSelect();
   document.getElementById("btn-save-config").disabled = false;
   document.getElementById("btn-toggle-resolved").disabled = false;
+  document.getElementById("btn-config-create-experiments").disabled = false;
   // Switching configs always drops back to the raw view — a stale resolved
   // preview left over from the previously selected file would be actively
   // misleading, not just outdated.
@@ -755,7 +778,7 @@ async function runConfig() {
       method: "POST",
       body: JSON.stringify({
         configs: [state.selectedConfigPath], seeds: [null],
-        extra_args, pool: "kaggle_only",
+        extra_args, pool: "kaggle_only", then: "queue",  // POST creates drafts since XDASH_PLAN.md Phase 1
       }),
     });
     const first = (created || [])[0];
@@ -2759,8 +2782,18 @@ async function boot() {
   // Lab is the default landing view (XDASH_V2_PLAN.md §6.3) — unlike the Overview tab it
   // replaces, it must actually have data the instant the page opens, not only after a manual
   // tab switch away and back (switchView() is what every other tab relies on for its first load).
-  loadLab();
-  startLabPolling();
+  // Phase 3: js/lib/router.js's initRouter() runs synchronously while this function is still
+  // awaiting its own fetches above (classic <script> tags after this one have long since run
+  // by the time a real network round-trip resolves), so by this point handleRoute() has
+  // already painted whatever view a non-default #/... URL asked for and called that view's
+  // own loader — calling loadLab()/startLabPolling() unconditionally here would silently
+  // re-enable Lab's polling loop underneath a different visible screen. Only fire it as this
+  // function's own fallback when the route really did resolve to Lab (including a plain
+  // reload with no hash at all, which js/lib/router.js also treats as #/lab).
+  if (document.getElementById("view-lab").classList.contains("active")) {
+    loadLab();
+    startLabPolling();
+  }
 }
 
 boot();

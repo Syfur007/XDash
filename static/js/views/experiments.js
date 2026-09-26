@@ -85,8 +85,8 @@ async function loadExperimentsOtherRepos() {
   }).join("");
 }
 
-function initExperimentsSubtabs() {
-  initSubtabStrip("experiments-subtabs", () => {});
-}
-
-initExperimentsSubtabs();
+// The experiments-subtabs strip itself (Experiments/Configs/Compare/Sessions)
+// is wired by js/screens/experiments2.js, which owns the new Experiments
+// screen this phase (XDASH_PLAN.md Phase 3) — that's also where the
+// "sessions" subtab's onOpen calls loadExperimentsKaggleActive()/
+// loadExperimentsOtherRepos() (the two functions above) from.

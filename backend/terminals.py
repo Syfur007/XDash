@@ -23,7 +23,6 @@ repo, it does not redefine what that repo's scripts are.
 """
 from __future__ import annotations
 
-import json
 import re
 import threading
 import time
@@ -38,6 +37,7 @@ from . import tmux_runner as tmux
 from . import reports
 from . import monitors
 from .log_parser import parse_log_text
+from .store import JsonStore
 
 _lock = threading.Lock()
 
@@ -55,17 +55,15 @@ def _host_id_of(record: Dict[str, Any]) -> str:
 
 
 # ------------------------------------------------------------------ storage
+_store = JsonStore(lambda: settings.state_file, list)
+
+
 def _load() -> List[Dict[str, Any]]:
-    if not settings.state_file.exists():
-        return []
-    try:
-        return json.loads(settings.state_file.read_text())
-    except Exception:
-        return []
+    return _store.load()
 
 
 def _save(records: List[Dict[str, Any]]):
-    settings.state_file.write_text(json.dumps(records, indent=2))
+    _store.save(records)
 
 
 # -------------------------------------------------------------------- start
@@ -74,17 +72,37 @@ def _slugify(name: str) -> str:
     return slug[:40] or "run"
 
 
-def _start_session(session_name: str, config_path: str, mode: str, extra_args: str, host: "hosts._Host") -> str:
+def _start_session(
+    session_name: str, config_path: str, mode: str, extra_args: str, host: "hosts._Host",
+    cli_config: Optional[str] = None, full_command: Optional[str] = None,
+) -> str:
     """Creates the tmux session and types the launch command. Returns the
     exact command string that was run (for display). Repo facts come from
     the active profile; machine facts come from *host* (identical to the
-    profile's own for the local host, since that's what it falls back to)."""
-    script = settings.train_script if mode == "train" else settings.eval_script
-    extra_flags = list(settings.eval_default_args) if mode == "eval" else []
-    cli_config_path = cfg.repo_relative_path(config_path)
-    launch_cmd = tmux.build_launch_command(
-        host.python_executable, script, cli_config_path, extra_flags, extra_args
-    )
+    profile's own for the local host, since that's what it falls back to).
+
+    *cli_config* (repo-relative) replaces *config_path* on the command line
+    only — an experiment's overlay file (XDASH_PLAN.md §4.3), which lives
+    outside configs_dir. *config_path* stays the record's identity (name,
+    display, re-validation).
+
+    *full_command* (XDASH_PLAN.md §4.1/§4.5), when given, is used verbatim
+    instead of building one from script/config/extra_flags/extra_args — the
+    Experiment dispatcher's `framework.render_command()` output, so every
+    runtime kind (this one included) launches the exact command line the
+    profile's `commands.<mode>` template renders. None for every caller that
+    predates the commands templates (the Configs page's ad-hoc "Launch in
+    terminal"/"Add to schedule" actions) — those keep building the command
+    the old way, unchanged."""
+    if full_command:
+        launch_cmd = full_command
+    else:
+        script = settings.train_script if mode == "train" else settings.eval_script
+        extra_flags = list(settings.eval_default_args) if mode == "eval" else []
+        cli_config_path = cli_config or cfg.repo_relative_path(config_path)
+        launch_cmd = tmux.build_launch_command(
+            host.python_executable, script, cli_config_path, extra_flags, extra_args
+        )
     marker = marker_for(session_name)
 
     tmux.new_session(session_name, host_id=host.id)
@@ -95,18 +113,24 @@ def _start_session(session_name: str, config_path: str, mode: str, extra_args: s
     return launch_cmd
 
 
-def launch(config_path: str, mode: str, extra_args: str = "", host_id: Optional[str] = None) -> Dict[str, Any]:
+def launch(
+    config_path: str, mode: str, extra_args: str = "", host_id: Optional[str] = None,
+    cli_config: Optional[str] = None, full_command: Optional[str] = None,
+) -> Dict[str, Any]:
     cfg.read_config(config_path)  # raises FileNotFoundError / ValueError if bad
     host = hosts.get_host(host_id)
     experiment_name = cfg.get_experiment_name(config_path)
     session_name = f"{host.tmux_session_prefix}_{_slugify(experiment_name)}_{uuid.uuid4().hex[:6]}"
 
-    command = _start_session(session_name, config_path, mode, extra_args, host)
+    command = _start_session(session_name, config_path, mode, extra_args, host,
+                              cli_config=cli_config, full_command=full_command)
 
     record = {
         "session_name": session_name,
         "host_id": host.id,
         "config_path": config_path,
+        "cli_config": cli_config,
+        "full_command": full_command,
         "mode": mode,
         "extra_args": extra_args.strip(),
         "experiment_name": experiment_name,
@@ -143,7 +167,10 @@ def restart(session_name: str) -> Dict[str, Any]:
             tmux.kill_session(session_name, host_id=host.id)
 
         cfg.read_config(record["config_path"])  # re-validate the config still exists
-        command = _start_session(session_name, record["config_path"], record["mode"], record["extra_args"], host)
+        command = _start_session(
+            session_name, record["config_path"], record["mode"], record["extra_args"], host,
+            cli_config=record.get("cli_config"), full_command=record.get("full_command"),
+        )
         record["command"] = command
         record["created_at"] = _now()
         record["restart_count"] = record.get("restart_count", 0) + 1

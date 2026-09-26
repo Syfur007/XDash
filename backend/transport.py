@@ -17,15 +17,16 @@ from __future__ import annotations
 import shlex
 import subprocess
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 from . import hosts
+from .config import DATA_DIR
 
 # Multiplexing is not an optimization here, it is a correctness requirement:
 # a second concurrent `colab ssh` returns HTTP 429, so every connection to a
 # given host must share one master. ControlPersist keeps it warm between the
 # poll loop's frequent short commands.
-_CONTROL_DIR = hosts.DASHBOARD_DIR / "data" / ".ssh-control"
+_CONTROL_DIR = DATA_DIR / ".ssh-control"
 _SSH_BASE_OPTS = [
     "-o", "ControlMaster=auto",
     "-o", "ControlPersist=10m",
@@ -67,8 +68,30 @@ class Transport:
     def pull(self, remote_dir, local_dir, excludes: Sequence[str] = ()) -> None:
         raise NotImplementedError
 
+    def pull_file(self, remote_path, local_path) -> None:
+        raise NotImplementedError
+
+    def exists(self, remote_path, kind: str = "d") -> bool:
+        """Is there a directory (*kind* "d") or file ("f") at *remote_path*?
+        Raises TransportError when the host can't be asked — "can't tell" must
+        never read as "not there", or a collection would record a real run as
+        empty."""
+        raise NotImplementedError
+
     def available(self) -> bool:
         raise NotImplementedError
+
+
+def remote_shell_path(path) -> str:
+    """*path* quoted for a remote POSIX shell, keeping a leading `~/`
+    unquoted so the remote shell still expands it (a Colab host's repo_root
+    is `~/xdash-repo`)."""
+    text = str(path)
+    if text == "~":
+        return "~"
+    if text.startswith("~/"):
+        return "~/" + shlex.quote(text[2:])
+    return shlex.quote(text)
 
 
 class LocalTransport(Transport):
@@ -100,6 +123,13 @@ class LocalTransport(Transport):
     def pull(self, remote_dir, local_dir, excludes: Sequence[str] = ()) -> None:
         return None
 
+    def pull_file(self, remote_path, local_path) -> None:
+        return None
+
+    def exists(self, remote_path, kind: str = "d") -> bool:
+        p = Path(remote_path).expanduser()
+        return p.is_dir() if kind == "d" else p.is_file()
+
     def available(self) -> bool:
         return True
 
@@ -120,7 +150,16 @@ class SshTransport(Transport):
     def _opts(self) -> List[str]:
         ssh = self._host.ssh
         _CONTROL_DIR.mkdir(parents=True, exist_ok=True)
-        opts = list(_SSH_BASE_OPTS)
+        # Per-record `-o Key=Value` options go FIRST: ssh keeps the first
+        # value it sees for each option, so anything after the base options
+        # couldn't override them. A Colab VM needs StrictHostKeyChecking=no +
+        # UserKnownHostsFile=/dev/null: every `colab new` is a fresh VM with a
+        # fresh host key behind the same alias, which the base accept-new
+        # would refuse as a changed identity.
+        opts: List[str] = []
+        for opt in ssh.get("options") or []:
+            opts += ["-o", str(opt)]
+        opts += list(_SSH_BASE_OPTS)
         opts += ["-o", "ControlPath=%s/%%r@%%h-%%p" % _CONTROL_DIR]
         if ssh.get("port"):
             opts += ["-p", str(ssh["port"])]
@@ -191,11 +230,57 @@ class SshTransport(Transport):
             excludes, delete=False, timeout=timeout,
         )
 
+    def pull_file(self, remote_path, local_path, timeout: float = 300.0) -> None:
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        self._rsync("%s:%s" % (self._target(), str(remote_path)), str(local_path), (), delete=False, timeout=timeout)
+
+    def exists(self, remote_path, kind: str = "d") -> bool:
+        flag = "-d" if kind == "d" else "-f"
+        proc = self.run(["sh", "-c", "test %s %s" % (flag, remote_shell_path(remote_path))], timeout=60)
+        if proc.returncode in (0, 1):
+            return proc.returncode == 0
+        raise TransportError(
+            "Could not check %s on '%s' (exit %s): %s"
+            % (remote_path, self.host_id, proc.returncode, (proc.stderr or proc.stdout).strip()[-300:])
+        )
+
     def available(self) -> bool:
         try:
             return self.run(["true"], timeout=15).returncode == 0
         except TransportError:
             return False
+
+
+class _AdHocSshHost:
+    """Just enough of hosts._Host's surface (`id`, `is_local`, `ssh`) for
+    SshTransport, for a host that doesn't exist as a saved record yet —
+    the Add-runtime wizard's live test (XDASH_PLAN.md §8.4), which must be
+    able to fail *before* anything is persisted."""
+
+    is_local = False
+
+    def __init__(self, ssh: Dict[str, Any]):
+        self.id = "test"
+        self._ssh = dict(ssh or {})
+
+    @property
+    def ssh(self) -> Dict[str, Any]:
+        return self._ssh
+
+
+def test_ssh_connection(ssh: Dict[str, Any]) -> Dict[str, Any]:
+    """Ad-hoc reachability check for a not-yet-saved SSH config — the
+    Add-runtime wizard's live test gate. A real `ssh true` over the network
+    when actually called; tests patch `SshTransport.run`/`subprocess.run`,
+    never point this at a real host."""
+    if not (ssh or {}).get("host"):
+        return {"ok": False, "detail": "ssh.host is required"}
+    t = SshTransport(_AdHocSshHost(ssh))
+    reachable = t.available()
+    return {
+        "ok": reachable,
+        "detail": "reachable" if reachable else "ssh failed — check host/user/port/identity_file",
+    }
 
 
 def for_host_record(host) -> Transport:

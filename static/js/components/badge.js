@@ -27,6 +27,9 @@ const STATUS_BADGE_CLASS = {
   blocked: "red",
   dispatching: "amber",
   cancelled: "slate",
+  // XDASH_PLAN.md Phase 1 — an experiment with no attempt yet (a planned run); `queued` (below,
+  // shared with Kaggle's own word) replaced the attempt status `pending`.
+  draft: "slate",
   // backend/runners/base.py's CANONICAL_STATUSES entries this map was still missing
   // (Multi_runner_XDash.md Phase 6) — "interrupted" grouped with failed/stopped to match
   // .entity-card-accent.interrupted's own red already in styles.css.

@@ -80,6 +80,18 @@ class RunnerCapabilityError(Exception):
     clear, typed refusal instead of a silent no-op or an AttributeError."""
 
 
+class RunnerBlocked(Exception):
+    """Raised by dispatch() when, on a fresh look at the moment of launch,
+    the runner must not take the attempt after all — for a reason the user
+    fixes, not a failure (e.g. `code-not-pushed`: the tree went dirty
+    between can_accept() and dispatch()). The dispatcher puts the attempt
+    back to `blocked` with *block*; it is not failed and not retried."""
+
+    def __init__(self, block: Dict[str, Any]):
+        super().__init__(block.get("detail") or block.get("code"))
+        self.block = block
+
+
 class Runner:
     id: str
     kind: str
@@ -105,6 +117,14 @@ class Runner:
 
     def capacity(self) -> CapacitySnapshot:
         raise NotImplementedError
+
+    def accelerator(self) -> Optional[Dict[str, Any]]:
+        """`{"name": str, "vram_gb": float|None, "source": str}` for the
+        accelerator an attempt here would get, or None when unknown. Read by
+        the dispatcher to match `runtime.requires.min_vram_gb` (XDASH_PLAN.md
+        §6.3): an unknown accelerator never satisfies a requirement. Must be
+        cheap — it is asked once per candidate per dispatch tick."""
+        return None
 
     def as_dict(self) -> Dict[str, Any]:
         cap = self.capacity()
@@ -159,12 +179,30 @@ class Runner:
         raise NotImplementedError
 
     def collect(self, attempt: Dict[str, Any]) -> Optional[str]:
-        """Called once, after poll() reports finished=True: pull the run's
-        artifacts to where results_ingest.register_ledger() can find them,
-        register them, and return the results_dir (or None if there was
-        nothing to collect). A failure here must never strand the attempt —
-        callers resolve it regardless."""
+        """Called after poll() reports finished=True (XDASH_PLAN.md §6.6):
+        persist the attempt's console logs under
+        settings.attempt_log_dir(attempt_id), pull the planned run dir
+        (`attempt.run.run_dir`) plus the ledger into a staging dir shaped
+        like a re-rooted slice of the repo, and return that staging dir.
+        Return None only when the runtime writes straight into the local
+        canonical tree (the local machine) — never for a remote one, even if
+        it produced nothing (return the empty staging dir instead). The
+        caller canonicalizes (results_ingest.canonicalize) and registers.
+
+        Raise on a *retryable* failure (transport down, download error): the
+        dispatcher keeps the attempt unresolved and tries again next tick,
+        rather than resolving it from an exit code alone and losing the
+        run's real state. Never re-derive the run path: read it off the
+        attempt."""
         raise NotImplementedError
+
+    def diagnose(self, attempt: Dict[str, Any], live: Dict[str, Any], log_texts: List[str]) -> Optional[Dict[str, Any]]:
+        """A specific, actionable failure code for a finished-but-failed
+        attempt, from poll()'s *live* result and the persisted console logs
+        (e.g. Kaggle's `kaggle-secret-missing`), or None for the generic
+        `attempt-failed`. Returned shape: {code, detail, retry?: bool,
+        action_url?: str}."""
+        return None
 
     def cancel(self, attempt: Dict[str, Any]) -> bool:
         """Best-effort stop of the underlying unit for an in-flight

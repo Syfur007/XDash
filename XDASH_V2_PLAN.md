@@ -1,5 +1,7 @@
 # XDash v2 — object model correction, then a lifecycle UI
 
+> **SUPERSEDED (2026-09-25) by `XDASH_PLAN.md`.** Sections marked with a SUPERSEDED banner below (§3.1 identity/layout, §3.6 Batch, §6 the UI, §7 resume) are replaced by `XDASH_PLAN.md`; the rest stays as history. `XDASH_PLAN.md` is the master plan.
+
 **Status:** supersedes `DISSERT_KAGGLE_TEMPLATE_RESUME_PLAN.md` in full, and
 `EXPERIMENT_AUTOMATION_PLAN.md` §3 / §6 / §8.2. Those documents' §2 (Phase 0
 defect findings) and §4.1 (greedy policy) remain valid and are carried
@@ -104,6 +106,8 @@ assertions that pass, followed by a fresh training run.
 Five nouns. Every view, endpoint and state file is a projection of these.
 
 ### 3.1 Experiment
+
+> **SUPERSEDED (2026-09-25) by `XDASH_PLAN.md`.** The identity survives for an empty overlay, but not as a path: dissert writes `outputs/experiments/<experiment_name>/<hash7>-s<seed>/` since its commit `52477d1`, so the "same key as the on-disk layout" claim below is false (X2). The run dir is now planned at dispatch by the framework's `locate_run` hook and stored on the attempt (`XDASH_PLAN.md` §4.4). Identity with a non-empty overlay is §3.3.1 there.
 
 `(config_path, seed)` — the thing a researcher actually means. Identity:
 
@@ -223,6 +227,8 @@ Codes and their actions:
 `quota-exhausted` can no longer collapse into one string.
 
 ### 3.6 Batch and Run (kept, narrowed)
+
+> **SUPERSEDED (2026-09-25) by `XDASH_PLAN.md`.** Batch is retired into **Study** (`XDASH_PLAN.md` §3.2, Phase 1): `batch_name` migrates to a study membership. Run is kept, but the join is the run ids planned at dispatch (§4.4), not an experiment-name + seed guess.
 
 - **Batch** — a named set of Experiments created together plus its policy
   (`pool`, `max_retries`, `force_on_retry`). It is a *grouping and a
@@ -382,6 +388,8 @@ Kept unchanged: `/api/configs`, `/api/config*`, `/api/runs*`, `/api/ledger/*`,
 ---
 
 ## 6. Phase C — the UI
+
+> **SUPERSEDED (2026-09-25) by `XDASH_PLAN.md`.** Information architecture, screens and stack are replaced by `XDASH_PLAN.md` §8 (Lab · Experiments · Compute · Datasets · Settings, plus the Experiment page) and §9 (buildless ES modules — there is no Node on this machine, so no Vite/Svelte build).
 
 ### 6.1 Stack
 
@@ -621,6 +629,8 @@ pays off.
 ---
 
 ## 7. Phase D — long-run resume, done properly (deferred, spec'd)
+
+> **SUPERSEDED (2026-09-25) by `XDASH_PLAN.md`.** Resume was built in `Multi_runner_XDash.md` Phase 5 (kept). What classification reads and how a finished attempt is collected are now `XDASH_PLAN.md` §4.4 (planned run dir) and §6.6 (one completion path for every runner kind).
 
 Not built in this plan; specified so Phase B does not foreclose it. Phase A
 deletes the current implementation (§4.A1) precisely so this can be built

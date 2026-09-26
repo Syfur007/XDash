@@ -18,7 +18,6 @@ orphaned by this change.
 """
 from __future__ import annotations
 
-import json
 import shlex
 import threading
 import uuid
@@ -27,6 +26,7 @@ from typing import Any, Dict, List, Optional
 from .config import settings
 from . import hosts
 from . import tmux_runner as tmux
+from .store import JsonStore
 
 _lock = threading.Lock()
 
@@ -44,19 +44,18 @@ DEFAULT_MONITORS: List[Dict[str, Any]] = [
 ]
 
 
+_store = JsonStore(lambda: settings.monitors_file, lambda: [dict(m) for m in DEFAULT_MONITORS])
+
+
 def _load() -> List[Dict[str, Any]]:
-    if not settings.monitors_file.exists():
-        _save(DEFAULT_MONITORS)
-        return [dict(m) for m in DEFAULT_MONITORS]
-    try:
-        data = json.loads(settings.monitors_file.read_text())
-        return data if isinstance(data, list) else [dict(m) for m in DEFAULT_MONITORS]
-    except Exception:
-        return [dict(m) for m in DEFAULT_MONITORS]
+    data = _store.load()  # raises on a corrupt file, or a missing one whose .bak survives
+    if not _store.exists():
+        _save(data)  # first run: persist the built-in defaults
+    return data if isinstance(data, list) else [dict(m) for m in DEFAULT_MONITORS]
 
 
 def _save(records: List[Dict[str, Any]]):
-    settings.monitors_file.write_text(json.dumps(records, indent=2))
+    _store.save(records)
 
 
 def _host_id_of(record: Dict[str, Any]) -> str:

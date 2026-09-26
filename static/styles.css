@@ -195,6 +195,33 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .settings-profile-path{ color:var(--text-faint); font-family:var(--mono); font-size:11px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; margin-top:3px; }
 @media (max-width:700px){ .settings-grid{ grid-template-columns:1fr; } .settings-profile-row{ align-items:flex-start; flex-wrap:wrap; } }
 
+/* ---------------------------------------------------------------- Settings: dynamic profile form (XDASH_PLAN.md §8.6) */
+/* Same two-pane idea as .configs-layout/.studies-layout — a fixed-width
+   section list next to the selected section's form — but content-sized
+   (auto height) rather than viewport-filling, since this panel sits above
+   several others on the same scrolling page rather than owning it. */
+.profile-form-layout{ display:grid; grid-template-columns:200px 1fr; gap:0; border-top:1px solid var(--border-soft); }
+.profile-section-nav{ border-right:1px solid var(--border-soft); max-height:520px; overflow:auto; }
+.profile-section-body{ padding:14px 16px; min-width:0; max-height:520px; overflow:auto; }
+@media (max-width:700px){ .profile-form-layout{ grid-template-columns:1fr; } .profile-section-nav{ border-right:0; border-bottom:1px solid var(--border-soft); max-height:220px; } }
+
+/* A profile field's removable-tag list editor (bool/number/text widgets
+   reuse .field/.text-input/.toggle-switch already defined above). */
+.chip-list{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.chip-list .badge{ display:inline-flex; align-items:center; gap:5px; }
+.chip-list .badge [data-chip-remove]{ opacity:0.7; }
+.chip-list .badge [data-chip-remove]:hover{ opacity:1; }
+
+/* ---------------------------------------------------------------- Datasets: dataset x runtime matrix (XDASH_PLAN.md §8.5) */
+.dataset-matrix th:first-child, .dataset-matrix td:first-child{ text-align:left; }
+.dataset-matrix td.matrix-cell{ cursor:pointer; font-size:14px; font-weight:600; }
+.dataset-matrix td.matrix-cell:hover{ background: var(--surface-2); }
+.dataset-matrix td.matrix-cell.emerald{ color: var(--emerald); }
+.dataset-matrix td.matrix-cell.slate{ color: var(--slate); }
+.dataset-matrix td.matrix-cell.red{ color: var(--red); }
+.dataset-matrix td.matrix-name{ cursor:pointer; }
+.dataset-matrix td.matrix-name:hover{ text-decoration:underline; }
+
 .path-input{ display:flex; gap:6px; align-items:center; width:100%; }
 .path-input .text-input{ min-width:0; }
 /* .modal(width:380px), declared further down this file, has equal selector specificity to a
@@ -390,6 +417,26 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 
 .panel-filter{ padding: 8px 10px 0; }
 .panel-filter .text-input{ width:100%; font-size:12px; padding:6px 9px; }
+
+/* ---------------------------------------------------------------- Experiments screen (XDASH_PLAN.md §8.2) */
+/* Same two-pane shape as .configs-layout — a fixed-width browsing pane (here,
+   Studies) next to a flexible main pane (here, the grouped Experiments table) —
+   just under its own class names since this pane's rows (studies) aren't configs. */
+.studies-layout{
+  display:grid;
+  grid-template-columns: 260px 1fr;
+  gap: 18px;
+  height: calc(100vh - 150px);
+}
+.studies-pane{ overflow:auto; }
+.experiments-main-pane{ display:flex; flex-direction:column; overflow:auto; width:100%; min-width:0; box-sizing:border-box; }
+
+/* An experiment name rendered anywhere (XDASH_PLAN.md §8: "every experiment
+   name rendered anywhere is a link to its page") — js/lib/router.js's
+   experimentLink(). Plain enough to sit inside a table cell or a card title
+   without fighting either one's own color/weight. */
+.exp-link{ color: inherit; text-decoration: none; border-bottom: 1px dashed var(--border); }
+.exp-link:hover{ color: var(--amber); border-bottom-color: var(--amber); }
 
 .editor-pane{ display:flex; flex-direction:column; overflow:hidden; width:100%; min-width:0; box-sizing:border-box; }
 .editor-toolbar{
@@ -643,6 +690,17 @@ select, .text-input{
 .compare-table td.differs{ color: var(--amber); }
 .compare-table tr td:first-child{ color: var(--text); font-family: var(--sans); text-align:left; }
 .compare-table tr th:first-child{ text-align:left; }
+
+/* j/k keyboard row focus (XDASH_PLAN.md §10 Phase 6, static/js/lib/shortcuts.js) —
+   the Experiments table and the Compare table are the two navigable lists. */
+tr.kbd-focus{ outline: 2px solid var(--amber); outline-offset: -2px; }
+tr.kbd-focus td:first-child{ color: var(--amber); }
+
+/* Study Compare charts (XDASH_PLAN.md §8.2, Phase 6): bar±std, per-seed
+   strip, and radar side by side on a wide screen, one column narrower. */
+.compare-charts-grid{ display:grid; grid-template-columns: repeat(3, 1fr); gap:16px; }
+.compare-chart-card{ min-width:0; }
+.compare-chart-title{ font-size:11px; text-transform:uppercase; letter-spacing:0.04em; color: var(--text-faint); margin-bottom:6px; }
 
 /* ---------------------------------------------------------------- command palette */
 .palette-box{
@@ -1191,24 +1249,46 @@ select, .text-input{
   /* Every two-pane layout (Configs, Terminals detail-via-list, Reports, History)
      stacks into a single column: browsing list on top (capped height, own
      scroll), detail/viewer panel below at full width. */
-  .configs-layout{
+  .configs-layout, .studies-layout{
     grid-template-columns: 1fr;
     height:auto;
   }
   .runs-layout{ height:auto; }
-  .config-tree, .history-tree-panel{ max-height:280px; }
-  .editor-pane{ min-height:480px; }
+  .config-tree, .history-tree-panel, .studies-pane{ max-height:280px; }
+  .editor-pane, .experiments-main-pane{ min-height:480px; }
   .creator-layout{ grid-template-columns: 1fr; height:auto; }
   .creator-preview-panel{ min-height:300px; }
 
   .metric-grid{ grid-template-columns: repeat(2, 1fr); }
   .compare-table{ font-size:11px; }
   .compare-table th, .compare-table td{ padding:6px 8px; }
+  /* Every wide data table (Compare, History, Artifacts, the Experiments
+     table) keeps its column layout and scrolls horizontally inside its
+     existing `overflow:auto` wrapper, instead of squeezing/wrapping cells
+     into something unreadable — XDASH_PLAN.md §10 Phase 6's mobile pass. */
+  .compare-table{ min-width:560px; }
+  .compare-charts-grid{ grid-template-columns: 1fr; }
 
   .terminal-detail-grid{ padding:10px; }
   .terminal-console-wrap{ min-height:220px; }
 
   .tb-panel{ padding:16px; max-width:100%; }
+
+  /* Lab (XDASH_PLAN.md §8.1) and the Experiment page (§8.3) are the two
+     screens Phase 6 explicitly targets for a mobile pass: bigger tap
+     targets throughout (44px is the usual minimum comfortable touch
+     target), and the Experiment page's tab strip/header actions scroll
+     horizontally instead of wrapping into a tall, hard-to-scan stack. */
+  .btn, .subtab-btn, .nav-item{ min-height:36px; }
+  .btn-sm{ min-height:32px; }
+  #view-lab .panel-header, #view-experiment-detail .view-header{ flex-wrap:wrap; }
+  #xdetail-subtabs{ flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:2px; }
+  #xdetail-subtabs .subtab-btn{ flex:0 0 auto; }
+  #xdetail-actions{ width:100%; flex-wrap:wrap; }
+  #xdetail-actions .btn{ flex:1 1 auto; }
+  .lab-attention-row{ flex-direction:column; align-items:stretch; gap:6px; }
+  .lab-attention-row .job-actions{ margin-left:0; width:100%; }
+  .lab-attention-row .job-actions .btn{ flex:1 1 auto; }
 }
 
 @media (max-width: 480px){
@@ -1234,6 +1314,33 @@ select, .text-input{
 .subtab-btn .count-badge{ margin-left:6px; }
 .subtab-panel{ display:none; }
 .subtab-panel.active{ display:block; }
+
+/* ---------------------------------------------------------------- Lab / Compute (XDASH_PLAN.md §8.1/§8.4, Phase 5) */
+/* Per-section ▦/☰ toggle (Lab §8.1, and the Compute runtime board): two
+   .btn-icon buttons, whichever mode is active gets the same "pressed" look
+   .subtab-btn.active already uses elsewhere in this file. */
+.view-toggle{ display:flex; gap:2px; }
+.view-toggle .btn-icon.active{ color: var(--text); background: var(--surface-3); border-color: var(--border); }
+.lab-attention-panel{ border-color: var(--red-dim); }
+.lab-attention-row{ display:flex; align-items:center; gap:10px; flex-wrap:wrap; padding:6px 0; border-bottom:1px solid var(--border-soft); }
+.lab-attention-row:last-child{ border-bottom:0; }
+.lab-attention-row .job-actions{ margin-left:auto; }
+
+/* Compute: the runtime board (tiles reuse .entity-card/.entity-grid; list
+   rows reuse .kaggle-history-row) plus the Add-runtime wizard's kind picker
+   and step switcher. */
+.runtime-tile{ cursor:pointer; }
+.runtime-row{ cursor:pointer; }
+.runtime-row:hover{ text-decoration:underline; }
+.kind-picker{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+.kind-picker button{ flex:1; min-width:96px; }
+.kind-picker button.active{ background: var(--surface-3); border-color: var(--amber-dim); color: var(--text); }
+.wizard-step{ display:none; }
+.wizard-step.active{ display:block; }
+/* Same .modal.<x> specificity fix styles.css already documents for
+   .path-picker-modal/.run-composer-modal — plain .add-runtime-modal would
+   lose its width to .modal's own 380px. */
+.modal.add-runtime-modal{ width:min(560px, calc(100vw - 32px)); }
 
 /* ---------------------------------------------------------- Assignments */
 .assignment-block-row td{

@@ -19,14 +19,15 @@ local host record never becomes a second, competing copy of them.
 """
 from __future__ import annotations
 
-import json
 import threading
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .config import DASHBOARD_DIR, settings
+from .config import DATA_DIR, settings
+from .store import JsonStore
 
-HOSTS_FILE = DASHBOARD_DIR / "data" / "hosts.json"
+HOSTS_FILE = DATA_DIR / "hosts.json"
+_store = JsonStore(HOSTS_FILE, lambda: {"hosts": []})
 
 LOCAL_HOST_ID = "local"
 KIND_LOCAL = "local"
@@ -56,14 +57,14 @@ def _default_local_record() -> Dict[str, Any]:
 
 
 def _scheduler_max_concurrent() -> int:
-    """scheduler.json's own max_concurrent, read as plain JSON rather than by
-    importing backend/scheduler.py — that module reaches tmux_runner, which
-    reaches transport, which reaches this one, so a real import would close a
-    cycle. It stays the single source of truth for local concurrency; this is
-    a read of it, not a second copy."""
-    try:
-        data = json.loads(settings.scheduler_file.read_text())
-    except (OSError, ValueError):
+    """scheduler.json's own max_concurrent, read through the store directly
+    rather than by importing backend/scheduler.py — that module reaches
+    tmux_runner, which reaches transport, which reaches this one, so a real
+    import would close a cycle. It stays the single source of truth for local
+    concurrency; this is a read of it, not a second copy. A corrupt
+    scheduler.json raises here exactly as it would in scheduler.py itself."""
+    data = JsonStore(settings.scheduler_file, dict).load()
+    if not isinstance(data, dict):
         return 1
     try:
         return max(1, int(data.get("max_concurrent", 1)))
@@ -151,6 +152,16 @@ class _Host:
                 pass
         return _scheduler_max_concurrent() if self.is_local else 1
 
+    @property
+    def accelerator(self) -> Optional[Dict[str, Any]]:
+        """`{"name": ..., "vram_gb": ...}` when the record declares it — what
+        an experiment's `runtime.requires.min_vram_gb` is matched against
+        (XDASH_PLAN.md §6.3). Phase 2's runtime probe fills it in; until
+        then it is typed on the host record by hand (and the local machine
+        is probed with nvidia-smi, see runners/machine.py)."""
+        acc = self._r.get("accelerator")
+        return dict(acc) if isinstance(acc, dict) else None
+
     # -- ssh --------------------------------------------------------------
     @property
     def ssh(self) -> Dict[str, Any]:
@@ -174,21 +185,13 @@ class _Host:
 
 # ------------------------------------------------------------------ storage
 def _load_records() -> List[Dict[str, Any]]:
-    if not HOSTS_FILE.exists():
-        return []
-    try:
-        data = json.loads(HOSTS_FILE.read_text())
-    except (OSError, ValueError):
-        return []
+    data = _store.load()
     records = data.get("hosts") if isinstance(data, dict) else None
     return [r for r in records if isinstance(r, dict) and r.get("id")] if isinstance(records, list) else []
 
 
 def _save_records(records: List[Dict[str, Any]]) -> None:
-    HOSTS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = HOSTS_FILE.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps({"hosts": records}, indent=2))
-    tmp.replace(HOSTS_FILE)
+    _store.save({"hosts": records})
 
 
 def list_hosts() -> List[_Host]:
@@ -234,6 +237,26 @@ def upsert_host(record: Dict[str, Any]) -> _Host:
         records = _load_records()
         records = [r for r in records if r.get("id") != host_id]
         records.append({**record, "id": host_id, "kind": kind})
+        _save_records(records)
+    return get_host(host_id)
+
+
+def set_accelerator(host_id: str, accelerator: Optional[Dict[str, Any]]) -> _Host:
+    """Persists a probed (or hand-typed) `{name, vram_gb}` onto *host_id* —
+    the Compute Diagnostics "GPU probe" action (XDASH_PLAN.md §8.4), and the
+    only writer of this field for a host that isn't the local machine (which
+    is instead probed once per process, see runners/machine.py). Synthesizes
+    the local record first, same as upsert_host would need to, since 'local'
+    may not have a row in hosts.json yet."""
+    with _lock:
+        records = _load_records()
+        if not any(r.get("id") == host_id for r in records):
+            if host_id != LOCAL_HOST_ID:
+                raise HostError("Unknown host '%s'" % host_id)
+            records = [_default_local_record()] + records
+        for r in records:
+            if r.get("id") == host_id:
+                r["accelerator"] = dict(accelerator) if accelerator else None
         _save_records(records)
     return get_host(host_id)
 

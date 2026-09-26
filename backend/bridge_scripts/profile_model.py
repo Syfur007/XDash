@@ -26,8 +26,16 @@ def main(argv):
     if not isinstance(kwargs, dict) or "name" not in kwargs:
         raise ValueError("kwargs must be a JSON object including at least 'name'")
 
-    from models.registry import get_model
-    from utils.metrics import count_parameters
+    # New package layout first, old flat layout as a fallback — see
+    # XDASH_PROGRESS.md's Phase 2 section.
+    try:
+        from dissert.models.registry import get_model
+    except ImportError:
+        from models.registry import get_model
+    try:
+        from dissert.models.params import count_parameters
+    except ImportError:
+        from utils.metrics import count_parameters
 
     model = get_model(**kwargs)
     trainable = count_parameters(model)

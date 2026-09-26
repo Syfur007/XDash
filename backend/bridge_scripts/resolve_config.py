@@ -19,7 +19,12 @@ def main(argv):
         raise ValueError("usage: resolve_config.py <repo-relative-config-path>")
     config_path = argv[0]
 
-    from utils.config import load_config
+    # New package layout first, old flat layout as a fallback (see
+    # XDASH_PROGRESS.md's Phase 2 section) — both stay import-compatible.
+    try:
+        from dissert.config.loader import load_config
+    except ImportError:
+        from utils.config import load_config
 
     try:
         resolved = load_config(config_path)

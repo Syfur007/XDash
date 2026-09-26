@@ -41,11 +41,17 @@ from backend import notifications
 from backend import run_notes
 from backend import repos as repos_ops
 from backend import runners as runner_registry
-from backend.runners.base import ACTIVE_STATUSES, LaunchSpec, RunnerCapabilityError
+from backend.runners import registry as runner_slots
+from backend.runners.base import ACTIVE_STATUSES
 from backend import dataset_map
+from backend import datasets as dataset_registry
+from backend import profile_ops
+from backend import runtimes as runtimes_mod
 from backend import experiments
+from backend import studies
 from backend import paths
 from backend import templates
+from backend.store import StoreCorruptError
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -60,6 +66,14 @@ experiments.ensure_dispatcher_started()
 
 def err(message, code=400):
     return jsonify({"detail": message}), code
+
+
+@app.errorhandler(StoreCorruptError)
+def _store_corrupt(e):
+    """A state file that won't parse (backend/store.py) fails every request
+    that touches it, loudly and with the restore command — never as an empty
+    list that a later save would write over the real data (X11)."""
+    return err(str(e), 500)
 
 
 def _origin_matches_host(origin: str, host_header: str) -> bool:
@@ -115,6 +129,17 @@ def api_list_configs():
 def api_list_paths():
     try:
         return jsonify({"paths": paths.list_paths(request.args.get("scope", "repo"), request.args.get("kind", "file"))})
+    except ValueError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/paths/exists", methods=["GET"])
+def api_path_exists():
+    """XDASH_PLAN.md §8.6's Settings path widget: a lightweight existence
+    check for whatever's currently typed into a `*_dir`/`*_path`/`root`
+    field — not a listing, just ✓/✗ for one value."""
+    try:
+        return jsonify(paths.path_exists(request.args.get("scope", "repo"), request.args.get("path", "")))
     except ValueError as e:
         return err(str(e), 400)
 
@@ -567,6 +592,54 @@ def api_kaggle_snapshot_status(name):
         return err(str(e), 400)
 
 
+# The Compute runtime detail's Kaggle Settings tab (XDASH_PLAN.md §8.4) needs the
+# real kernel slug/deep link for the one-time GITHUB_TOKEN secret checklist —
+# kernel_slug_for_account()/kernel_url() already existed (dispatch and the
+# kaggle-secret-missing block both use them) but nothing served them for an
+# account the dashboard hasn't tried to dispatch to yet.
+@app.route("/api/kaggle/accounts/<name>/kernel", methods=["GET"])
+def api_kaggle_kernel_info(name):
+    slug = kaggle_ops.kernel_slug_for_account(name)
+    return jsonify({
+        "kernel_slug": slug,
+        "kernel_url": kaggle_ops.kernel_url(name, slug, edit=False),
+        "kernel_edit_url": kaggle_ops.kernel_url(name, slug, edit=True),
+    })
+
+
+# CLI 2.x groundwork (XDASH_PLAN.md §10 Phase 5) — real `kaggle quota`, once
+# settings.kaggle_executable points at a CLI >= 2.2.1 in a Python 3.11+ env.
+# Degrades to {"available": False} against the installed 1.7.4.5, so the
+# existing self-tracked estimate_usage()/usage_history() stay the only
+# numbers shown until that env exists — see XDASH_PROGRESS.md's Phase 5
+# section for the exact env-creation command.
+@app.route("/api/kaggle/accounts/<name>/quota", methods=["GET"])
+def api_kaggle_measured_quota(name):
+    return jsonify(kaggle_ops.get_measured_quota(name))
+
+
+# Live `kernels logs -f` (CLI >= 2.0.2) for the Compute runtime detail's Now
+# tab — a real Kaggle API call once started; see backend/kaggle.py's own
+# comment on exactly which line does that.
+@app.route("/api/kaggle/accounts/<name>/logs/follow", methods=["POST"])
+def api_kaggle_start_log_follow(name):
+    body = request.get_json(silent=True) or {}
+    slug = body.get("kernel_slug") or kaggle_ops.kernel_slug_for_account(name)
+    return jsonify(kaggle_ops.start_kernel_log_follow(name, slug))
+
+
+@app.route("/api/kaggle/accounts/<name>/logs/follow", methods=["GET"])
+def api_kaggle_read_log_follow(name):
+    slug = request.args.get("kernel_slug") or kaggle_ops.kernel_slug_for_account(name)
+    return jsonify(kaggle_ops.read_kernel_log_follow(name, slug))
+
+
+@app.route("/api/kaggle/accounts/<name>/logs/follow", methods=["DELETE"])
+def api_kaggle_stop_log_follow(name):
+    slug = request.args.get("kernel_slug") or kaggle_ops.kernel_slug_for_account(name)
+    return jsonify({"stopped": kaggle_ops.stop_kernel_log_follow(name, slug)})
+
+
 # --------------------------------------------------------------------------- colab
 # Account registry only (Multi_runner_XDash.md Phase 4/6) — VM provisioning/teardown is
 # the dispatcher's own job (backend/runners/colab.py's ColabRunner), not something a route
@@ -585,6 +658,7 @@ def api_colab_add_account():
         return jsonify(colab_ops.add_account(
             body.get("name", ""), body.get("label", ""), body.get("gpu", ""),
             session_limit_hours=body.get("session_limit_hours"),
+            auth=body.get("auth") or "oauth2", ssh_key=body.get("ssh_key") or "",
         ))
     except colab_ops.ColabOpsError as e:
         return err(str(e), 400)
@@ -626,6 +700,48 @@ def api_colab_session_status(name):
 def api_colab_stop_session(name):
     stopped = colab_ops.stop_session(name)
     return jsonify({"stopped": stopped})
+
+
+# Compute-unit balance and burn rate (`colab usage`, XDASH_PLAN.md X5) — a real
+# network call, so on demand only, like the two routes above.
+@app.route("/api/colab/accounts/<name>/usage", methods=["GET"])
+def api_colab_usage(name):
+    try:
+        return jsonify(colab_ops.usage(name))
+    except colab_ops.ColabOpsError as e:
+        return err(str(e), 400)
+
+
+# Connect-account OAuth flow (XDASH_PLAN.md §8.4/§10 Phase 5) — starts the
+# CLI's copy-paste login as a subprocess with this account's own HOME, shows
+# the sign-in URL, and accepts the pasted code back. See backend/colab.py's
+# own comment on exactly which line makes the real Google network call —
+# it is NOT this route, it's begin_connect()'s call into procsession.start().
+@app.route("/api/colab/accounts/<name>/connect", methods=["POST"])
+def api_colab_begin_connect(name):
+    try:
+        return jsonify(colab_ops.begin_connect(name))
+    except colab_ops.ColabOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/colab/accounts/<name>/connect", methods=["GET"])
+def api_colab_connect_status(name):
+    return jsonify(colab_ops.connect_status(name))
+
+
+@app.route("/api/colab/accounts/<name>/connect/code", methods=["POST"])
+def api_colab_submit_connect_code(name):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(colab_ops.submit_connect_code(name, body.get("code", "")))
+    except colab_ops.ColabOpsError as e:
+        return err(str(e), 400)
+
+
+@app.route("/api/colab/accounts/<name>/connect", methods=["DELETE"])
+def api_colab_cancel_connect(name):
+    return jsonify({"cancelled": colab_ops.cancel_connect(name)})
 
 
 # --------------------------------------------------------------------------- hosts (Multi_runner_XDash.md Phase 1)
@@ -679,6 +795,48 @@ def api_list_runners():
     return jsonify({"runners": [r.as_dict() for r in runner_registry.list_runners()]})
 
 
+# --------------------------------------------------------------------------- runtimes (XDASH_PLAN.md §3.6, closes X10)
+# One shape for every runtime kind (local/ssh/colab/kaggle) — supersedes /api/runners (kind-
+# specific as_dict(), no capacity semantics) and the old standalone /api/slots (only local +
+# kaggle) for new UI. /api/runners stays: static/js/views/compute.js still calls it. The
+# standalone /api/slots route was retired in Phase 6 — its last caller (spine.js's old flat
+# Run Composer) was itself retired in Phase 3, and nothing else ever called it (grepped: zero
+# hits in static/). `experiments.list_slots()` itself is unchanged and still backs
+# GET /api/pulse's own `slots` field.
+@app.route("/api/runtimes", methods=["GET"])
+def api_list_runtimes():
+    return jsonify({"runtimes": runtimes_mod.list_runtimes()})
+
+
+# The Add-runtime wizard's live test gate (XDASH_PLAN.md §8.4/§10 Phase 5) — one
+# endpoint for every kind, run against fields that are NOT saved yet. See
+# backend/runtimes.py::test_runtime for the per-kind dispatch.
+@app.route("/api/runtimes/test", methods=["POST"])
+def api_test_runtime():
+    body = request.get_json(silent=True) or {}
+    kind = body.get("kind") or ""
+    return jsonify(runtimes_mod.test_runtime(kind, body.get("fields") or {}))
+
+
+# GPU probe (XDASH_PLAN.md §8.4 Compute Diagnostics) — runs nvidia-smi over the
+# host's own transport (local or ssh) and persists the result onto the host
+# record, same field runners/machine.py's accelerator() already reads.
+@app.route("/api/hosts/<host_id>/probe-gpu", methods=["POST"])
+def api_probe_host_gpu(host_id):
+    from backend import transport as transport_mod
+    from backend.runners import machine as machine_mod
+    try:
+        host = hosts.get_host(host_id)
+    except hosts.HostError as e:
+        return err(str(e), 404)
+    t = transport_mod.for_host(host.id)
+    found = machine_mod.probe_accelerator(t)
+    if found is None:
+        return jsonify({"found": False, "accelerator": host.accelerator})
+    hosts.set_accelerator(host_id, found)
+    return jsonify({"found": True, "accelerator": found})
+
+
 @app.route("/api/experiments/active", methods=["GET"])
 def api_experiments_active():
     units = []
@@ -693,66 +851,79 @@ def api_experiments_active():
     return jsonify({"units": units})
 
 
-@app.route("/api/runners/<path:runner_id>/launch", methods=["POST"])
-def api_runner_launch(runner_id):
-    """Symmetric one-click launch across runner kinds (DASHBOARD_REDESIGN_PLAN.md §3.2) — same
-    body shape whether runner_id is "local" or "kaggle:<account>"; `target` is required (and
-    means a worker_id) only for a Kaggle runner."""
-    body = request.get_json(silent=True) or {}
-    try:
-        r = runner_registry.get_runner(runner_id)
-    except KeyError as e:
-        return err(e.args[0] if e.args else str(e), 404)  # KeyError.__str__ re-reprs the message; args[0] is the plain text
-    spec = LaunchSpec(
-        config_path=body.get("config_path", ""), mode=body.get("mode", "train"),
-        extra_args=body.get("extra_args", ""), target=body.get("target"),
-    )
-    try:
-        u = r.launch(spec)
-    except FileNotFoundError:
-        return err(f"Config not found: {spec.config_path}", 404)
-    except (ValueError, kaggle_ops.KaggleOpsError, RunnerCapabilityError, tmux.TmuxError) as e:
-        return err(str(e), 400)
-    result = {"unit_id": u.unit_id, "runner_id": u.runner_id, "status": u.status}
-    if u.extra.get("concurrent_warning"):
-        result["concurrent_warning"] = u.extra["concurrent_warning"]
-    return jsonify(result)
+# /api/runners/<id>/launch is retired (XDASH_PLAN.md Phase 0 item 8): a fourth launch path
+# that bypassed the dispatcher, so nothing it started had an experiment, an attempt, a planned
+# run dir or a collection. Every run goes through POST /api/experiments.
 
 
-# --------------------------------------------------------------------------- experiments (Phase B, XDASH_V2_PLAN.md §3/§5)
-# The new object model + API. Coexists with, does not replace, the Assignments/Batches/Kaggle-
-# worker routes below — see backend/experiments.py's module docstring for why both stay live
-# until Phase C3's strangler migration deletes the old frontend and these routes together.
+# --------------------------------------------------------------------------- experiments (XDASH_PLAN.md §3.3, §6, §7)
+# Experiments are created as drafts; executing one is an action (queue, run now, a study's
+# autopilot) — POST /api/experiments/actions, the one endpoint for a row, a selection or a
+# whole study (§6.1). The per-id retry/cancel routes below stay for the current UI.
+def _experiment_error(e):
+    """ExperimentConflict (the state forbids it) -> 409; anything else -> 400."""
+    return err(str(e), 409 if isinstance(e, experiments.ExperimentConflict) else 400)
+
+
 @app.route("/api/experiments", methods=["GET"])
 def api_list_experiments():
     return jsonify({"experiments": experiments.list_experiments(
-        batch=request.args.get("batch"), status=request.args.get("status"),
+        study=request.args.get("study"), status=request.args.get("status"),
         config=request.args.get("config"), slot=request.args.get("slot"),
+        runtime=request.args.get("runtime"), q=request.args.get("q"),
     )})
 
 
 @app.route("/api/experiments", methods=["POST"])
 def api_create_experiments():
-    """THE single launch verb (§5). *configs* accepts either the fully-explicit
+    """Creates **drafts** (X7); `then: "queue" | "run_now"` also executes them (the Run
+    Composer sends `then: "queue"`). *configs* accepts either the fully-explicit
     `[{"path": ..., "seeds": [...]}]` shape or the Run Composer's flatter
     `{"configs": ["a.yaml", "b.yaml"], "seeds": [0, 1, 2]}` shorthand, applying the same seed
-    list to every path — both read naturally off §6.5's form and neither should force a caller
-    to repeat an identical seed list per config."""
+    list to every path. The response lists which ids were `created` and which `matched` an
+    existing experiment (§3.3.1)."""
     body = request.get_json(silent=True) or {}
     configs = body.get("configs") or []
     if configs and isinstance(configs[0], str):
         seeds = body.get("seeds") or [None]
         configs = [{"path": c, "seeds": seeds} for c in configs]
     try:
-        created = experiments.create_experiments(
+        # extra_args: {"train": "...", "eval": "..."} or a legacy string (train-only) — only for
+        # flags that aren't config; config overrides go in `overlay` (dotted keys, §4.3).
+        result = experiments.create_experiments(
             configs=configs, extra_args=body.get("extra_args", ""),
-            pool=body.get("pool", "either"), batch_name=body.get("batch_name"),
-            max_retries=int(body.get("max_retries", 1)), force_on_retry=bool(body.get("force_on_retry", True)),
-            max_legs=int(body.get("max_legs", 6)),
+            runtime=body.get("runtime"), pool=body.get("pool"), overlay=body.get("overlay"),
+            study_id=body.get("study_id"), group=body.get("group"), studies=body.get("studies"),
+            batch_name=body.get("batch_name"), priority=body.get("priority", 0),
+            max_retries=body.get("max_retries", 1), force_on_retry=bool(body.get("force_on_retry", True)),
+            max_legs=body.get("max_legs", 6), notes=body.get("notes", ""), then=body.get("then"),
+            rerun=bool(body.get("rerun", True)),
         )
     except experiments.ExperimentError as e:
-        return err(str(e), 400)
-    return jsonify({"experiments": created})
+        return _experiment_error(e)
+    return jsonify(result)
+
+
+@app.route("/api/experiments/actions", methods=["POST"])
+def api_experiment_actions():
+    """`{action, ids | study_id | filter, params}` -> `{ok: [...], skipped: [{id, reason}]}`."""
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(experiments.apply_action(
+            body.get("action"), ids=body.get("ids"), study_id=body.get("study_id"),
+            filter=body.get("filter"), params=body.get("params"),
+        ))
+    except experiments.ExperimentError as e:
+        return _experiment_error(e)
+
+
+@app.route("/api/experiments/preflight", methods=["POST"])
+def api_experiment_preflight():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(experiments.preflight(ids=body.get("ids"), specs=body.get("specs")))
+    except experiments.ExperimentError as e:
+        return _experiment_error(e)
 
 
 @app.route("/api/experiments/<experiment_id>", methods=["GET"])
@@ -763,12 +934,22 @@ def api_get_experiment(experiment_id):
         return err(str(e), 404)
 
 
+@app.route("/api/experiments/<experiment_id>", methods=["PATCH"])
+def api_update_experiment(experiment_id):
+    try:
+        return jsonify(experiments.update_experiment(experiment_id, request.get_json(silent=True) or {}))
+    except experiments.ExperimentError as e:
+        if str(e).startswith("Unknown experiment"):
+            return err(str(e), 404)
+        return _experiment_error(e)
+
+
 @app.route("/api/experiments/<experiment_id>/retry", methods=["POST"])
 def api_retry_experiment(experiment_id):
     try:
         return jsonify(experiments.retry_experiment(experiment_id))
     except experiments.ExperimentError as e:
-        return err(str(e), 400)
+        return _experiment_error(e)
 
 
 @app.route("/api/experiments/<experiment_id>/cancel", methods=["POST"])
@@ -794,14 +975,223 @@ def api_delete_experiment(experiment_id):
     return jsonify({"removed": True, "removed_results": remove_results, "removed_ledger": remove_ledger})
 
 
-@app.route("/api/slots", methods=["GET"])
-def api_list_slots():
-    return jsonify({"slots": experiments.list_slots()})
+# --------------------------------------------------------------------------- Experiment page (XDASH_PLAN.md §8.3, Phase 3)
+# Three small read-only additions the Experiment page's Live/Metrics/Artifacts tabs need —
+# nothing before Phase 3 served an attempt's console log or a run dir's files over HTTP.
+@app.route("/api/experiments/<experiment_id>/log", methods=["GET"])
+def api_experiment_log(experiment_id):
+    try:
+        return jsonify(experiments.get_attempt_log(
+            experiment_id, attempt_id=request.args.get("attempt_id"), stage=request.args.get("stage"),
+        ))
+    except experiments.ExperimentError as e:
+        return _experiment_error(e)
+
+
+@app.route("/api/experiments/<experiment_id>/report", methods=["GET"])
+def api_experiment_report(experiment_id):
+    try:
+        return jsonify(experiments.get_experiment_report(experiment_id))
+    except experiments.ExperimentError as e:
+        return _experiment_error(e)
+
+
+@app.route("/api/experiments/<experiment_id>/curves", methods=["GET"])
+def api_experiment_curves(experiment_id):
+    # Phase 6 (§8.2/§8.3): TensorBoard scalars for the Metrics tab and for
+    # Study Compare's overlaid-curves section. `tags=` narrows the response
+    # (Compare asks for one metric's tag across many experiments at once).
+    tags = [t.strip() for t in (request.args.get("tags") or "").split(",") if t.strip()] or None
+    try:
+        return jsonify(experiments.get_experiment_curves(
+            experiment_id, attempt_id=request.args.get("attempt_id"), tags=tags,
+        ))
+    except experiments.ExperimentError as e:
+        return _experiment_error(e)
+
+
+@app.route("/api/experiments/<experiment_id>/artifacts", methods=["GET"])
+def api_experiment_artifacts(experiment_id):
+    try:
+        return jsonify(experiments.list_attempt_artifacts(experiment_id, attempt_id=request.args.get("attempt_id")))
+    except experiments.ExperimentError as e:
+        return _experiment_error(e)
+
+
+@app.route("/api/experiments/<experiment_id>/artifacts/<path:rel_path>", methods=["GET"])
+def api_experiment_artifact_file(experiment_id, rel_path):
+    try:
+        path = experiments.resolve_attempt_artifact(experiment_id, rel_path, attempt_id=request.args.get("attempt_id"))
+    except experiments.ExperimentError as e:
+        return _experiment_error(e)
+    return send_file(path)
+
+
+# --------------------------------------------------------------------------- studies (XDASH_PLAN.md §3.2, §7)
+# Replace batches (§3.8; /api/batches* is retired — nothing in the UI called it). Status is
+# derived; delete removes memberships only.
+def _study_error(e):
+    return err(str(e), 404 if str(e).startswith("Unknown study") else 400)
+
+
+@app.route("/api/studies", methods=["GET"])
+def api_list_studies():
+    include_archived = request.args.get("archived", "1").strip().lower() not in ("0", "false", "no")
+    return jsonify({"studies": studies.list_studies(include_archived=include_archived)})
+
+
+@app.route("/api/studies", methods=["POST"])
+def api_create_study():
+    try:
+        return jsonify(studies.create_study(request.get_json(silent=True) or {}))
+    except studies.StudyError as e:
+        return _study_error(e)
+
+
+@app.route("/api/studies/<study_id>", methods=["GET"])
+def api_get_study(study_id):
+    try:
+        return jsonify(studies.get_study(study_id))
+    except studies.StudyError as e:
+        return _study_error(e)
+
+
+@app.route("/api/studies/<study_id>", methods=["PATCH"])
+def api_update_study(study_id):
+    try:
+        return jsonify(studies.update_study(study_id, request.get_json(silent=True) or {}))
+    except studies.StudyError as e:
+        return _study_error(e)
+
+
+@app.route("/api/studies/<study_id>", methods=["DELETE"])
+def api_delete_study(study_id):
+    try:
+        return jsonify(studies.delete_study(study_id))
+    except studies.StudyError as e:
+        return _study_error(e)
+
+
+@app.route("/api/studies/<study_id>/autopilot", methods=["POST"])
+def api_study_autopilot(study_id):
+    """`{enabled, max_parallel, hold}` — hold: off *and* dequeue its queued members."""
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(studies.set_autopilot(
+            study_id, enabled=body.get("enabled"), max_parallel=body.get("max_parallel"),
+            hold=bool(body.get("hold", False)),
+        ))
+    except studies.StudyError as e:
+        return _study_error(e)
+
+
+@app.route("/api/studies/<study_id>/compare", methods=["GET"])
+def api_study_compare(study_id):
+    metrics = [m.strip() for m in (request.args.get("metrics") or "").split(",") if m.strip()] or None
+    try:
+        return jsonify(studies.compare(study_id, metrics=metrics, group_by=request.args.get("group_by") or "config"))
+    except studies.StudyError as e:
+        return _study_error(e)
+
+
+@app.route("/api/experiments/compare", methods=["POST"])
+def api_experiments_compare_adhoc():
+    """Phase 6 (§8.2 U7): "Compare selected" from any bulk-bar selection —
+    an arbitrary experiment-id list, not tied to one study. Same response
+    shape as `GET /api/studies/<id>/compare`, minus `study_id`."""
+    body = request.get_json(silent=True) or {}
+    ids = body.get("ids") or []
+    if not isinstance(ids, list) or not ids:
+        return err("ids must be a non-empty list", 400)
+    metrics = body.get("metrics")
+    try:
+        return jsonify(studies.compare_ids(
+            ids, metrics=metrics, group_by=body.get("group_by") or "config",
+            baseline_config_path=body.get("baseline_config_path"),
+        ))
+    except studies.StudyError as e:
+        return _study_error(e)
 
 
 @app.route("/api/pulse", methods=["GET"])
 def api_pulse():
     return jsonify(experiments.get_pulse())
+
+
+def _dataset_error(e):
+    return err(str(e), 400)
+
+
+# XDASH_PLAN.md §5/§7 — the dataset registry (backend/datasets.py): per-runtime
+# placement bindings (path/push/fetch/attach), replacing dataset_map.json's narrow
+# name->Kaggle-slug map (which stays, underneath, as the Kaggle-slug precedence chain
+# resolve_kaggle_dataset() already implements — see datasets.py's own docstring).
+#
+# Deviation from the plan's literal `GET /api/datasets`: that bare route already serves
+# the Data Studio's fragment cards (backend/datasets_info.py, static/js/views/data.js) —
+# a different, working feature this phase doesn't touch. The registry's own list is
+# GET /api/datasets/registry instead; every route with a <name> segment doesn't collide
+# with anything existing, so those match the plan exactly.
+@app.route("/api/datasets/registry", methods=["GET"])
+def api_list_dataset_registry():
+    return jsonify({"datasets": dataset_registry.list_datasets(), "data_account": dataset_registry.data_account()})
+
+
+@app.route("/api/datasets/registry/data_account", methods=["PUT"])
+def api_set_dataset_data_account():
+    body = request.get_json(silent=True) or {}
+    dataset_registry.set_data_account(body.get("name"))
+    return jsonify({"data_account": dataset_registry.data_account()})
+
+
+@app.route("/api/datasets/<name>", methods=["PUT"])
+def api_upsert_dataset(name):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(dataset_registry.upsert_dataset(name, sources=body.get("sources"), bindings=body.get("bindings")))
+    except dataset_registry.DatasetError as e:
+        return _dataset_error(e)
+
+
+@app.route("/api/datasets/<name>/bindings/<runtime>", methods=["PUT"])
+def api_set_dataset_binding(name, runtime):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(dataset_registry.set_binding(name, runtime, body))
+    except dataset_registry.DatasetError as e:
+        return _dataset_error(e)
+
+
+@app.route("/api/datasets/<name>/check", methods=["POST"])
+def api_check_dataset(name):
+    """Runs a binding's check now, over the real runner's own Transport when
+    it has one (local/ssh/colab); Kaggle has none, so it just reports the
+    resolved binding (attach is declarative, nothing to dry-check)."""
+    runtime_id = (request.args.get("runtime") or "").strip()
+    if not runtime_id:
+        return err("?runtime=<id> is required", 400)
+    kind, _ = runner_slots.parse_slot_id(runtime_id)
+    try:
+        runner = runner_slots.get_runner(runtime_id)
+    except KeyError:
+        return err(f"Unknown runtime '{runtime_id}'", 404)
+    transport = getattr(runner, "_transport", None)
+    if transport is None:
+        binding = dataset_registry.resolve_binding(name, runtime_id, kind)
+        ok = bool(binding.get("mode"))
+        detail = "mode: %s" % binding.get("mode") if ok else "no binding resolves"
+        dataset_registry.record_check(name, runtime_id, ok, detail)
+        return jsonify({"ok": ok, "mode": binding.get("mode"), "detail": detail})
+    repo_root = getattr(getattr(runner, "host", None), "repo_root", None) or settings.repo_root
+    return jsonify(dataset_registry.check_binding(name, runtime_id, kind, transport, repo_root))
+
+
+@app.route("/api/datasets/<name>/configs", methods=["GET"])
+def api_dataset_configs(name):
+    """XDASH_PLAN.md §8.5's dataset detail page: "which configs ... use it"
+    — best-effort, walks every config's own compose chain (backend/datasets.py's
+    `configs_using_dataset()`), not a raw text grep."""
+    return jsonify({"configs": dataset_registry.configs_using_dataset(name)})
 
 
 @app.route("/api/datasets/kaggle-map", methods=["GET"])
@@ -817,33 +1207,6 @@ def api_put_dataset_map():
         return err('Body must be {"entries": {name: kaggle_dataset, ...}}', 400)
     saved = dataset_map.save_dataset_map(entries)
     return jsonify({"entries": dataset_map.map_with_provenance(), "saved": saved})
-
-
-# --------------------------------------------------------------------------- experiment batches
-# A Batch is a grouping and a policy, never a state machine of its own
-# (XDASH_V2_PLAN.md §3.6): its status is *derived* from its Experiments on
-# every read, which is why there is no start/cancel here. Creating one is
-# `POST /api/experiments` with a batch_name; cancelling one is cancelling its
-# experiments.
-@app.route("/api/batches", methods=["GET"])
-def api_list_batches():
-    return jsonify({"batches": experiments.list_batches()})
-
-
-@app.route("/api/batches/<name>/pause", methods=["POST"])
-def api_pause_batch(name):
-    try:
-        return jsonify(experiments.set_batch_paused(name, True))
-    except experiments.ExperimentError as e:
-        return err(str(e), 404)
-
-
-@app.route("/api/batches/<name>/resume", methods=["POST"])
-def api_resume_batch(name):
-    try:
-        return jsonify(experiments.set_batch_paused(name, False))
-    except experiments.ExperimentError as e:
-        return err(str(e), 404)
 
 
 # --------------------------------------------------------------------------- notifications
@@ -1010,6 +1373,28 @@ def api_list_repos():
     return jsonify({"repos": repos_ops.list_profiles(), "active": settings.profile_name})
 
 
+@app.route("/api/repos/detect", methods=["POST"])
+def api_detect_repo():
+    """Read-only preview for the "+ New profile" wizard (XDASH_PLAN.md §8.6) —
+    never writes a profile file, just reports what's findable at the given
+    repo root so the wizard can show its guesses before Create."""
+    body = request.get_json(silent=True) or {}
+    return jsonify(repos_ops.detect_repo(body.get("repo_root", "")))
+
+
+@app.route("/api/repos", methods=["POST"])
+def api_create_repo():
+    """The wizard's write path: a new `repos/<name>.yaml`, validated the same
+    way a Settings PATCH is before it's written (backend/repos.py's
+    `create_profile()`). Doesn't switch to it — POST /api/repos/active does
+    that, same as switching to any other existing profile."""
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(repos_ops.create_profile(body.get("name", ""), body.get("display_name", ""), body.get("repo_root", "")))
+    except repos_ops.RepoProfileError as e:
+        return err(str(e), 400)
+
+
 @app.route("/api/repos/active", methods=["POST"])
 def api_set_active_repo():
     body = request.get_json(silent=True) or {}
@@ -1047,7 +1432,78 @@ def api_system():
         "tensorboard_port": settings.tensorboard_port,
         "env_activate_cmd": settings.env_activate_cmd,
         "tmux_available": tmux.tmux_available(),
+        # XDASH_PLAN.md §4.1's metrics section — served here so the frontend
+        # can drop its own hardcoded lower_is_better list (static/app.js:6)
+        # and read the profile's instead.
+        "metrics": {"primary": settings.metrics_primary, "lower_is_better": settings.metrics_lower_is_better},
+        "bridge": bridge.bridge_status(),
+        # Settings → About (XDASH_PLAN.md §8.6): XDash's own per-profile state
+        # dir, not the (potentially huge) host repo's outputs/ tree — the size
+        # a Settings reader actually wants to know about is what XDash itself
+        # has accumulated (logs, JSON stores), bounded by construction.
+        "state_dir": str(settings.state_dir),
+        "state_dir_size_bytes": _dir_size_bytes(settings.state_dir),
     })
+
+
+def _dir_size_bytes(root: Path) -> int:
+    total = 0
+    try:
+        for entry in root.rglob("*"):
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return total
+
+
+# --------------------------------------------------------------------------- profile (XDASH_PLAN.md §7, §8.6)
+# Settings edits repos/<profile>.yaml (XDASH_PLAN.md decision #2) — the file that connects
+# XDash to the framework. Comment-preserving (ruamel.yaml round-trip), validated by a
+# throwaway Settings load before anything real is touched, applied live via settings.reload().
+def _profile_error(e):
+    return err(str(e), 400)
+
+
+@app.route("/api/profile", methods=["GET"])
+def api_get_profile():
+    try:
+        return jsonify(profile_ops.get_profile())
+    except profile_ops.ProfileError as e:
+        return _profile_error(e)
+
+
+@app.route("/api/profile", methods=["PATCH"])
+def api_patch_profile():
+    body = request.get_json(silent=True) or {}
+    patch = body.get("patch") if isinstance(body.get("patch"), dict) else body
+    try:
+        return jsonify(profile_ops.patch_profile(patch))
+    except profile_ops.ProfileError as e:
+        return _profile_error(e)
+
+
+@app.route("/api/profile/raw", methods=["GET"])
+def api_get_profile_raw():
+    try:
+        return jsonify({"text": profile_ops.get_profile()["text"]})
+    except profile_ops.ProfileError as e:
+        return _profile_error(e)
+
+
+@app.route("/api/profile/raw", methods=["PUT"])
+def api_put_profile_raw():
+    body = request.get_json(silent=True) or {}
+    text = body.get("text")
+    if not isinstance(text, str):
+        return err('Body must be {"text": "<full profile yaml>"}', 400)
+    try:
+        return jsonify(profile_ops.put_raw(text))
+    except profile_ops.ProfileError as e:
+        return _profile_error(e)
 
 
 # --------------------------------------------------------------------------- static frontend

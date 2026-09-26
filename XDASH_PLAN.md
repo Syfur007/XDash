@@ -1,6 +1,6 @@
 # XDash — the finalized plan
 
-**Date:** 2026-09-25 · **Status:** proposed; nothing in this plan has been built yet.
+**Date:** 2026-09-25 · **Status:** Phases 0 and 1 built (uncommitted; live acceptance deferred) — see `XDASH_PROGRESS.md`. Phases 2–6 not started.
 
 **Supersedes:** `XDASH_V2_PLAN.md` §6 (IA and screens) and the Compute-tab layout in
 `Multi_runner_XDash.md` Phase 6. **Keeps:** the settled decisions: lifecycle nav, no

@@ -13,23 +13,6 @@
 
 display_name: "dissert"
 
-repo_root: "../../dissert"    # path to the repo root, relative to this file
-
-configs_dir: "configs"        # where .yaml / .yml experiment configs live
-
-# dissert's whole outputs/ tree is nested per experiment_id
-# ("<experiment_name>-s<seed>") rather than split by artifact type, so
-# logs_dir/runs_dir/plots_dir/reports_dir all point at the same root —
-# each reader below finds what it needs by walking or by content, not by a
-# type-specific subpath (MULTI_REPO_PLAN.md §2):
-#   - reports.py finds report.json files by content ("metrics" key), so
-#     nested outputs/experiments/*/eval/report.json is found the same way
-#     flat logs/*/report.json is.
-#   - tensorboard_manager.py just execs `tensorboard --logdir <runs_dir>`,
-#     which already recursively discovers nested run subdirectories.
-#   - history.py's tree walk will also surface .pth/checkpoint files as inert
-#     "binary" entries under this root — harmless noise, not a blocker
-#     (MULTI_REPO_PLAN.md §2's optional Phase 6 polish item).
 logs_dir: "outputs/experiments"
 runs_dir: "outputs/experiments"
 checkpoints_dir: "outputs/experiments"
@@ -50,36 +33,43 @@ ledger_dir: "outputs/ledger"
 # ledger.py branches on (MULTI_REPO_PLAN.md §2/§3).
 manifest_layout: "experiments"
 
-python_executable: "python"   # interpreter used to launch train.py / eval.py
+bridge_python_executable: "/home/syfur/miniconda3/envs/thesis/bin/python"
 
-# Corrected 2026-09 (EXPERIMENT_AUTOMATION_PLAN.md §2.1): dissert's own
-# train.py DOES take a seed directly — `--seed N` (single) or `--seeds N…`
-# (mutually exclusive), see dissert/train.py's parse_args() — unlike
-# segpriors, which needs its scripts/run_iccit_sweep.py wrapper because bare
-# train.py has no --seed flag at all. No wrapper is required here; the
-# previous version of this comment claimed otherwise and was wrong.
-train_script: "train.py"
-eval_script: "eval.py"
+# Framework hooks (XDASH_PLAN.md §4). `xdash:dissert.locate_run` is the
+# XDash-shipped adapter in backend/bridge_scripts/adapters/dissert.py: it
+# computes the run dir dissert will write (load_config -> config_hash ->
+# experiment_paths) before launch, and XDash stores it on the attempt (§4.4).
+# `resolve_config` is dissert's own loader (compose-merge + schema
+# validation); XDash calls it with one config path to validate an overlay
+# when an experiment is composed, so a typo'd key fails then, not at hour
+# three of a run (§4.3).
+# resolve_config points at the XDash-shipped adapter (not dissert's module path
+# directly) so it survives dissert's src/dissert/ package reorg without an edit
+# here: the adapter tries the new `dissert.config.loader:load_config` path first,
+# then falls back to the old `utils.config:load_config` one. See
+# XDASH_PROGRESS.md's Phase 2 section for the switch-over checklist.
+hooks:
+  locate_run: "xdash:dissert.locate_run"
+  resolve_config: "xdash:dissert.resolve_config"
 
-# Format string for passing a seed on the command line — see
-# backend/config.py's Settings.seed_arg. dissert's train.py takes a single
-# seed via --seed.
-seed_arg: "--seed {seed}"
+# XDASH_PLAN.md §4.3 — an experiment's overrides (`overlay`, dotted keys like
+# training.epochs) are written at dispatch as
+# <repo_root>/.xdash/overlays/<experiment_id>.yaml:
+#     compose: ["../../configs/experiment/.../x.yaml"]
+#     training: {epochs: 50}
+# and train.py and eval.py both get `--config` that file, so they resolve the
+# same config and the same config_hash (X12). This names the include key of
+# dissert's loader (utils/config.py; paths resolve relative to the including
+# file). dissert's .gitignore should list `.xdash/`.
+eval_default_args: ["--allow-test-eval"]
 
-bridge_python_executable: ""
+# XDASH_PLAN.md §4.5 — Kaggle clones dissert from GitHub and checks out the
+# commit recorded at dispatch. A dirty tree or an unpushed commit blocks the
+# Kaggle dispatch with `code-not-pushed`; true downgrades that to a warning
+# recorded on the attempt (and Kaggle then runs the pushed commit / the
+# default branch, not your local changes).
+allow_unpushed: false
 
-# dissert's eval.py --ensemble means fold-ensemble (across K-fold splits),
-# not seed-ensemble — verify this is the intended default before reusing
-# segpriors' own eval_default_args verbatim; left empty here since dissert's
-# eval.py flag set hasn't been confirmed to need it by default.
-eval_default_args: []
-
-env_activate_cmd: "conda activate thesis"
-
-# Left unset: defaults to "xdash-dissert" (MULTI_REPO_PLAN.md §5), distinct
-# from segpriors' "xdash" prefix so sessions from either profile never
-# collide even though the two repos share a lot of config-name vocabulary.
-# tmux_session_prefix: "xdash-dissert"
 tmux_pane_width: 500
 tmux_pane_height: 50
 tmux_history_limit: 100000
@@ -114,3 +104,59 @@ kaggle_dataset_map:
   clinicdb: "syfur007/clinicdb-images"
 kaggle_poll_interval_seconds: 180
 kaggle_webhook_url: ""
+framework:
+  repo_root: "../../dissert"  # path to the repo root, relative to this file
+
+  configs_dir: "configs"      # where .yaml / .yml experiment configs live
+
+# dissert's whole outputs/ tree is nested per experiment_id
+# ("<experiment_name>-s<seed>") rather than split by artifact type, so
+# logs_dir/runs_dir/plots_dir/reports_dir all point at the same root —
+# each reader below finds what it needs by walking or by content, not by a
+# type-specific subpath (MULTI_REPO_PLAN.md §2):
+#   - reports.py finds report.json files by content ("metrics" key), so
+#     nested outputs/experiments/*/eval/report.json is found the same way
+#     flat logs/*/report.json is.
+#   - tensorboard_manager.py just execs `tensorboard --logdir <runs_dir>`,
+#     which already recursively discovers nested run subdirectories.
+#   - history.py's tree walk will also surface .pth/checkpoint files as inert
+#     "binary" entries under this root — harmless noise, not a blocker
+#     (MULTI_REPO_PLAN.md §2's optional Phase 6 polish item).
+  overlay_compose_key: "compose"
+
+# dissert's eval.py refuses to touch the test set without a recorded test
+# token: with neither --test-token nor --allow-test-eval it logs an error and
+# exits 0 having evaluated nothing, so every XDash eval produced no report.
+# --allow-test-eval mints one token per evaluated seed and records it in
+# outputs/ledger/test_evals.csv — dissert's own mechanism for exactly this
+# kind of manual (non-sweep) eval. (--ensemble is deliberately absent: it
+# means fold-ensemble in dissert, not a sane default.)
+commands:
+  python: "python"            # interpreter used to launch train.py / eval.py
+
+# Corrected 2026-09 (EXPERIMENT_AUTOMATION_PLAN.md §2.1): dissert's own
+# train.py DOES take a seed directly — `--seed N` (single) or `--seeds N…`
+# (mutually exclusive), see dissert/train.py's parse_args() — unlike
+# segpriors, which needs its scripts/run_iccit_sweep.py wrapper because bare
+# train.py has no --seed flag at all. No wrapper is required here; the
+# previous version of this comment claimed otherwise and was wrong.
+  env_activate: "conda activate thesis"
+
+# Left unset: defaults to "xdash-dissert" (MULTI_REPO_PLAN.md §5), distinct
+# from segpriors' "xdash" prefix so sessions from either profile never
+# collide even though the two repos share a lot of config-name vocabulary.
+# tmux_session_prefix: "xdash-dissert"
+  train: '{python} train.py --config {config} --seeds {seed} --repeats 1 {budget} {resume} {extra}'
+  eval: '{python} eval.py --config {config} --seeds {seed} --repeats 1 {extra}'
+  budget: --max-hours {hours}
+  resume: --resume
+metrics:
+  lower_is_better:
+  - hd95
+  - asd
+  - mean_ms
+  - median_ms
+  - std_ms
+  - p95_ms
+  - eval_duration_s
+  - ece

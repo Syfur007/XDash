@@ -9,15 +9,8 @@
 
 display_name: "segpriors"
 
-repo_root: "../../segpriors"  # path to the repo root, relative to this file
-
-# Manifest/ledger directory shape ledger.py expects (MULTI_REPO_PLAN.md §2):
-# "legacy" = artifacts/runs/<run_id>/manifest.json, artifacts/ledger/*.csv
-# (this repo's shape). "experiments" = the newer outputs/experiments/<id>/
-# nested layout (dissert's shape) — see repos/dissert.yaml.
 manifest_layout: "legacy"
 
-configs_dir: "configs"        # where .yaml / .yml experiment configs live
 logs_dir: "logs"              # where train.py / eval.py write their log files
 runs_dir: "runs"              # TensorBoard event directory
 checkpoints_dir: "checkpoints"
@@ -30,28 +23,6 @@ plots_dir: "logs"             # where eval.py writes plots/overlays/images — b
 # directory doesn't exist yet: those views just show "no runs recorded yet".
 artifacts_dir: "artifacts"
 
-python_executable: "python"   # interpreter used to launch train.py / eval.py
-
-# Thin CLI wrappers around orchestration.runner.run_sweep (scripts/), not bare
-# train.py/eval.py: bare train.py has no --seed flag and never calls run_sweep,
-# so a dashboard launch through it is seed-less and writes no manifest.json/
-# ledger row — the Runs/Ledger tabs stay empty for anything launched that way.
-# These wrappers loop the pre-registered seeds internally, so one dashboard
-# launch is still one experiment cell (train_script writes N manifested runs).
-train_script: "scripts/run_iccit_sweep.py"
-eval_script: "scripts/eval_iccit_sweep.py"
-
-# Format string for passing a seed on the command line — see
-# backend/config.py's Settings.seed_arg. --seeds takes nargs="+", but a
-# single value works fine as a one-element list — this pins one seed per
-# batch row rather than the wrapper's own default multi-seed sweep.
-seed_arg: "--seeds {seed}"
-
-# Interpreter used for "bridge" calls into the host repo's own code — schema-aware
-# config validation, model-registry introspection, and similar features that need
-# the host repo's actual dependencies (pydantic, torch, ...) importable, which the
-# dashboard's own minimal requirements.txt deliberately does not install. Leave
-# blank to reuse python_executable above (the common case: one env runs everything).
 bridge_python_executable: ""
 
 # Left empty: scripts/eval_iccit_sweep.py's argparse only defines
@@ -60,21 +31,6 @@ bridge_python_executable: ""
 # about K-Fold ensembling, which this study's run_sweep folds=(None,) call
 # path never uses anyway.)
 eval_default_args: []
-
-# ---------------------------------------------------------------------------
-# Every experiment is run inside its own tmux session, exactly like you'd run
-# it by hand: a session is created, `cd` into repo_root, this activation
-# command is typed (if set), then the train/eval command is typed. Output is
-# streamed to the dashboard by polling the tmux pane.
-#
-# Examples:
-#   env_activate_cmd: "conda activate thesis"
-#   env_activate_cmd: "source ~/miniconda3/bin/activate thesis"
-#   env_activate_cmd: "source .venv/bin/activate"
-# Leave blank to run with whatever environment the dashboard server itself
-# was started in.
-env_activate_cmd: "conda activate thesis"
-
 tmux_session_prefix: "xdash"
 tmux_pane_width: 500     # wide pane so long log lines don't wrap and break parsing
 tmux_pane_height: 50
@@ -136,3 +92,49 @@ kaggle_poll_interval_seconds: 180
 # cancelAcknowledged) — best-effort, a failed webhook call never affects
 # anything else the poller does.
 kaggle_webhook_url: ""
+framework:
+  repo_root: "../../segpriors" # path to the repo root, relative to this file
+
+# Manifest/ledger directory shape ledger.py expects (MULTI_REPO_PLAN.md §2):
+# "legacy" = artifacts/runs/<run_id>/manifest.json, artifacts/ledger/*.csv
+# (this repo's shape). "experiments" = the newer outputs/experiments/<id>/
+# nested layout (dissert's shape) — see repos/dissert.yaml.
+  configs_dir: "configs"      # where .yaml / .yml experiment configs live
+commands:
+  python: "python"            # interpreter used to launch train.py / eval.py
+
+# Thin CLI wrappers around orchestration.runner.run_sweep (scripts/), not bare
+# train.py/eval.py: bare train.py has no --seed flag and never calls run_sweep,
+# so a dashboard launch through it is seed-less and writes no manifest.json/
+# ledger row — the Runs/Ledger tabs stay empty for anything launched that way.
+# These wrappers loop the pre-registered seeds internally, so one dashboard
+# launch is still one experiment cell (train_script writes N manifested runs).
+
+# ---------------------------------------------------------------------------
+# Every experiment is run inside its own tmux session, exactly like you'd run
+# it by hand: a session is created, `cd` into repo_root, this activation
+# command is typed (if set), then the train/eval command is typed. Output is
+# streamed to the dashboard by polling the tmux pane.
+#
+# Examples:
+#   env_activate_cmd: "conda activate thesis"
+#   env_activate_cmd: "source ~/miniconda3/bin/activate thesis"
+#   env_activate_cmd: "source .venv/bin/activate"
+# Leave blank to run with whatever environment the dashboard server itself
+# was started in.
+  env_activate: "conda activate thesis"
+
+  train: '{python} scripts/run_iccit_sweep.py --config {config} --seeds {seed} {budget} {resume} {extra}'
+  eval: '{python} scripts/eval_iccit_sweep.py --config {config} --seeds {seed} {extra}'
+  budget: --max-hours {hours}
+  resume: --resume
+metrics:
+  lower_is_better:
+  - hd95
+  - asd
+  - mean_ms
+  - median_ms
+  - std_ms
+  - p95_ms
+  - eval_duration_s
+  - ece
