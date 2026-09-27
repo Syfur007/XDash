@@ -175,13 +175,13 @@ class ColabRunner(MachineRunner):
         if account is None:
             return {"code": "no-account", "detail": "Account not found"}
 
-        # XDASH_PLAN.md §5, X4: Colab has no data of its own — every dispatch
-        # must resolve a binding (its kind default is `fetch` from a Kaggle
-        # source when the dataset declares one; §5.2's resolution order).
+        # DATASETS_PLAN.md §4.2: Colab has no data of its own — every dispatch
+        # must resolve a plan (download on the VM from Kaggle when a data
+        # account is set, else push the local copy).
         from .. import datasets
-        data = datasets.data_mode_for_experiment(experiment["config_path"], self.id, self.kind)
-        if not data.get("mode"):
-            return {"code": data.get("code", "no-dataset-binding"), "detail": data.get("detail", "")}
+        plan = datasets.plan_delivery_for_config(experiment["config_path"], self.id, self.kind)
+        if plan.get("state") == "blocked":
+            return {"code": plan.get("code") or "dataset-unavailable", "detail": plan.get("detail", "")}
 
         if not colab.colab_available():
             return {"code": "host-unreachable", "detail": f"'{settings.colab_executable}' is not on PATH"}

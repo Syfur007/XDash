@@ -518,6 +518,36 @@ function copyResolvedConfig(run) {
   );
 }
 
+// ------------------------------------------------------------ test-set evaluation audit trail
+// DATASETS_PLAN.md Decision 8: moved here as-is from the old Datasets tab
+// (it records test-set evaluations, not a dataset property) — straight off
+// artifacts/ledger/test_evals.csv (backend/ledger.py), unchanged.
+async function loadTestEvalsTable() {
+  const tableEl = document.getElementById("test-evals-table");
+  const countEl = document.getElementById("test-evals-count");
+  if (!tableEl) return;
+  try {
+    const data = await api("/api/ledger/test_evals");
+    const rows = data.rows || [];
+    countEl.textContent = rows.length ? String(rows.length) : "";
+    if (!rows.length) {
+      tableEl.innerHTML = `<tr><td colspan="5" class="empty-state" style="padding:20px 0;">No test-set evaluations recorded yet in artifacts/ledger/test_evals.csv — every issue_test_token() call appends a row here, so this is a real audit trail of every touch of the guarded test set, not a convention anyone has to remember.</td></tr>`;
+      return;
+    }
+    const header = `<tr><th>Run ID</th><th>Token</th><th>Issued</th><th>Config hash</th><th>Checkpoint</th></tr>`;
+    const body = rows.map((r) => `<tr>
+      <td>${escapeHtml(r.run_id || "")}</td>
+      <td title="${escapeHtml(r.token || "")}">${escapeHtml((r.token || "").slice(0, 10))}…</td>
+      <td>${escapeHtml(r.issued_time || "")}</td>
+      <td title="${escapeHtml(r.config_hash || "")}">${escapeHtml((r.config_hash || "").slice(0, 10))}…</td>
+      <td>${escapeHtml(r.checkpoint_path || "–")}</td>
+    </tr>`).join("");
+    tableEl.innerHTML = `<thead>${header}</thead><tbody>${body}</tbody>`;
+  } catch (e) {
+    tableEl.innerHTML = `<tr><td colspan="5" class="empty-state" style="padding:20px 0;">${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
 function initRunsButtons() {
   document.getElementById("btn-refresh-runs").addEventListener("click", loadRuns);
   document.getElementById("run-group-filter").addEventListener("input", (e) => { state.runFilter = e.target.value; renderRunGroups(); });

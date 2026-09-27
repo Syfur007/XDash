@@ -133,7 +133,7 @@ def test_mode_is_applied_before_the_file_exists(tmp_path):
 # ----------------------------------------------------------------- every store uses it
 def _stores():
     """(label, path, load) for every XDash-owned JSON store (X11's list)."""
-    from backend import (colab, dataset_map, experiments, hosts, kaggle, monitors, notifications, run_notes,
+    from backend import (colab, datasets, experiments, hosts, kaggle, monitors, notifications, run_notes,
                          scheduler, terminals)
     from backend.config import settings
     return [
@@ -143,7 +143,7 @@ def _stores():
         ("monitors", lambda: settings.monitors_file, monitors._load),
         ("run_notes", lambda: settings.run_notes_file, run_notes._load),
         ("notifications", lambda: settings.notifications_file, notifications._load_notifications),
-        ("dataset_map", lambda: settings.dataset_map_file, dataset_map.load_dataset_map),
+        ("datasets", lambda: settings.datasets_file, datasets._load),
         ("hosts", lambda: hosts.HOSTS_FILE, hosts._load_records),
         ("kaggle-system", lambda: kaggle._scope_paths(kaggle.SCOPE_SYSTEM)[0], lambda: kaggle._load_scope(kaggle.SCOPE_SYSTEM)),
         ("kaggle-repo", lambda: kaggle._scope_paths(kaggle.SCOPE_REPO)[0], lambda: kaggle._load_scope(kaggle.SCOPE_REPO)),

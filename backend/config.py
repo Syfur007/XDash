@@ -397,16 +397,19 @@ class Settings:
             default="/kaggle/working/py38_env/bin/python",
         )
 
-        # §3.4's precedence rule 3 — a profile's own legacy dataset-name -> Kaggle-dataset-slug
-        # map, used to seed data/<profile>/dataset_map.json (XDash-owned storage, rule 2) the
-        # first time it's read. Keys are case-folded here so a profile spelling "ClinicDB:" and
-        # a config later spelling "clinicdb" still match (XDASH_V2_PLAN.md D11 — the old lookup
-        # case-folded only at the call site, never at load, so a mixed-case key never matched).
-        self.kaggle_dataset_map = {
-            str(name).strip().casefold(): str(source).strip()
-            for name, source in (raw.get("kaggle_dataset_map") or {}).items()
-            if str(name).strip() and str(source).strip()
+        # DATASETS_PLAN.md §8.4 — channel-mode labels for the sample preview
+        # (today's m1-m5), profile-driven instead of hard-coded in
+        # static/index.html. Empty means the profile declares none, in which
+        # case the channel part of the preview is hidden and a thumbnail
+        # just opens the image.
+        datasets_raw = raw.get("datasets")
+        datasets_raw = datasets_raw if isinstance(datasets_raw, dict) else {}
+        self.dataset_channel_modes: Dict[str, str] = {
+            str(k): str(v) for k, v in (datasets_raw.get("channel_modes") or {}).items()
         }
+        # §8.5 — /api/fs/list refuses to serve anything when server_host
+        # isn't loopback, unless the profile opts in explicitly.
+        self.datasets_allow_fs_browse = bool(datasets_raw.get("allow_fs_browse", False))
 
         # Runtime state lives inside XDash/data, namespaced per profile
         # (MULTI_REPO_PLAN.md §5) so switching profiles never mixes one
@@ -426,15 +429,12 @@ class Settings:
         self.monitors_file = self.state_dir / "monitors.json"
         self.scheduler_file = self.state_dir / "scheduler.json"
         self.run_notes_file = self.state_dir / "run_notes.json"
-        # XDash-owned dataset-name -> Kaggle-dataset-slug map (XDASH_V2_PLAN.md §3.4 rule 2),
-        # lazily seeded from kaggle_dataset_map above the first time it's read/written — see
-        # backend/dataset_map.py's resolve_kaggle_dataset(). Per-profile like every other state
-        # file here, so mapping clinicdb for dissert never leaks into another profile.
-        self.dataset_map_file = self.state_dir / "dataset_map.json"
-        # The dataset registry (XDASH_PLAN.md §5.2) — replaces dataset_map.json's
-        # narrow name->Kaggle-slug map with per-runtime placement bindings
-        # (path/push/fetch/attach). dataset_map.json is still read (never
-        # written) as the migration source the first time this is empty.
+        # The dataset registry (DATASETS_PLAN.md §3.2) — one store, one Kaggle
+        # slug per dataset, delivery computed rather than configured. The old
+        # dataset_map.json (name -> Kaggle slug) is still read, once, as a
+        # migration source (backend/datasets.py's own _legacy_kaggle_slug_map()) —
+        # never written again, and renamed to dataset_map.json.migrated on the
+        # first real write of the v2 store (§10).
         self.datasets_file = self.state_dir / "datasets.json"
         # The resolved, absolute path backend/kaggle.py actually opens for the default template —
         # see kaggle_default_template's own comment above for why this moved out of repo_root.

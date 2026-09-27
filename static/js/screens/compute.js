@@ -473,7 +473,7 @@ async function renderRuntimeSettingsColab(body, r) {
   try {
     const data = await api("/api/colab/accounts");
     account = (data.accounts || []).find((a) => a.name === name);
-    const registry = await api("/api/datasets/registry");
+    const registry = await api("/api/datasets");
     dataAccount = registry.data_account;
   } catch (e) { body.innerHTML = `<div class="empty-state">${escapeHtml(e.message)}</div>`; return; }
   if (!account) { body.innerHTML = `<div class="empty-state">Account not found.</div>`; return; }

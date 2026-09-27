@@ -62,13 +62,20 @@ class Transport:
     def run(self, argv: Sequence[str], timeout: Optional[float] = None) -> subprocess.CompletedProcess:
         raise NotImplementedError
 
-    def push(self, local_dir, remote_dir, excludes: Sequence[str] = ()) -> None:
+    def push(self, local_dir, remote_dir, excludes: Sequence[str] = (), delete: bool = False) -> None:
         raise NotImplementedError
 
     def pull(self, remote_dir, local_dir, excludes: Sequence[str] = ()) -> None:
         raise NotImplementedError
 
     def pull_file(self, remote_path, local_path) -> None:
+        raise NotImplementedError
+
+    def put_text(self, remote_path, text: str, mode: int = 0o600) -> None:
+        """Writes *text* to *remote_path* over stdin — never through an
+        argument list (DATASETS_PLAN.md §4.6: a Kaggle credentials file
+        must never be visible to `ps` on a shared box). *mode* is applied
+        with chmod right after the write."""
         raise NotImplementedError
 
     def exists(self, remote_path, kind: str = "d") -> bool:
@@ -117,7 +124,7 @@ class LocalTransport(Transport):
         except subprocess.TimeoutExpired:
             raise TransportError("Command timed out after %ss: %s" % (timeout, " ".join(argv)))
 
-    def push(self, local_dir, remote_dir, excludes: Sequence[str] = ()) -> None:
+    def push(self, local_dir, remote_dir, excludes: Sequence[str] = (), delete: bool = False) -> None:
         return None
 
     def pull(self, remote_dir, local_dir, excludes: Sequence[str] = ()) -> None:
@@ -125,6 +132,10 @@ class LocalTransport(Transport):
 
     def pull_file(self, remote_path, local_path) -> None:
         return None
+
+    def put_text(self, remote_path, text: str, mode: int = 0o600) -> None:
+        from .store import atomic_write_text
+        atomic_write_text(Path(remote_path).expanduser(), text, mode=mode)
 
     def exists(self, remote_path, kind: str = "d") -> bool:
         p = Path(remote_path).expanduser()
@@ -213,14 +224,40 @@ class SshTransport(Transport):
             raise TransportError("rsync failed for '%s': %s" % (self.host_id, (proc.stderr or proc.stdout).strip()[-500:]))
         return proc
 
-    def push(self, local_dir, remote_dir, excludes: Sequence[str] = (), timeout: float = 900.0) -> None:
+    def push(self, local_dir, remote_dir, excludes: Sequence[str] = (), delete: bool = False, timeout: float = 900.0) -> None:
         """Trailing slashes are load-bearing: 'src/' means *contents of src*,
-        so the tree lands at remote_dir rather than remote_dir/src."""
+        so the tree lands at remote_dir rather than remote_dir/src.
+        *delete* (DATASETS_PLAN.md §4.4, fixes DS9) makes the remote side an
+        exact mirror of *local_dir* — only dataset staging into the host
+        cache passes True; the working-tree push never does (a stale file
+        the remote created itself, e.g. a checkpoint, must survive it)."""
         self._rsync(
             "%s/" % str(local_dir).rstrip("/"),
             "%s:%s/" % (self._target(), str(remote_dir).rstrip("/")),
-            excludes, delete=False, timeout=timeout,
+            excludes, delete=delete, timeout=timeout,
         )
+
+    def put_text(self, remote_path, text: str, mode: int = 0o600, timeout: float = 60.0) -> None:
+        """Writes *text* to *remote_path* over the ssh command's stdin, never
+        an argument (DATASETS_PLAN.md §4.6) — a Kaggle credentials file on a
+        Colab VM. `install -m` creates the file (and any parent dir) with
+        the right mode atomically enough for a single-tenant VM; the plan's
+        `trap ... rm -f` deletion happens in the caller's own command, not
+        here."""
+        remote = remote_shell_path(remote_path)
+        cmd = "mkdir -p $(dirname %s) && umask 077 && cat > %s && chmod %o %s" % (remote, remote, mode, remote)
+        argv = ["ssh"] + self._opts() + [self._target(), cmd]
+        try:
+            proc = subprocess.run(argv, input=text, capture_output=True, text=True, timeout=timeout)
+        except FileNotFoundError:
+            raise TransportError("ssh not found")
+        except subprocess.TimeoutExpired:
+            raise TransportError("put_text to %s timed out after %ss" % (self.host_id, timeout))
+        if proc.returncode != 0:
+            raise TransportError(
+                "put_text failed for '%s' (exit %s): %s"
+                % (self.host_id, proc.returncode, (proc.stderr or proc.stdout).strip()[-300:])
+            )
 
     def pull(self, remote_dir, local_dir, excludes: Sequence[str] = (), timeout: float = 900.0) -> None:
         Path(local_dir).mkdir(parents=True, exist_ok=True)

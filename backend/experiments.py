@@ -106,11 +106,14 @@ _EDITABLE = {
 # a runner returns that isn't listed here (forward-compat for a new kind)
 # sorts last, never crashes.
 _BLOCK_PRIORITY = {
-    # "no-dataset-binding" (XDASH_PLAN.md §5.2) is the canonical code every
-    # runner emits since Phase 2; "no-dataset-mapping" is kept as an alias
-    # (same priority) for anything still emitting the pre-Phase-2 spelling.
+    # DATASETS_PLAN.md §4.2/§9: plan_delivery()'s own codes are the canonical
+    # ones now. "no-dataset-binding"/"no-dataset-mapping" are kept as legacy
+    # aliases (same priority) for anything still emitting the pre-DATASETS_PLAN
+    # spelling.
     "no-account": 0, "runtime-missing": 0,
-    "no-dataset-binding": 1, "no-dataset-mapping": 1, "requires-unmet": 1, "pool-busy": 2,
+    "no-dataset-binding": 1, "no-dataset-mapping": 1, "dataset-draft": 1, "dataset-unavailable": 1,
+    "no-kaggle-source": 1, "kaggle-no-access": 1, "no-data-account": 1, "dataset-target-occupied": 1,
+    "requires-unmet": 1, "pool-busy": 2,
     "exceeds-session-cap": 3, "quota-exhausted": 4, "code-not-pushed": 5,
 }
 
@@ -2137,13 +2140,14 @@ _ACTION_HANDLERS: Dict[str, Callable[..., None]] = {
 # --------------------------------------------------------------------------- preflight (§6.5)
 def _data_mode(runner: Runner, experiment: Dict[str, Any]) -> Dict[str, Any]:
     """How the runtime would get the experiment's dataset — the real
-    resolver (XDASH_PLAN.md §5): backend/datasets.py's registry + bindings,
-    with the same `no-dataset-binding` code every runner's own can_accept()
-    uses, so preflight's matrix and the live block always agree."""
+    resolver (DATASETS_PLAN.md §4.1): backend/datasets.py's
+    `plan_delivery_for_config()`, the same one every runner's own
+    can_accept() uses, so preflight's matrix and the live block always
+    agree."""
     try:
-        return datasets_mod.data_mode_for_experiment(experiment["config_path"], runner.id, runner.kind)
+        return datasets_mod.plan_delivery_for_config(experiment["config_path"], runner.id, runner.kind)
     except Exception:  # noqa: BLE001 — a preflight cell never fails the matrix
-        return {"mode": None, "code": "no-dataset-binding"}
+        return {"strategy": None, "state": "blocked", "code": "dataset-unavailable", "detail": ""}
 
 
 def preflight(ids: Optional[List[str]] = None, specs: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:

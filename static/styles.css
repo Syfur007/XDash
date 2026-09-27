@@ -212,16 +212,6 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .chip-list .badge [data-chip-remove]{ opacity:0.7; }
 .chip-list .badge [data-chip-remove]:hover{ opacity:1; }
 
-/* ---------------------------------------------------------------- Datasets: dataset x runtime matrix (XDASH_PLAN.md §8.5) */
-.dataset-matrix th:first-child, .dataset-matrix td:first-child{ text-align:left; }
-.dataset-matrix td.matrix-cell{ cursor:pointer; font-size:14px; font-weight:600; }
-.dataset-matrix td.matrix-cell:hover{ background: var(--surface-2); }
-.dataset-matrix td.matrix-cell.emerald{ color: var(--emerald); }
-.dataset-matrix td.matrix-cell.slate{ color: var(--slate); }
-.dataset-matrix td.matrix-cell.red{ color: var(--red); }
-.dataset-matrix td.matrix-name{ cursor:pointer; }
-.dataset-matrix td.matrix-name:hover{ text-decoration:underline; }
-
 .path-input{ display:flex; gap:6px; align-items:center; width:100%; }
 .path-input .text-input{ min-width:0; }
 /* .modal(width:380px), declared further down this file, has equal selector specificity to a
@@ -1129,24 +1119,7 @@ tr.kbd-focus td:first-child{ color: var(--amber); }
 .add-monitor-form .text-input{ width:200px; }
 .add-monitor-form .field.grow .text-input{ width:100%; }
 
-/* ---------------------------------------------------------------- data (datasets) view */
-.dataset-card-list{ display:flex; flex-wrap:wrap; gap:12px; padding:14px 16px; }
-.dataset-card{
-  background: var(--surface-2); border:1px solid var(--border-soft); border-radius: var(--radius-lg);
-  padding:12px 14px; width:220px; cursor:pointer; transition: border-color .1s ease, transform .1s ease;
-}
-.dataset-card:hover{ border-color: var(--teal); transform: translateY(-1px); }
-.dataset-card.active{ border-color: var(--amber); background: var(--surface-3); }
-.dataset-card-name{ font-weight:600; font-size:14px; color: var(--text); }
-.dataset-card-root{ font-family: var(--mono); font-size:11px; color: var(--text-muted); margin-top:3px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.dataset-card-badges{ display:flex; gap:6px; flex-wrap:wrap; margin-top:8px; }
-
-.channel-preview-form{ display:flex; gap:14px; flex-wrap:wrap; align-items:flex-end; margin:10px 0 16px; }
-.channel-preview-form .field{ display:flex; flex-direction:column; gap:5px; }
-.channel-preview-form .field.grow{ flex:1; min-width:240px; }
-.channel-preview-form label{ font-family: var(--mono); font-size:11px; color: var(--text-muted); text-transform:uppercase; letter-spacing:0.3px; }
-.channel-preview-form .text-input.grow{ width:100%; }
-
+/* ---------------------------------------------------------------- Datasets (DATASETS_PLAN.md §8) channel preview */
 .channel-preview-meta{ font-family: var(--mono); font-size:12px; color: var(--text-muted); margin-bottom:10px; }
 .channel-tile-grid{ display:flex; flex-wrap:wrap; gap:10px; }
 .channel-tile{
@@ -1354,4 +1327,20 @@ tr.kbd-focus td:first-child{ color: var(--amber); }
   text-align:left !important;
   border-bottom:1px solid var(--border-soft);
 }
+
+/* ---------------------------------------------------------- Datasets (DATASETS_PLAN.md §8) */
+.datasets-layout{ display:grid; grid-template-columns:280px 1fr; gap:16px; align-items:start; }
+@media (max-width:820px){ .datasets-layout{ grid-template-columns:1fr; } }
+.datasets-list-panel{ max-height:calc(100vh - 160px); overflow:auto; }
+.datasets-detail-panel{ min-height:200px; }
+.dataset-list-row{ display:flex; flex-direction:column; gap:4px; padding:10px 16px; border-bottom:1px solid var(--border-soft); cursor:pointer; }
+.dataset-list-row:hover{ background:var(--surface-1); }
+.dataset-list-row.active{ background:var(--surface-2); }
+.dataset-list-row-top{ display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.dataset-list-row-kinds{ font-family:var(--mono); font-size:11px; color:var(--text-muted); display:flex; gap:8px; }
+.chip-row{ display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+.chip-row .badge{ cursor:pointer; }
+.thumb-grid{ display:flex; flex-wrap:wrap; gap:8px; margin:8px 0; }
+.thumb-grid img{ width:96px; height:96px; object-fit:cover; border-radius:var(--radius-sm); border:1px solid var(--border-soft); cursor:pointer; }
+.thumb-grid img:hover{ outline:2px solid var(--accent, #4a8dff); }
 .assignment-notes-cell{ max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }

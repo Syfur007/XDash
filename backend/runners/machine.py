@@ -259,9 +259,9 @@ class MachineRunner(Runner):
         if not _cached_available(self.host.id, self._transport):
             return {"code": "host-unreachable", "detail": f"Host '{self.host.id}' is not reachable"}
         if not self.host.is_local:
-            data = datasets.data_mode_for_experiment(experiment["config_path"], self.id, self.kind)
-            if not data.get("mode"):
-                return {"code": data.get("code", "no-dataset-binding"), "detail": data.get("detail", "")}
+            plan = datasets.plan_delivery_for_config(experiment["config_path"], self.id, self.kind)
+            if plan.get("state") == "blocked":
+                return {"code": plan.get("code") or "dataset-unavailable", "detail": plan.get("detail", "")}
         if self._free_slots() <= 0:
             return {"code": "pool-busy", "detail": "Nothing free this tick"}
         return None
@@ -302,15 +302,18 @@ class MachineRunner(Runner):
         can_accept() and here (or a push/fetch that fails outright) blocks
         the dispatch rather than launching onto missing data."""
         if not self.host.is_local:
+            name, _root = datasets.dataset_identity_for_config(experiment["config_path"])
+            if not name:
+                raise RunnerBlocked({"code": "no-dataset-binding", "detail": "Config declares no dataset"})
             try:
-                datasets.place_dataset(
-                    experiment["config_path"], self.id, self.kind, self._transport, self.host.repo_root,
-                    local_repo_root=settings.repo_root, data_account_creds=datasets.data_account_creds(),
+                datasets.stage(
+                    name, self.id, self.kind, self._transport, self.host.repo_root,
+                    data_account_creds=datasets.data_account_creds(),
                 )
             except datasets.PlacementError as e:
                 raise RunnerBlocked({"code": e.code, "detail": e.detail})
             except transport_mod.TransportError as e:
-                raise RunnerBlocked({"code": "no-dataset-binding", "detail": "Placement failed: %s" % e})
+                raise RunnerBlocked({"code": "dataset-unavailable", "detail": "Placement failed: %s" % e})
         self._transport.push(settings.repo_root, self.host.repo_root, transport_mod.DEFAULT_PUSH_EXCLUDES)
         overlay = framework.write_overlay(experiment)
         if overlay and not self.host.is_local:

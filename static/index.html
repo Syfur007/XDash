@@ -428,6 +428,7 @@
         <button class="subtab-btn active" data-subtab="runs">Runs</button>
         <button class="subtab-btn" data-subtab="reports">Reports</button>
         <button class="subtab-btn" data-subtab="files">Files</button>
+        <button class="subtab-btn" data-subtab="test-evals">Test evals</button>
       </div>
 
       <!-- ····························································· Runs -->
@@ -520,6 +521,17 @@
             <div class="editor-body" id="history-file-body" style="overflow:auto;">
               <div class="empty-state">Select a file on the left to view it.</div>
             </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ····························································· Test evals (DATASETS_PLAN.md Decision 8: moved here from Datasets) -->
+      <div class="subtab-panel" data-subtab="test-evals">
+        <div class="panel">
+          <div class="panel-header"><span>Test-set evaluation audit trail</span><span id="test-evals-count"></span></div>
+          <div class="view-sub" style="padding:0 16px 10px;">Every <span style="font-family:var(--mono)">issue_test_token()</span> call, straight off <span style="font-family:var(--mono)">artifacts/ledger/test_evals.csv</span> — a real audit trail of every touch of the guarded test set, not a convention anyone has to remember.</div>
+          <div style="padding:0 16px 16px; overflow:auto;">
+            <table class="compare-table" id="test-evals-table" style="width:100%;"></table>
           </div>
         </div>
       </div>
@@ -822,113 +834,79 @@
       <div class="view-header">
         <div>
           <div class="view-title">Datasets</div>
-          <div class="view-sub">Every dataset × runtime binding (XDASH_PLAN.md §8.5) — how each runtime gets this dataset's files before a launch — plus the registered fragments, Kaggle dataset-slug mapping, a channel-mode montage preview, and the guarded test-set evaluation audit trail.</div>
+          <div class="view-sub">One store, one Kaggle slug per dataset — delivery to each runtime is computed, not configured (DATASETS_PLAN.md §0).</div>
         </div>
-        <button class="btn btn-ghost" id="btn-refresh-data">Refresh</button>
-      </div>
-
-      <!-- ------------------------------------------------ dataset × runtime matrix (XDASH_PLAN.md §8.5) -->
-      <div class="panel" style="margin-bottom:18px;">
-        <div class="panel-header"><span>Bindings</span><span id="dataset-matrix-count"></span></div>
-        <div class="view-sub" style="padding:0 16px 10px;">✓ path · ⇡ push · ↓ fetch · ⊕ attach · ✗ missing/no source — resolved exact runtime → <span style="font-family:var(--mono)">kind:*</span> → the kind's default (XDASH_PLAN.md §5.2). Click a dataset's name to open its detail page; click a binding cell to edit it.</div>
-        <div style="padding:0 16px 16px; overflow:auto;">
-          <table class="compare-table dataset-matrix" id="dataset-matrix-table" style="width:100%;">
-            <thead><tr><th>Dataset</th></tr></thead>
-            <tbody><tr><td class="empty-state">Loading…</td></tr></tbody>
-          </table>
+        <div class="job-actions">
+          <input class="text-input" id="datasets-search" placeholder="search…" style="width:160px;" autocomplete="off" />
+          <div id="datasets-tag-chips" class="chip-row"></div>
+          <label class="entity-card-sub" style="margin:0 4px;">Data account
+            <select id="datasets-data-account" style="margin-left:4px;"><option value="">(none)</option></select>
+          </label>
+          <button class="btn btn-ghost btn-sm" id="btn-datasets-recheck-all">Re-check all</button>
+          <button class="btn btn-ghost" id="btn-refresh-data">Refresh</button>
+          <button class="btn btn-primary" id="btn-dataset-add">+ Add dataset</button>
         </div>
       </div>
 
-      <!-- ------------------------------------------------ dataset detail (#/datasets/<name>) -->
-      <div class="panel hidden" id="dataset-registry-detail-panel" style="margin-bottom:18px;">
-        <div class="view-header" style="margin-bottom:0; padding:12px 16px; border-bottom:1px solid var(--border-soft);">
-          <div>
-            <button class="btn btn-ghost btn-sm" id="btn-dataset-registry-back">← Datasets</button>
-            <div class="view-title" id="dataset-registry-detail-title" style="font-size:15px;">Dataset</div>
-          </div>
-          <div class="job-actions hidden" id="dataset-registry-detail-preview-link">
-            <button class="btn btn-sm btn-ghost" id="btn-dataset-registry-open-preview">Open channel preview &amp; audit ↓</button>
-          </div>
+      <div class="datasets-layout">
+        <div class="panel datasets-list-panel">
+          <div class="panel-header"><span>Datasets</span><span id="datasets-list-count"></span></div>
+          <div id="datasets-list-body"><div class="empty-state">Loading…</div></div>
         </div>
-        <div style="padding:14px 16px;">
-          <table class="kv-table" id="dataset-registry-detail-kv"></table>
 
-          <h4 class="run-detail-section-title">Configs using this dataset</h4>
-          <table class="compare-table" style="width:100%;"><tbody id="dataset-registry-detail-configs"><tr><td class="empty-state">Loading…</td></tr></tbody></table>
-
-          <h4 class="run-detail-section-title">Experiments &amp; studies referencing it</h4>
-          <table class="compare-table" style="width:100%;">
-            <thead><tr><th>Experiment</th><th>Status</th><th>Studies</th></tr></thead>
-            <tbody id="dataset-registry-detail-experiments"><tr><td colspan="3" class="empty-state">Loading…</td></tr></tbody>
-          </table>
-        </div>
-      </div>
-
-      <div class="panel" style="margin-bottom:18px;">
-        <div class="panel-header"><span>Registered dataset fragments</span><span id="dataset-count"></span></div>
-        <div class="dataset-card-list" id="dataset-card-list">
-          <div class="empty-state">Loading…</div>
-        </div>
-      </div>
-
-      <div class="panel hidden" id="dataset-detail-panel" style="margin-bottom:18px;">
-        <div class="panel-header"><span id="dataset-detail-title">Dataset</span></div>
-        <div style="padding:16px;">
-          <table class="kv-table" id="dataset-detail-kv"></table>
-
-          <h4 class="run-detail-section-title">Channel-mode montage preview</h4>
-          <div class="channel-preview-form">
-            <div class="field">
-              <label>Mode</label>
-              <select id="channel-preview-mode">
-                <option value="m1">m1 — RGB (3)</option>
-                <option value="m2">m2 — RGB+XY (5)</option>
-                <option value="m3">m3 — RGB+YCbCr (6)</option>
-                <option value="m4">m4 — RGB+XY+Rθ (7)</option>
-                <option value="m5">m5 — all (10/11)</option>
-              </select>
+        <div class="panel datasets-detail-panel" id="dataset-detail-panel">
+          <div class="empty-state" id="dataset-detail-empty">Pick a dataset on the left.</div>
+          <div id="dataset-detail-body" class="hidden">
+            <div class="view-header" style="margin-bottom:0; padding:12px 16px; border-bottom:1px solid var(--border-soft);">
+              <div>
+                <div class="view-title" id="dataset-detail-title" style="font-size:15px;"></div>
+                <div class="entity-card-sub" id="dataset-detail-sub"></div>
+              </div>
+              <div class="job-actions">
+                <span id="dataset-detail-badges"></span>
+              </div>
             </div>
-            <div class="field">
-              <label>Modality</label>
-              <select id="channel-preview-modality">
-                <option value="colour">colour</option>
-                <option value="grayscale">grayscale</option>
-              </select>
+
+            <div style="padding:14px 16px;">
+              <div id="dataset-detail-migration-notes"></div>
+              <div id="dataset-detail-checklist"></div>
+
+              <h4 class="run-detail-section-title">Tags</h4>
+              <div id="dataset-detail-tags" class="chip-row"></div>
+
+              <h4 class="run-detail-section-title">Sources</h4>
+              <table class="kv-table" id="dataset-detail-sources"></table>
+
+              <h4 class="run-detail-section-title">Host overrides</h4>
+              <table class="compare-table" style="width:100%;">
+                <thead><tr><th>Host</th><th>Path</th><th></th></tr></thead>
+                <tbody id="dataset-detail-hosts"><tr><td colspan="3" class="empty-state">None set.</td></tr></tbody>
+              </table>
+              <div class="job-actions" style="padding:6px 0 0;">
+                <select id="dataset-host-override-select" style="width:160px;"></select>
+                <input class="text-input" id="dataset-host-override-path" placeholder="/abs/path/on/that/host" style="width:220px;" autocomplete="off" />
+                <button class="btn btn-sm btn-ghost" id="btn-dataset-host-override-save">Set override</button>
+              </div>
+
+              <h4 class="run-detail-section-title">Availability<button class="btn btn-sm btn-ghost" id="btn-dataset-recheck" style="float:right;">Re-check</button></h4>
+              <table class="compare-table" style="width:100%;">
+                <thead><tr><th>Runtime</th><th>State</th><th>Detail</th></tr></thead>
+                <tbody id="dataset-detail-availability"><tr><td colspan="3" class="empty-state">Loading…</td></tr></tbody>
+              </table>
+
+              <h4 class="run-detail-section-title">Samples</h4>
+              <div id="dataset-samples-crumbs" class="entity-card-sub"></div>
+              <div id="dataset-samples-grid" class="thumb-grid"></div>
+              <div id="dataset-samples-preview"></div>
+
+              <h4 class="run-detail-section-title">Used by</h4>
+              <div class="entity-card-sub" id="dataset-detail-usage">Loading…</div>
+
+              <div class="job-actions" style="padding-top:14px;">
+                <button class="btn btn-ghost" id="btn-dataset-remove">Remove from XDash</button>
+              </div>
             </div>
-            <div class="field grow">
-              <label>Sample image (repo-relative path)</label>
-              <input class="text-input grow" id="channel-preview-image-path" placeholder="data/polyp/ClinicDB/train/images/1.png" />
-            </div>
-            <button class="btn btn-sm btn-primary" id="btn-channel-preview">Preview channels ▸</button>
           </div>
-          <div id="channel-preview-result"></div>
-        </div>
-      </div>
-
-      <!-- Kaggle dataset-slug mapping editor (XDASH_V2_PLAN.md §3.4) — reads/writes
-           GET/PUT /api/datasets/kaggle-map (backend/dataset_map.py), which the
-           Experiments spine's Kaggle dispatch resolves against before every push. -->
-      <div class="panel" style="margin-bottom:18px;">
-        <div class="panel-header">
-          <span>Kaggle dataset mapping</span><span id="dataset-map-count"></span>
-        </div>
-        <div class="view-sub" style="padding:0 16px 10px;">Maps a config's <span style="font-family:var(--mono)">dataset.name</span> to a Kaggle dataset slug (<span style="font-family:var(--mono)">username/dataset-slug</span>), for configs that don't declare their own <span style="font-family:var(--mono)">dataset.kaggle_dataset</span>. An unmapped dataset blocks that config's Kaggle attempts with "no-dataset-mapping" instead of guessing.</div>
-        <div style="padding:0 16px 6px; overflow:auto;">
-          <table class="compare-table" style="width:100%;">
-            <thead><tr><th>Dataset name</th><th>Kaggle slug</th><th>Source</th><th></th></tr></thead>
-            <tbody id="dataset-map-body"><tr><td colspan="4" class="empty-state">Loading…</td></tr></tbody>
-          </table>
-        </div>
-        <div class="job-actions" style="padding:0 16px 16px;">
-          <button class="btn btn-sm btn-ghost" id="btn-dataset-map-add">+ Add mapping</button>
-          <button class="btn btn-primary" id="btn-dataset-map-save">Save mapping</button>
-        </div>
-      </div>
-
-      <div class="panel">
-        <div class="panel-header"><span>Test-set evaluation audit trail</span><span id="test-evals-count"></span></div>
-        <div style="padding:0 16px 16px; overflow:auto;">
-          <table class="compare-table" id="test-evals-table" style="width:100%;"></table>
         </div>
       </div>
     </section>
@@ -1258,35 +1236,49 @@
 <!-- Dataset binding editor (XDASH_PLAN.md §8.5): mode/path/source for one
      dataset × runtime cell, plus a Check button that runs the binding now
      (POST /api/datasets/<name>/check?runtime=). -->
-<div class="modal-backdrop hidden" id="dataset-binding-backdrop">
+<!-- "+ Add dataset" wizard (DATASETS_PLAN.md §6) — an XDash-only draft; nothing
+     is ever written into dissert here. -->
+<div class="modal-backdrop hidden" id="dataset-add-backdrop">
   <div class="modal">
-    <div class="modal-title" id="binding-editor-title">Dataset binding</div>
-    <div class="scheduler-add-form" style="padding:4px 0 10px; flex-wrap:wrap;">
-      <div class="field">
-        <label>Mode</label>
-        <select id="binding-editor-mode">
-          <option value="path">path — already there</option>
-          <option value="push">push — rsync a local copy up</option>
-          <option value="fetch">fetch — download on the runtime</option>
-          <option value="attach">attach — Kaggle dataset_sources</option>
-        </select>
-      </div>
-      <div class="field grow" id="binding-editor-path-field">
-        <label>Path (optional — default: repo_root/&lt;dataset root&gt;)</label>
-        <input class="text-input grow" id="binding-editor-path" placeholder="/data/shared/ClinicDB" autocomplete="off" />
-      </div>
-      <div class="field grow hidden" id="binding-editor-source-field">
-        <label>Source (optional — default: this dataset's Kaggle slug)</label>
-        <input class="text-input grow" id="binding-editor-source" placeholder="username/dataset-slug" autocomplete="off" />
-      </div>
+    <div class="modal-title">Add dataset</div>
+    <div class="entity-card-sub" id="dataset-add-fragment-notice"></div>
+    <div class="field">
+      <label>Name</label>
+      <input class="text-input grow" id="dataset-add-name" placeholder="Kvasir-SEG" autocomplete="off" />
     </div>
-    <div class="job-actions">
-      <button class="btn btn-sm btn-ghost" id="btn-binding-editor-check">Check ▸</button>
-      <span id="binding-editor-result" class="settings-profile-path"></span>
+    <div class="field">
+      <label>Tags (optional, comma-separated)</label>
+      <input class="text-input grow" id="dataset-add-tags" placeholder="polyp, draft-import" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label>Kaggle (optional — paste a URL or owner/slug)</label>
+      <input class="text-input grow" id="dataset-add-kaggle" placeholder="https://www.kaggle.com/datasets/owner/slug" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label>This machine (optional)</label>
+      <div class="job-actions">
+        <input class="text-input grow" id="dataset-add-local-path" placeholder="/home/you/data/kvasir" autocomplete="off" readonly />
+        <button class="btn btn-sm btn-ghost" id="btn-dataset-add-pick-folder">Pick folder…</button>
+      </div>
     </div>
     <div class="modal-actions">
-      <button class="btn btn-ghost" id="binding-editor-cancel">Cancel</button>
-      <button class="btn btn-primary" id="binding-editor-save">Save</button>
+      <button class="btn btn-ghost" id="dataset-add-cancel">Cancel</button>
+      <button class="btn btn-primary" id="dataset-add-create">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Folder/file picker (DATASETS_PLAN.md §8.5) — one component, reused by the
+     Add wizard's local-folder field and by "pick another image…" in Samples.
+     GET /api/fs/list?path=&mode=dir|file, limited to $HOME. -->
+<div class="modal-backdrop hidden" id="fs-picker-backdrop">
+  <div class="modal">
+    <div class="modal-title">Choose a folder</div>
+    <div class="entity-card-sub" id="fs-picker-crumbs"></div>
+    <div id="fs-picker-list" class="path-picker-list"></div>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" id="fs-picker-cancel">Cancel</button>
+      <button class="btn btn-primary" id="fs-picker-use">Use this folder</button>
     </div>
   </div>
 </div>
@@ -1389,15 +1381,14 @@
 <script src="app.js?v=9"></script>
 <script src="js/components/badge.js?v=2"></script>
 <script src="js/components/heatmap-grid.js?v=1"></script>
-<script src="js/views/runs.js?v=2"></script>
-<script src="js/views/data.js?v=2"></script>
+<script src="js/views/runs.js?v=3"></script>
 <script src="js/views/compute.js?v=1"></script>
 <script src="js/views/settings.js?v=1"></script>
 <script src="js/views/experiments.js?v=2"></script>
 <script src="js/views/spine.js?v=2"></script>
 <script src="js/views/lab.js?v=1"></script>
 <script src="js/screens/experiments2.js?v=1"></script>
-<script src="js/screens/datasets.js?v=1"></script>
+<script src="js/screens/datasets.js?v=2"></script>
 <script src="js/screens/settings_profile.js?v=1"></script>
 <script src="js/screens/compute.js?v=1"></script>
 <script src="js/palette.js?v=3"></script>
@@ -1410,6 +1401,7 @@
     if (key === "runs" && !state.runGroups.length) loadRuns();
     if (key === "reports" && !state.reportGroups.length) loadReports();
     if (key === "files" && !state.historyTree.length) loadHistory();
+    if (key === "test-evals") loadTestEvalsTable();
   });
 </script>
 </body>

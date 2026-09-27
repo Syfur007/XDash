@@ -6,6 +6,7 @@ data/*/scheduler.json
 data/*/dashboard_logs/
 # Per-attempt console logs (XDASH_PLAN.md §3.5): tmux panes, Kaggle <slug>.log.
 data/*/logs/
+data/*/thumbs/
 data/*/kaggle_state.json
 data/*/kaggle_accounts.json
 data/*/kaggle_accounts/

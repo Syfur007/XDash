@@ -93,17 +93,28 @@ poll_interval_ms: 2000
 scheduler_max_concurrent_limit: 8
 scheduler_max_queue_size: 200
 
-kaggle_executable: "kaggle"
+kaggle_executable: "/home/syfur/miniconda3/envs/xdash/bin/kaggle"
 kaggle_push_concurrency: 3
 kaggle_default_budget_hours: 9.5
-# XDASH_V2_PLAN.md §3.4 rule 3 — seeds data/dissert/dataset_map.json on first read. Restores the
-# mapping the three auto-dissert-* accounts' workers already carry as dataset_sources, now that
-# batch_runner.py requires a resolved mapping before routing a config to Kaggle at all (closes D7:
-# an unmapped dataset used to fall back to "attach to any idle worker regardless of dataset").
-kaggle_dataset_map:
-  clinicdb: "syfur007/clinicdb-images"
 kaggle_poll_interval_seconds: 180
 kaggle_webhook_url: ""
+# DATASETS_PLAN.md §10 item 7 — kaggle_dataset_map is retired: each dataset's
+# Kaggle slug now lives in exactly one place, data/dissert/datasets.json (the
+# dataset registry), seeded once from this key's old value and from
+# data/dissert/dataset_map.json the first time that registry is written.
+# backend/config.py no longer reads this key at all.
+#
+# §8.4 — channel-mode labels for the sample preview's montage (today's
+# m1-m5), read by the Datasets screen instead of the labels index.html used
+# to hard-code. Leave this out entirely to hide the channel-preview part of
+# the sample grid.
+datasets:
+  channel_modes:
+    m1: "m1 — RGB (3)"
+    m2: "m2 — RGB+XY (5)"
+    m3: "m3 — RGB+YCbCr (6)"
+    m4: "m4 — RGB+XY+Rθ (7)"
+    m5: "m5 — all (10/11)"
 framework:
   repo_root: "../../dissert"  # path to the repo root, relative to this file
 

@@ -1,317 +1,675 @@
 // static/js/screens/datasets.js
 //
-// XDASH_PLAN.md §8.5, Phase 4: the dataset × runtime binding matrix, its
-// per-cell binding editor + Check action, and the dataset detail page
-// (#/datasets/<name>, a js/lib/router.js stub since Phase 3 — see its own
-// comment on exactly what was left unread). Reads the registry Phase 2
-// built (backend/datasets.py, GET /api/datasets/registry — NOT the bare
-// GET /api/datasets, which is the pre-existing, unrelated "Data Studio"
-// fragment-card feature static/js/views/data.js already owns; see
-// server.py's own comment on why those two routes don't collide).
-//
-// This screen shares #view-data with that older feature rather than
-// getting a route of its own — switchView()'s existing `data` case already
-// calls both loadDataView() (the old feature) and loadDatasetsScreen()
-// (this one); js/lib/router.js's handleRoute() calls this file's
-// applyDatasetsRouteParams() for the `second` path segment
-// (#/datasets/<name>), same as it already did for experiments.
+// DATASETS_PLAN.md §8: one screen, list-left/detail-right, replacing both the
+// old binding matrix and the separate "Registered dataset fragments" cards.
+// GET /api/datasets is the single source (identity, tags, badges, sources,
+// hosts, checks, and a per-runtime `plans` summary from cached checks —
+// backend/datasets.py's plan_delivery()). There is no client-side resolver
+// any more (DS11 fix): every state shown here is exactly what the backend
+// computed, never re-derived in JS.
 //
 // Same classic-<script>-sharing-global-scope model as every other view file.
+// Routes: #/datasets and #/datasets/<name>, wired by js/lib/router.js's
+// applyDatasetsRouteParams(), same as before.
 
 // ---------------------------------------------------------------- state
-state.datasetRegistry = [];       // GET /api/datasets/registry -> .datasets
-state.datasetDataAccount = null;
-state.datasetsRuntimes = [];      // GET /api/runtimes -> .runtimes
-state.datasetsLoaded = false;
-state.selectedDatasetName = null; // drives the detail panel; set from the URL
-state.datasetDetailConfigs = [];
-state.datasetBindingEditor = null; // {dataset, runtimeId, runtimeKind} while the modal is open
+state.datasets = [];          // GET /api/datasets -> .datasets
+state.datasetsDataAccount = null;
+state.datasetsKaggleAccounts = [];
+state.datasetsSearch = "";
+state.datasetsTagFilter = new Set();
+state.selectedDatasetName = null;
+state.datasetDetail = null;   // GET /api/datasets/<name>
+state.datasetSamplesPath = "";
+state.datasetFsPicker = null; // {path, mode, onUse}
 
-const DATASET_MODE_ICON = { path: "✓", push: "⇡", fetch: "↓", attach: "⊕" };
-const DATASET_MODE_LABEL = { path: "path", push: "push", fetch: "fetch", attach: "attach" };
+const DATASET_STATE_ICON = { ready: "✓", "will-transfer": "↻", partial: "⚠", blocked: "✗", unknown: "?" };
+const DATASET_STATE_CLASS = { ready: "green", "will-transfer": "slate", partial: "amber", blocked: "red", unknown: "slate" };
+const DATASET_STATE_ORDER = ["blocked", "partial", "unknown", "will-transfer", "ready"];
 
-// ================================================================== load + matrix
+// ================================================================== load + list
 async function loadDatasetsScreen() {
-  await Promise.all([loadDatasetRegistry(), loadDatasetsRuntimes()]);
-  state.datasetsLoaded = true;
-  renderDatasetsMatrix();
+  await Promise.all([loadDatasets(), loadDatasetsKaggleAccounts()]);
+  renderDatasetsList();
+  renderDataAccountSelect();
   if (state.selectedDatasetName) loadDatasetDetail(state.selectedDatasetName);
 }
 
-async function loadDatasetRegistry() {
+async function loadDatasets() {
   try {
-    const data = await api("/api/datasets/registry");
-    state.datasetRegistry = data.datasets || [];
-    state.datasetDataAccount = data.data_account || null;
+    const data = await api("/api/datasets");
+    state.datasets = data.datasets || [];
+    state.datasetsDataAccount = data.data_account || null;
   } catch (e) {
-    toast("Couldn't load the dataset registry: " + e.message, "err");
+    toast("Couldn't load datasets: " + e.message, "err");
   }
 }
 
-async function loadDatasetsRuntimes() {
+async function loadDatasetsKaggleAccounts() {
   try {
-    const data = await api("/api/runtimes");
-    state.datasetsRuntimes = data.runtimes || [];
+    const data = await api("/api/kaggle/accounts");
+    state.datasetsKaggleAccounts = data.accounts || [];
   } catch (e) {
-    // Non-fatal: the matrix just renders with whatever it already had (or
-    // an empty column set on first load — the table still shows dataset
-    // names and a clear "couldn't load runtimes" state).
+    state.datasetsKaggleAccounts = [];
   }
 }
 
-// Mirrors backend/datasets.py's resolve_binding() exactly (§5.2's order:
-// exact runtime id -> kind:* -> the kind default), so the matrix shows the
-// same answer a Check or a real dispatch would get, without a network
-// round trip per cell. Doesn't replicate the config-specific
-// dataset_map.json fallback (_resolve_binding_for_config) — this is a
-// dataset-level display, not tied to one config.
-function resolveDatasetBindingForDisplay(ds, runtime) {
-  const bindings = ds.bindings || {};
-  let binding = bindings[runtime.id] ? { ...bindings[runtime.id] } : null;
-  if (!binding) {
-    const wildcard = `${runtime.kind}:*`;
-    binding = bindings[wildcard] ? { ...bindings[wildcard] } : null;
-  }
-  if (!binding) {
-    if (runtime.kind === "local" || runtime.kind === "ssh") binding = { mode: "path" };
-    else if (runtime.kind === "colab") binding = { mode: "fetch" };
-    else if (runtime.kind === "kaggle") binding = { mode: "attach" };
-    else return { mode: null };
-  }
-  if ((binding.mode === "fetch" || binding.mode === "attach") && !binding.source) {
-    const slug = ((ds.sources || {}).kaggle || {}).slug;
-    if (slug) binding.source = slug;
-    else return { mode: null };
-  }
-  return binding;
+function renderDataAccountSelect() {
+  const sel = document.getElementById("datasets-data-account");
+  if (!sel) return;
+  const opts = ["<option value=\"\">(none)</option>"].concat(
+    state.datasetsKaggleAccounts.map((a) => `<option value="${escapeHtml(a.name)}">${escapeHtml(a.name)}</option>`)
+  );
+  sel.innerHTML = opts.join("");
+  sel.value = state.datasetsDataAccount || "";
 }
 
-function renderDatasetsMatrix() {
-  const table = document.getElementById("dataset-matrix-table");
-  const countEl = document.getElementById("dataset-matrix-count");
-  if (!table) return;
-  if (!state.datasetsLoaded) {
-    table.innerHTML = `<thead><tr><th>Dataset</th></tr></thead><tbody><tr><td class="empty-state">Loading…</td></tr></tbody>`;
-    return;
+function datasetWorstState(d) {
+  let worst = "ready";
+  for (const plan of Object.values(d.plans || {})) {
+    const idx = DATASET_STATE_ORDER.indexOf(plan.state);
+    if (idx > DATASET_STATE_ORDER.indexOf(worst)) worst = plan.state;
   }
-  countEl.textContent = state.datasetRegistry.length ? String(state.datasetRegistry.length) : "";
-  if (!state.datasetsRuntimes.length) {
-    table.innerHTML = `<thead><tr><th>Dataset</th></tr></thead><tbody><tr><td class="empty-state">No runtimes registered yet — see Compute.</td></tr></tbody>`;
-    return;
-  }
-  if (!state.datasetRegistry.length) {
-    table.innerHTML = `<thead><tr><th>Dataset</th></tr></thead><tbody><tr><td class="empty-state">No datasets declared yet (no configs/dataset/*.yaml fragments found).</td></tr></tbody>`;
-    return;
-  }
+  if (!Object.keys(d.plans || {}).length) worst = d.identity_source === "draft" ? "unknown" : "ready";
+  return worst;
+}
 
-  const head = `<thead><tr><th>Dataset</th>${state.datasetsRuntimes.map((r) => `<th>${escapeHtml(r.label || r.id)}</th>`).join("")}</tr></thead>`;
-  const body = state.datasetRegistry.map((ds) => {
-    const nameCell = `<td class="matrix-name" data-dataset-row="${escapeHtml(ds.name)}" title="Open ${escapeHtml(ds.name)}'s detail page">${escapeHtml(ds.name)}</td>`;
-    const cells = state.datasetsRuntimes.map((r) => datasetMatrixCellHtml(ds, r)).join("");
-    return `<tr>${nameCell}${cells}</tr>`;
+function datasetKindStrip(d) {
+  const kinds = { local: [], ssh: [], kaggle: [], colab: [] };
+  for (const [rid, plan] of Object.entries(d.plans || {})) {
+    const kind = rid === "local" ? "local" : rid.split(":")[0];
+    if (kinds[kind]) kinds[kind].push(plan);
+  }
+  const letter = { local: "L", ssh: "S", kaggle: "K", colab: "C" };
+  return Object.entries(kinds).filter(([, plans]) => plans.length).map(([kind, plans]) => {
+    const ready = plans.filter((p) => p.state === "ready").length;
+    const blocked = plans.some((p) => p.state === "blocked");
+    const transferring = plans.some((p) => p.state === "will-transfer");
+    const mark = blocked ? "✗" : transferring ? "↻" : "✓";
+    return kind === "local" ? `L${mark}` : `${letter[kind]} ${ready}/${plans.length}${transferring && !blocked ? " ↻" : ""}`;
+  }).join(" ");
+}
+
+function datasetMatchesFilters(d) {
+  const q = state.datasetsSearch.trim().toLowerCase();
+  if (q) {
+    const tagQuery = q.startsWith("tag:") ? q.slice(4) : null;
+    if (tagQuery) {
+      if (!(d.tags || []).some((t) => t.includes(tagQuery))) return false;
+    } else if (!d.name.toLowerCase().includes(q) && !(d.tags || []).some((t) => t.includes(q))) {
+      return false;
+    }
+  }
+  if (state.datasetsTagFilter.size) {
+    if (!(d.tags || []).some((t) => state.datasetsTagFilter.has(t))) return false;
+  }
+  return true;
+}
+
+function renderDatasetsList() {
+  const body = document.getElementById("datasets-list-body");
+  const countEl = document.getElementById("datasets-list-count");
+  if (!body) return;
+  countEl.textContent = state.datasets.length ? String(state.datasets.length) : "";
+
+  renderDatasetTagChips();
+
+  const rows = state.datasets.filter(datasetMatchesFilters);
+  if (!rows.length) {
+    body.innerHTML = `<div class="empty-state">${state.datasets.length ? "No datasets match this search/filter." : "No datasets yet — add one, or declare a configs/dataset/*.yaml fragment."}</div>`;
+    return;
+  }
+  // Registered (fragment-backed, at least one source configured) first, per
+  // §8's "registered datasets should be on top".
+  const registered = (d) => d.identity_source === "fragment" && Object.keys(d.sources || {}).length;
+  rows.sort((a, b) => (registered(b) - registered(a)) || a.name.localeCompare(b.name));
+
+  body.innerHTML = rows.map((d) => {
+    const worst = datasetWorstState(d);
+    const active = d.name === state.selectedDatasetName ? "active" : "";
+    const draftBadge = d.identity_source === "draft" ? `<span class="badge slate">draft</span>` : "";
+    return `<div class="dataset-list-row ${active}" data-dataset-name="${escapeHtml(d.name)}">
+      <div class="dataset-list-row-top">
+        <strong>${escapeHtml(d.name)}</strong>
+        <span>${draftBadge}<span title="${escapeHtml(worst)}">${DATASET_STATE_ICON[worst] || "?"}</span></span>
+      </div>
+      <div class="chip-row">${(d.tags || []).map((t) => `<span class="badge slate">${escapeHtml(t)}</span>`).join("")}</div>
+      <div class="dataset-list-row-kinds">${escapeHtml(datasetKindStrip(d))}</div>
+    </div>`;
   }).join("");
-  table.innerHTML = head + `<tbody>${body}</tbody>`;
 
-  table.querySelectorAll("[data-dataset-row]").forEach((cell) => {
-    cell.addEventListener("click", () => navigateToDataset(cell.dataset.datasetRow));
-  });
-  table.querySelectorAll("[data-binding-cell]").forEach((cell) => {
-    cell.addEventListener("click", () => openBindingEditor(cell.dataset.dataset, cell.dataset.runtime, cell.dataset.runtimeKind));
+  body.querySelectorAll("[data-dataset-name]").forEach((el) => {
+    el.addEventListener("click", () => navigateToDataset(el.dataset.datasetName));
   });
 }
 
-function datasetMatrixCellHtml(ds, runtime) {
-  const resolved = resolveDatasetBindingForDisplay(ds, runtime);
-  const check = (ds.checks || {})[runtime.id];
-  let icon = resolved.mode ? DATASET_MODE_ICON[resolved.mode] : "✗";
-  let cls = resolved.mode ? "slate" : "red";
-  let title = resolved.mode
-    ? `${DATASET_MODE_LABEL[resolved.mode]}${resolved.source ? " · " + resolved.source : ""}`
-    : "no binding for this runtime and no default source to fall back to";
-  if (check) {
-    title += ` — last check: ${check.ok ? "ok" : "failed"}${check.detail ? " (" + check.detail + ")" : ""}`;
-    if (!check.ok) { icon = "✗"; cls = "red"; }
-    else if (resolved.mode) cls = "emerald";
-  }
-  return `<td class="matrix-cell ${cls}" data-binding-cell data-dataset="${escapeHtml(ds.name)}" data-runtime="${escapeHtml(runtime.id)}" data-runtime-kind="${escapeHtml(runtime.kind)}" title="${escapeHtml(title)}">${icon}</td>`;
-}
-
-// ================================================================== binding editor modal
-function openBindingEditor(datasetName, runtimeId, runtimeKind) {
-  const ds = state.datasetRegistry.find((d) => d.name === datasetName);
-  if (!ds) return;
-  const existing = (ds.bindings || {})[runtimeId] || (ds.bindings || {})[`${runtimeKind}:*`] || {};
-  const resolved = resolveDatasetBindingForDisplay(ds, { id: runtimeId, kind: runtimeKind });
-  state.datasetBindingEditor = { dataset: datasetName, runtimeId, runtimeKind };
-
-  document.getElementById("binding-editor-title").textContent = `${datasetName} · ${runtimeId}`;
-  document.getElementById("binding-editor-mode").value = existing.mode || resolved.mode || "path";
-  document.getElementById("binding-editor-path").value = existing.path || "";
-  document.getElementById("binding-editor-source").value = existing.source || resolved.source || "";
-  document.getElementById("binding-editor-result").textContent = "";
-  updateBindingEditorFieldVisibility();
-  document.getElementById("dataset-binding-backdrop").classList.remove("hidden");
-}
-
-function updateBindingEditorFieldVisibility() {
-  const mode = document.getElementById("binding-editor-mode").value;
-  document.getElementById("binding-editor-path-field").classList.toggle("hidden", mode !== "path" && mode !== "push");
-  document.getElementById("binding-editor-source-field").classList.toggle("hidden", mode !== "fetch" && mode !== "attach");
-}
-
-function closeBindingEditor() {
-  document.getElementById("dataset-binding-backdrop").classList.add("hidden");
-  state.datasetBindingEditor = null;
-}
-
-function bindingEditorBody() {
-  const mode = document.getElementById("binding-editor-mode").value;
-  const body = { mode };
-  const path = document.getElementById("binding-editor-path").value.trim();
-  const source = document.getElementById("binding-editor-source").value.trim();
-  if ((mode === "path" || mode === "push") && path) body.path = path;
-  if ((mode === "fetch" || mode === "attach") && source) body.source = source;
-  return body;
-}
-
-async function saveBindingEditor() {
-  const ctx = state.datasetBindingEditor;
-  if (!ctx) return;
-  try {
-    await api(`/api/datasets/${encodeURIComponent(ctx.dataset)}/bindings/${encodeURIComponent(ctx.runtimeId)}`, {
-      method: "PUT", body: JSON.stringify(bindingEditorBody()),
+function renderDatasetTagChips() {
+  const wrap = document.getElementById("datasets-tag-chips");
+  if (!wrap) return;
+  const allTags = new Set();
+  state.datasets.forEach((d) => (d.tags || []).forEach((t) => allTags.add(t)));
+  wrap.innerHTML = [...allTags].sort().map((t) => {
+    const active = state.datasetsTagFilter.has(t);
+    return `<span class="badge ${active ? "emerald" : "slate"}" data-tag-chip="${escapeHtml(t)}">${escapeHtml(t)}${active ? " ×" : ""}</span>`;
+  }).join("");
+  wrap.querySelectorAll("[data-tag-chip]").forEach((el) => {
+    el.addEventListener("click", () => {
+      const t = el.dataset.tagChip;
+      if (state.datasetsTagFilter.has(t)) state.datasetsTagFilter.delete(t); else state.datasetsTagFilter.add(t);
+      renderDatasetsList();
     });
-    toast("Binding saved", "ok");
-    closeBindingEditor();
-    await loadDatasetRegistry();
-    renderDatasetsMatrix();
-    if (state.selectedDatasetName === ctx.dataset) loadDatasetDetail(ctx.dataset);
-  } catch (e) {
-    toast("Couldn't save binding: " + e.message, "err");
-  }
+  });
 }
 
-async function checkBindingEditor() {
-  const ctx = state.datasetBindingEditor;
-  if (!ctx) return;
-  const resultEl = document.getElementById("binding-editor-result");
-  resultEl.textContent = "Checking…";
-  try {
-    // A check runs against whatever binding is on record for this cell —
-    // save first, so "Check" always verifies the values in the form, not
-    // whatever was last saved.
-    await api(`/api/datasets/${encodeURIComponent(ctx.dataset)}/bindings/${encodeURIComponent(ctx.runtimeId)}`, {
-      method: "PUT", body: JSON.stringify(bindingEditorBody()),
-    });
-    const result = await api(`/api/datasets/${encodeURIComponent(ctx.dataset)}/check?runtime=${encodeURIComponent(ctx.runtimeId)}`, { method: "POST" });
-    resultEl.textContent = `${result.ok ? "✓ ok" : "✗ failed"} — ${result.detail || ""}`;
-    await loadDatasetRegistry();
-    renderDatasetsMatrix();
-  } catch (e) {
-    resultEl.textContent = "Couldn't check: " + e.message;
-  }
-}
-
-// ================================================================== dataset detail (#/datasets/<name>)
+// ================================================================== detail (#/datasets/<name>)
 function applyDatasetsRouteParams(name) {
   state.selectedDatasetName = name || null;
-  const panel = document.getElementById("dataset-registry-detail-panel");
-  if (!panel) return;
+  const empty = document.getElementById("dataset-detail-empty");
+  const body = document.getElementById("dataset-detail-body");
+  if (!empty || !body) return;
   if (!state.selectedDatasetName) {
-    panel.classList.add("hidden");
+    empty.classList.remove("hidden");
+    body.classList.add("hidden");
+    renderDatasetsList();
     return;
   }
-  panel.classList.remove("hidden");
-  if (state.datasetsLoaded) loadDatasetDetail(state.selectedDatasetName);
-  // else: loadDatasetsScreen() (kicked off by switchView()) will call
-  // loadDatasetDetail() itself once the registry finishes loading.
+  empty.classList.add("hidden");
+  body.classList.remove("hidden");
+  if (state.datasets.length) loadDatasetDetail(state.selectedDatasetName);
+  renderDatasetsList();
 }
 
 async function loadDatasetDetail(name) {
-  const panel = document.getElementById("dataset-registry-detail-panel");
-  if (!panel) return;
-  const ds = state.datasetRegistry.find((d) => d.name.toLowerCase() === name.toLowerCase());
-  document.getElementById("dataset-registry-detail-title").textContent = name;
-  const kv = document.getElementById("dataset-registry-detail-kv");
-
-  if (!ds) {
-    kv.innerHTML = `<tr><td colspan="2" class="empty-state">Unknown dataset '${escapeHtml(name)}' — no registry record or identity fragment declares it.</td></tr>`;
-    document.getElementById("dataset-registry-detail-configs").innerHTML = "";
-    document.getElementById("dataset-registry-detail-experiments").innerHTML = "";
-    document.getElementById("dataset-registry-detail-preview-link").classList.add("hidden");
+  try {
+    state.datasetDetail = await api(`/api/datasets/${encodeURIComponent(name)}`);
+  } catch (e) {
+    toast("Couldn't load '" + name + "': " + e.message, "err");
+    state.datasetDetail = null;
     return;
   }
+  state.datasetSamplesPath = "";
+  renderDatasetDetail();
+  loadDatasetUsage(name);
+  loadDatasetSamples();
+}
 
-  const kaggleSource = (ds.sources || {}).kaggle || {};
-  kv.innerHTML = [
-    ["Root", ds.root || "(no dataset.root declared)"],
-    ["Kaggle source", kaggleSource.slug || (state.datasetDataAccount ? `(none — data account: ${state.datasetDataAccount})` : "(none)")],
-    ["Bindings set", Object.keys(ds.bindings || {}).length ? Object.keys(ds.bindings).join(", ") : "(none — every runtime uses its kind default)"],
-  ].map(([k, v]) => `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(v)}</td></tr>`).join("");
+function renderDatasetDetail() {
+  const d = state.datasetDetail;
+  if (!d) return;
+  document.getElementById("dataset-detail-title").textContent = d.name;
+  document.getElementById("dataset-detail-sub").textContent = d.root
+    ? `${d.fragment ? "configs/dataset/" + d.fragment + ".yaml" : ""} · root ${d.root}`
+    : "draft — no dissert fragment yet";
 
-  // "Open in Data Studio" — relocates/links the pre-existing channel-preview
-  // + audit feature (static/js/views/data.js) rather than duplicating it.
-  const linkWrap = document.getElementById("dataset-registry-detail-preview-link");
-  const fragmentMatch = (state.datasetList || []).find((d) => (d.name || "").toLowerCase() === ds.name.toLowerCase());
-  if (fragmentMatch) {
-    linkWrap.classList.remove("hidden");
-    document.getElementById("btn-dataset-registry-open-preview").onclick = () => {
-      selectDataset(fragmentMatch.fragment);
-      document.getElementById("dataset-detail-panel").scrollIntoView({ behavior: "smooth", block: "start" });
-    };
-  } else {
-    linkWrap.classList.add("hidden");
-  }
+  const badges = [];
+  if (d.identity_source === "draft") badges.push(`<span class="badge slate">draft</span>`);
+  if (d.badges && d.badges.modality) badges.push(`<span class="badge slate">${escapeHtml(d.badges.modality)}</span>`);
+  if (d.badges && d.badges.channel_mode) badges.push(`<span class="badge slate">${escapeHtml(d.badges.channel_mode)}</span>`);
+  if (d.badges && d.badges.dedup) badges.push(`<span class="badge emerald">dedup</span>`);
+  if (d.badges && d.badges.external) badges.push(`<span class="badge red">external</span>`);
+  document.getElementById("dataset-detail-badges").innerHTML = badges.join(" ");
 
-  const configsBody = document.getElementById("dataset-registry-detail-configs");
-  configsBody.innerHTML = `<tr><td class="empty-state">Loading…</td></tr>`;
-  try {
-    const data = await api(`/api/datasets/${encodeURIComponent(ds.name)}/configs`);
-    state.datasetDetailConfigs = data.configs || [];
-  } catch (e) {
-    state.datasetDetailConfigs = [];
-  }
-  configsBody.innerHTML = state.datasetDetailConfigs.length
-    ? state.datasetDetailConfigs.map((path) => `<tr><td>${escapeHtml(path)}</td></tr>`).join("")
-    : `<tr><td class="empty-state">No configs found using this dataset.</td></tr>`;
+  renderMigrationNotes(d);
+  renderDraftChecklist(d);
+  renderDatasetTagsEditor(d);
+  renderDatasetSourcesEditor(d);
+  renderDatasetHostOverrides(d);
+  renderDatasetAvailability(d);
+}
 
-  // Best-effort "which experiments/studies use it" (XDASH_PLAN.md §8.5):
-  // every experiment whose config_path is one of the configs above, one
-  // /api/experiments?config= call per config (there are only ever a
-  // handful of configs per dataset) — not a new backend route, since
-  // GET /api/experiments already supports this exact filter (§7).
-  const expBody = document.getElementById("dataset-registry-detail-experiments");
-  expBody.innerHTML = `<tr><td colspan="3" class="empty-state">Loading…</td></tr>`;
-  let experiments = [];
-  for (const path of state.datasetDetailConfigs) {
+function renderMigrationNotes(d) {
+  const el = document.getElementById("dataset-detail-migration-notes");
+  if (!el) return;
+  if (!d.migration_notes || !d.migration_notes.length) { el.innerHTML = ""; return; }
+  el.innerHTML = `<div class="empty-state" style="text-align:left;">
+    ${d.migration_notes.map(escapeHtml).join("<br/>")}
+    <div class="job-actions" style="padding-top:6px;"><button class="btn btn-sm btn-ghost" id="btn-dataset-dismiss-notes">Dismiss</button></div>
+  </div>`;
+  document.getElementById("btn-dataset-dismiss-notes")?.addEventListener("click", async () => {
     try {
-      const data = await api(`/api/experiments?config=${encodeURIComponent(path)}`);
-      experiments = experiments.concat(data.experiments || []);
-    } catch (e) {
-      // best-effort — one bad config shouldn't blank the rest
+      await api(`/api/datasets/${encodeURIComponent(d.name)}`, { method: "PATCH", body: JSON.stringify({}) });
+    } catch (e) { /* best-effort — the notes just won't clear server-side yet */ }
+    el.innerHTML = "";
+  });
+}
+
+function renderDraftChecklist(d) {
+  const el = document.getElementById("dataset-detail-checklist");
+  if (!el) return;
+  if (d.identity_source !== "draft") { el.innerHTML = ""; return; }
+  el.innerHTML = `<div class="empty-state" style="text-align:left;">
+    <strong>This is a draft.</strong> dissert still needs:
+    <ul style="margin:6px 0 0 18px; padding:0;">
+      <li>☐ Loader code for this dataset's format (not detectable — always shown until the fragment exists).</li>
+      <li>☐ <span style="font-family:var(--mono)">configs/dataset/${escapeHtml(d.name.toLowerCase())}.yaml</span> declaring <span style="font-family:var(--mono)">dataset.name</span>/<span style="font-family:var(--mono)">dataset.root</span>.</li>
+      <li>☐ That fragment committed and pushed (Kaggle clones the pinned commit).</li>
+    </ul>
+    <div class="job-actions" style="padding-top:8px;">
+      <button class="btn btn-sm btn-ghost" id="btn-dataset-link-fragment">Link to fragment ▾</button>
+    </div>
+  </div>`;
+  document.getElementById("btn-dataset-link-fragment")?.addEventListener("click", () => openLinkFragmentPrompt(d));
+}
+
+async function openLinkFragmentPrompt(d) {
+  // Fragments with no XDash record of their own yet: identity_source is
+  // "fragment" and it has no sources/tags/hosts recorded — the un-adopted set.
+  const unclaimed = state.datasets.filter((x) => x.identity_source === "fragment" &&
+    !Object.keys(x.sources || {}).length && !(x.tags || []).length && !Object.keys(x.hosts || {}).length);
+  const fragmentName = window.prompt(
+    "Link this draft to which fragment?\n" + (unclaimed.length ? unclaimed.map((x) => x.name).join(", ") : "(none unclaimed)")
+  );
+  if (!fragmentName) return;
+  try {
+    await api(`/api/datasets/${encodeURIComponent(d.name)}/link`, { method: "POST", body: JSON.stringify({ fragment: fragmentName }) });
+    toast("Linked to " + fragmentName, "ok");
+    await loadDatasetsScreen();
+    navigateToDataset(fragmentName);
+  } catch (e) { toast("Couldn't link: " + e.message, "err"); }
+}
+
+function renderDatasetTagsEditor(d) {
+  const el = document.getElementById("dataset-detail-tags");
+  if (!el) return;
+  const chips = (d.tags || []).map((t) => `<span class="badge slate" data-remove-tag="${escapeHtml(t)}">${escapeHtml(t)} ×</span>`).join("");
+  el.innerHTML = `${chips}<input class="text-input" id="dataset-tag-input" placeholder="+ tag" style="width:110px;" autocomplete="off" />`;
+  el.querySelectorAll("[data-remove-tag]").forEach((chip) => {
+    chip.addEventListener("click", () => saveDatasetTags(d.name, (d.tags || []).filter((t) => t !== chip.dataset.removeTag)));
+  });
+  const input = document.getElementById("dataset-tag-input");
+  input?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && input.value.trim()) {
+      saveDatasetTags(d.name, [...(d.tags || []), input.value.trim()]);
     }
+  });
+}
+
+async function saveDatasetTags(name, tags) {
+  try {
+    await api(`/api/datasets/${encodeURIComponent(name)}`, { method: "PATCH", body: JSON.stringify({ tags }) });
+    await loadDatasetDetail(name);
+    await loadDatasets();
+    renderDatasetsList();
+  } catch (e) { toast("Couldn't save tags: " + e.message, "err"); }
+}
+
+function renderDatasetSourcesEditor(d) {
+  const el = document.getElementById("dataset-detail-sources");
+  if (!el) return;
+  const kaggleSlug = (d.sources.kaggle || {}).slug || "";
+  const localPath = (d.sources.local || {}).path || (d.root ? "(default: this repo's own " + d.root + ")" : "(none)");
+  el.innerHTML = `
+    <tr><td>This machine</td><td>
+      <input class="text-input grow" id="dataset-source-local-path" value="${escapeHtml((d.sources.local || {}).path || "")}" placeholder="${escapeHtml(localPath)}" autocomplete="off" ${d.root ? "" : "disabled"} />
+      <button class="btn btn-sm btn-ghost" id="btn-dataset-source-local-pick">Pick folder…</button>
+    </td></tr>
+    <tr><td>Kaggle</td><td>
+      <input class="text-input grow" id="dataset-source-kaggle-slug" value="${escapeHtml(kaggleSlug)}" placeholder="owner/dataset-slug (or paste a URL)" autocomplete="off" ${d.kaggle_slug_locked ? "disabled" : ""} />
+      ${d.kaggle_slug_locked ? `<span class="entity-card-sub">declared in configs/dataset/${escapeHtml(d.fragment || "")}.yaml</span>` : `<button class="btn btn-sm btn-primary" id="btn-dataset-source-kaggle-save">Save</button>`}
+    </td></tr>`;
+  document.getElementById("btn-dataset-source-local-pick")?.addEventListener("click", () => {
+    openFsPicker("dir", (path) => { document.getElementById("dataset-source-local-path").value = path; saveDatasetLocalPath(d.name, path); });
+  });
+  document.getElementById("btn-dataset-source-kaggle-save")?.addEventListener("click", () => {
+    saveDatasetKaggleSlug(d.name, document.getElementById("dataset-source-kaggle-slug").value.trim());
+  });
+}
+
+async function saveDatasetKaggleSlug(name, slug) {
+  try {
+    await api(`/api/datasets/${encodeURIComponent(name)}`, {
+      method: "PATCH", body: JSON.stringify({ sources: { kaggle: slug ? { slug } : null } }),
+    });
+    toast("Kaggle slug saved — checking access…", "ok");
+    await recheckDataset(name, ["kaggle:" + (state.datasetsDataAccount || "")].filter((t) => t !== "kaggle:"));
+    await recheckDataset(name);
+    await loadDatasetDetail(name);
+    await loadDatasets();
+    renderDatasetsList();
+  } catch (e) { toast("Couldn't save slug: " + e.message, "err"); }
+}
+
+async function saveDatasetLocalPath(name, path) {
+  try {
+    await api(`/api/datasets/${encodeURIComponent(name)}`, {
+      method: "PATCH", body: JSON.stringify({ sources: { local: path ? { path } : null } }),
+    });
+    await loadDatasetDetail(name);
+    await loadDatasets();
+    renderDatasetsList();
+  } catch (e) { toast("Couldn't save local path: " + e.message, "err"); }
+}
+
+function renderDatasetHostOverrides(d) {
+  const body = document.getElementById("dataset-detail-hosts");
+  const select = document.getElementById("dataset-host-override-select");
+  if (!body) return;
+  const hosts = Object.entries(d.hosts || {});
+  body.innerHTML = hosts.length
+    ? hosts.map(([slot, ov]) => `<tr><td>${escapeHtml(slot)}</td><td>${escapeHtml(ov.path)}</td><td><button class="btn btn-sm btn-ghost" data-remove-host="${escapeHtml(slot)}">Remove</button></td></tr>`).join("")
+    : `<tr><td colspan="3" class="empty-state">None set.</td></tr>`;
+  body.querySelectorAll("[data-remove-host]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      try {
+        await api(`/api/datasets/${encodeURIComponent(d.name)}/hosts/${encodeURIComponent(btn.dataset.removeHost)}`, { method: "DELETE" });
+        await loadDatasetDetail(d.name);
+      } catch (e) { toast("Couldn't remove override: " + e.message, "err"); }
+    });
+  });
+  if (select) {
+    const sshSlots = Object.keys(d.plans || {}).filter((rid) => rid.startsWith("ssh:"));
+    select.innerHTML = sshSlots.length
+      ? sshSlots.map((s) => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join("")
+      : `<option value="">(no SSH hosts registered)</option>`;
   }
-  expBody.innerHTML = experiments.length
-    ? experiments.map((e) => `<tr>
-        <td>${experimentLink(e.experiment_id)}</td>
-        <td>${escapeHtml(e.status)}</td>
-        <td>${escapeHtml((e.studies || []).map((s) => s.study_id).join(", ") || "—")}</td>
-      </tr>`).join("")
-    : `<tr><td colspan="3" class="empty-state">No experiments reference these configs yet.</td></tr>`;
+}
+
+function initDatasetHostOverrideForm() {
+  document.getElementById("btn-dataset-host-override-save")?.addEventListener("click", async () => {
+    const d = state.datasetDetail;
+    if (!d) return;
+    const slot = document.getElementById("dataset-host-override-select").value;
+    const path = document.getElementById("dataset-host-override-path").value.trim();
+    if (!slot || !path) { toast("Pick a host and a path first", "err"); return; }
+    try {
+      await api(`/api/datasets/${encodeURIComponent(d.name)}/hosts/${encodeURIComponent(slot)}`, { method: "PUT", body: JSON.stringify({ path }) });
+      toast("Override saved — checking…", "ok");
+      await recheckDataset(d.name, [slot]);
+      await loadDatasetDetail(d.name);
+    } catch (e) { toast("Couldn't save override: " + e.message, "err"); }
+  });
+}
+
+function runtimeLabel(rid) {
+  if (rid === "local") return "This machine";
+  const [kind, name] = rid.split(":");
+  if (kind === "colab" && name === undefined) return "Colab (all)";
+  return `${kind}:${name}`;
+}
+
+function renderDatasetAvailability(d) {
+  const body = document.getElementById("dataset-detail-availability");
+  if (!body) return;
+  const entries = Object.entries(d.plans || {});
+  if (!entries.length) {
+    body.innerHTML = `<tr><td colspan="3" class="empty-state">No runtimes registered yet — see Compute.</td></tr>`;
+    return;
+  }
+  body.innerHTML = entries.map(([rid, plan]) => {
+    const cls = DATASET_STATE_CLASS[plan.state] || "slate";
+    const icon = DATASET_STATE_ICON[plan.state] || "?";
+    return `<tr>
+      <td>${escapeHtml(runtimeLabel(rid))}</td>
+      <td><span class="badge ${cls}">${icon} ${escapeHtml(plan.state)}</span>${plan.code ? ` <span class="entity-card-sub">${escapeHtml(plan.code)}</span>` : ""}</td>
+      <td>${escapeHtml(plan.detail || "")}</td>
+    </tr>`;
+  }).join("");
+}
+
+async function recheckDataset(name, targets) {
+  try {
+    const body = targets && targets.length ? { targets } : {};
+    await api(`/api/datasets/${encodeURIComponent(name)}/check`, { method: "POST", body: JSON.stringify(body) });
+  } catch (e) {
+    toast("Check failed: " + e.message, "err");
+  }
+}
+
+async function recheckAllDatasets() {
+  toast("Re-checking every dataset…");
+  for (const d of state.datasets) {
+    await recheckDataset(d.name);
+  }
+  await loadDatasetsScreen();
+  toast("Re-check complete", "ok");
+}
+
+// ================================================================== samples (§8.4)
+async function loadDatasetSamples() {
+  const d = state.datasetDetail;
+  const crumbs = document.getElementById("dataset-samples-crumbs");
+  const grid = document.getElementById("dataset-samples-grid");
+  if (!d || !crumbs || !grid) return;
+  if (!(d.sources.local || {}).path && !d.root) {
+    crumbs.textContent = "";
+    grid.innerHTML = `<div class="empty-state">No local copy configured.</div>`;
+    return;
+  }
+  try {
+    const data = await api(`/api/datasets/${encodeURIComponent(d.name)}/tree?path=${encodeURIComponent(state.datasetSamplesPath)}`);
+    renderDatasetSamples(data);
+  } catch (e) {
+    grid.innerHTML = `<div class="empty-state">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function renderDatasetSamples(data) {
+  const crumbs = document.getElementById("dataset-samples-crumbs");
+  const grid = document.getElementById("dataset-samples-grid");
+  const parts = (data.path || "").split("/").filter(Boolean);
+  const crumbHtml = [`<a href="#" data-samples-crumb="">root</a>`].concat(
+    parts.map((p, i) => `<a href="#" data-samples-crumb="${escapeHtml(parts.slice(0, i + 1).join("/"))}">${escapeHtml(p)}</a>`)
+  ).join(" / ");
+  crumbs.innerHTML = crumbHtml;
+  crumbs.querySelectorAll("[data-samples-crumb]").forEach((a) => {
+    a.addEventListener("click", (e) => { e.preventDefault(); state.datasetSamplesPath = a.dataset.samplesCrumb; loadDatasetSamples(); });
+  });
+
+  const dirs = (data.dirs || []).map((name) => {
+    const rel = data.path ? `${data.path}/${name}` : name;
+    return `<div class="dataset-list-row" data-samples-dir="${escapeHtml(rel)}" style="display:inline-block; padding:6px 10px;">📁 ${escapeHtml(name)}</div>`;
+  }).join("");
+  const name = state.datasetDetail.name;
+  const images = (data.images || []).map((img) => {
+    const rel = data.path ? `${data.path}/${img}` : img;
+    const src = `/api/datasets/${encodeURIComponent(name)}/thumb?path=${encodeURIComponent(rel)}&size=160`;
+    return `<img src="${src}" data-sample-image="${escapeHtml(rel)}" loading="lazy" alt="${escapeHtml(img)}" />`;
+  }).join("");
+  grid.innerHTML = dirs + images || `<div class="empty-state">Nothing here.</div>`;
+  grid.querySelectorAll("[data-samples-dir]").forEach((el) => {
+    el.addEventListener("click", () => { state.datasetSamplesPath = el.dataset.samplesDir; loadDatasetSamples(); });
+  });
+  grid.querySelectorAll("[data-sample-image]").forEach((el) => {
+    el.addEventListener("click", () => previewDatasetSample(el.dataset.sampleImage));
+  });
+}
+
+async function previewDatasetSample(relPath) {
+  const d = state.datasetDetail;
+  const out = document.getElementById("dataset-samples-preview");
+  if (!d || !out) return;
+  const name = d.name;
+  let maskRel = null;
+  try {
+    const info = await api(`/api/datasets/${encodeURIComponent(name)}/file?path=${encodeURIComponent(relPath)}&mask_of=1`);
+    maskRel = info.mask;
+  } catch (e) { /* best-effort */ }
+  const imgUrl = `/api/datasets/${encodeURIComponent(name)}/file?path=${encodeURIComponent(relPath)}`;
+  const maskUrl = maskRel ? `/api/datasets/${encodeURIComponent(name)}/file?path=${encodeURIComponent(maskRel)}` : null;
+  const modes = state.system && state.system.dataset_channel_modes ? Object.entries(state.system.dataset_channel_modes) : [];
+  out.innerHTML = `
+    <div class="job-actions" style="flex-wrap:wrap;">
+      <img src="${imgUrl}" style="max-width:220px; max-height:220px; border-radius:var(--radius-sm);" />
+      ${maskUrl ? `<img src="${maskUrl}" style="max-width:220px; max-height:220px; border-radius:var(--radius-sm);" title="mask" />` : ""}
+    </div>
+    ${modes.length ? `
+      <div class="job-actions" style="margin-top:8px;">
+        <select id="dataset-sample-channel-mode">${modes.map(([k, v]) => `<option value="${escapeHtml(k)}">${escapeHtml(v)}</option>`).join("")}</select>
+        <button class="btn btn-sm btn-ghost" id="btn-dataset-sample-channel-preview">Channel preview ▸</button>
+      </div>
+      <div id="dataset-sample-channel-result"></div>
+    ` : ""}`;
+  document.getElementById("btn-dataset-sample-channel-preview")?.addEventListener("click", async () => {
+    const mode = document.getElementById("dataset-sample-channel-mode").value;
+    const resultEl = document.getElementById("dataset-sample-channel-result");
+    resultEl.innerHTML = `<div class="empty-state">Building channels…</div>`;
+    try {
+      const result = await api(`/api/datasets/${encodeURIComponent(name)}/channel-preview`, {
+        method: "POST", body: JSON.stringify({ path: relPath, mode }),
+      });
+      const tiles = (result.tiles || []).map((t) => `<div class="channel-tile"><img src="${t.png}" /><div class="channel-tile-label">${escapeHtml(t.group)}[${t.index_in_group}]</div></div>`).join("");
+      resultEl.innerHTML = `<div class="channel-tile-grid">${tiles}</div>`;
+    } catch (e) { resultEl.innerHTML = `<div class="empty-state">${escapeHtml(e.message)}</div>`; }
+  });
+}
+
+// ================================================================== usage ("Used by")
+async function loadDatasetUsage(name) {
+  const el = document.getElementById("dataset-detail-usage");
+  if (!el) return;
+  el.textContent = "Loading…";
+  try {
+    const data = await api(`/api/datasets/${encodeURIComponent(name)}/configs`);
+    const configs = data.configs || [];
+    let experiments = [];
+    for (const path of configs) {
+      try {
+        const r = await api(`/api/experiments?config=${encodeURIComponent(path)}`);
+        experiments = experiments.concat(r.experiments || []);
+      } catch (e) { /* best-effort */ }
+    }
+    const studies = new Set();
+    experiments.forEach((e) => (e.studies || []).forEach((s) => studies.add(s.study_id)));
+    el.textContent = `${configs.length} config${configs.length === 1 ? "" : "s"} · ${experiments.length} experiment${experiments.length === 1 ? "" : "s"} · ${studies.size} stud${studies.size === 1 ? "y" : "ies"}`;
+  } catch (e) {
+    el.textContent = "Couldn't load usage: " + e.message;
+  }
+}
+
+// ================================================================== remove / data account
+async function removeDatasetFromXDash() {
+  const d = state.datasetDetail;
+  if (!d) return;
+  const ok = await showConfirm("Remove from XDash", `Remove "${d.name}" from XDash's own store? Sources, tags, overrides and checks are deleted. Nothing in dissert or on disk is touched.`);
+  if (!ok) return;
+  try {
+    await api(`/api/datasets/${encodeURIComponent(d.name)}`, { method: "DELETE" });
+    toast("Removed", "ok");
+    navigateToDataset("");
+    location.hash = "#/datasets";
+    await loadDatasetsScreen();
+  } catch (e) { toast("Couldn't remove: " + e.message, "err"); }
+}
+
+async function saveDataAccount(name) {
+  try {
+    await api("/api/datasets/data-account", { method: "PUT", body: JSON.stringify({ name: name || null }) });
+    state.datasetsDataAccount = name || null;
+    toast("Data account set", "ok");
+  } catch (e) { toast("Couldn't set data account: " + e.message, "err"); }
+}
+
+// ================================================================== Add-dataset wizard (§6)
+function openAddDatasetWizard() {
+  document.getElementById("dataset-add-name").value = "";
+  document.getElementById("dataset-add-tags").value = "";
+  document.getElementById("dataset-add-kaggle").value = "";
+  document.getElementById("dataset-add-local-path").value = "";
+  document.getElementById("dataset-add-fragment-notice").textContent = "";
+  document.getElementById("dataset-add-backdrop").classList.remove("hidden");
+}
+
+function closeAddDatasetWizard() {
+  document.getElementById("dataset-add-backdrop").classList.add("hidden");
+}
+
+async function createDatasetFromWizard() {
+  const name = document.getElementById("dataset-add-name").value.trim();
+  if (!name) { toast("Name is required", "err"); return; }
+  const tags = document.getElementById("dataset-add-tags").value.split(",").map((t) => t.trim()).filter(Boolean);
+  const kaggleRaw = document.getElementById("dataset-add-kaggle").value.trim();
+  const localPath = document.getElementById("dataset-add-local-path").value.trim();
+  const sources = {};
+  if (kaggleRaw) sources.kaggle = { slug: kaggleRaw };
+  if (localPath) sources.local = { path: localPath };
+  try {
+    const result = await api("/api/datasets", { method: "POST", body: JSON.stringify({ name, tags, sources }) });
+    if (result.exists === "fragment") {
+      document.getElementById("dataset-add-fragment-notice").textContent = `dissert already declares "${result.name}" — opening it instead.`;
+      closeAddDatasetWizard();
+      navigateToDataset(result.name);
+      await loadDatasetsScreen();
+      return;
+    }
+    toast("Draft created", "ok");
+    closeAddDatasetWizard();
+    await loadDatasetsScreen();
+    navigateToDataset(result.name);
+    if (kaggleRaw) await recheckDataset(result.name);
+  } catch (e) { toast("Couldn't create: " + e.message, "err"); }
+}
+
+// ================================================================== folder/file picker (§8.5)
+async function openFsPicker(mode, onUse) {
+  state.datasetFsPicker = { path: null, mode, onUse };
+  document.getElementById("fs-picker-backdrop").classList.remove("hidden");
+  await fsPickerNavigate(null);
+}
+
+async function fsPickerNavigate(path) {
+  const p = state.datasetFsPicker;
+  if (!p) return;
+  try {
+    const data = await api(`/api/fs/list?mode=${encodeURIComponent(p.mode)}${path ? "&path=" + encodeURIComponent(path) : ""}`);
+    p.path = data.path;
+    document.getElementById("fs-picker-crumbs").textContent = data.path;
+    const list = document.getElementById("fs-picker-list");
+    const rows = [];
+    if (data.parent) rows.push(`<button class="path-picker-item" data-fs-nav="${escapeHtml(data.parent)}">.. (up)</button>`);
+    (data.entries || []).forEach((e) => {
+      rows.push(`<button class="path-picker-item" data-fs-nav="${e.type === "dir" ? escapeHtml(e.path) : ""}" data-fs-file="${e.type === "file" ? escapeHtml(e.path) : ""}">${e.type === "dir" ? "📁" : "🖼"} ${escapeHtml(e.name)}</button>`);
+    });
+    list.innerHTML = rows.join("") || `<div class="empty-state">Empty.</div>`;
+    list.querySelectorAll("[data-fs-nav]").forEach((btn) => {
+      if (btn.dataset.fsNav) btn.addEventListener("click", () => fsPickerNavigate(btn.dataset.fsNav));
+    });
+    list.querySelectorAll("[data-fs-file]").forEach((btn) => {
+      if (btn.dataset.fsFile) btn.addEventListener("click", () => { closeFsPicker(); state.datasetFsPicker.onUse(btn.dataset.fsFile); });
+    });
+  } catch (e) {
+    document.getElementById("fs-picker-list").innerHTML = `<div class="empty-state">${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function closeFsPicker() {
+  document.getElementById("fs-picker-backdrop").classList.add("hidden");
+}
+
+function useFsPickerFolder() {
+  const p = state.datasetFsPicker;
+  if (!p) return;
+  closeFsPicker();
+  p.onUse(p.path);
 }
 
 // ================================================================== init
 function initDatasetsScreenButtons() {
   document.getElementById("btn-refresh-data")?.addEventListener("click", loadDatasetsScreen);
-  document.getElementById("btn-dataset-registry-back")?.addEventListener("click", () => navigateToView("data"));
-
-  document.getElementById("binding-editor-mode").addEventListener("change", updateBindingEditorFieldVisibility);
-  document.getElementById("binding-editor-cancel").addEventListener("click", closeBindingEditor);
-  document.getElementById("binding-editor-save").addEventListener("click", saveBindingEditor);
-  document.getElementById("btn-binding-editor-check").addEventListener("click", checkBindingEditor);
-  document.getElementById("dataset-binding-backdrop").addEventListener("click", (e) => {
-    if (e.target.id === "dataset-binding-backdrop") closeBindingEditor();
+  document.getElementById("btn-datasets-recheck-all")?.addEventListener("click", recheckAllDatasets);
+  document.getElementById("btn-dataset-add")?.addEventListener("click", openAddDatasetWizard);
+  document.getElementById("btn-dataset-remove")?.addEventListener("click", removeDatasetFromXDash);
+  document.getElementById("btn-dataset-recheck")?.addEventListener("click", () => {
+    if (state.datasetDetail) { recheckDataset(state.datasetDetail.name).then(() => loadDatasetDetail(state.datasetDetail.name)); }
   });
+  document.getElementById("datasets-search")?.addEventListener("input", (e) => { state.datasetsSearch = e.target.value; renderDatasetsList(); });
+  document.getElementById("datasets-data-account")?.addEventListener("change", (e) => saveDataAccount(e.target.value));
+
+  document.getElementById("dataset-add-cancel")?.addEventListener("click", closeAddDatasetWizard);
+  document.getElementById("dataset-add-create")?.addEventListener("click", createDatasetFromWizard);
+  document.getElementById("btn-dataset-add-pick-folder")?.addEventListener("click", () => {
+    openFsPicker("dir", (path) => { document.getElementById("dataset-add-local-path").value = path; });
+  });
+  document.getElementById("dataset-add-backdrop")?.addEventListener("click", (e) => {
+    if (e.target.id === "dataset-add-backdrop") closeAddDatasetWizard();
+  });
+
+  document.getElementById("fs-picker-cancel")?.addEventListener("click", closeFsPicker);
+  document.getElementById("fs-picker-use")?.addEventListener("click", useFsPickerFolder);
+  document.getElementById("fs-picker-backdrop")?.addEventListener("click", (e) => {
+    if (e.target.id === "fs-picker-backdrop") closeFsPicker();
+  });
+
+  initDatasetHostOverrideForm();
 }
 
 initDatasetsScreenButtons();

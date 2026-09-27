@@ -325,7 +325,7 @@ function switchView(view) {
   document.querySelectorAll(".nav-item").forEach((el) => el.classList.toggle("active", el.dataset.view === view));
   document.querySelectorAll(".view").forEach((el) => el.classList.toggle("active", el.id === `view-${view}`));
   if (view === "lab") { loadLab(); startLabPolling(); } else { stopLabPolling(); }
-  if (view === "data") { loadDataView(); loadDatasetsScreen(); }
+  if (view === "data") { loadDatasetsScreen(); }
   if (view === "compute") { loadComputeCapacity(); loadRuntimeBoard(); startComputeBoardPolling(); }
   else { stopComputeBoardPolling(); }
   // XDASH_PLAN.md Phase 3: the old flat spine table (loadSpine) is retired —

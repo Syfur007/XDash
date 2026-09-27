@@ -377,8 +377,9 @@ def test_preflight_matrix_for_ids_and_specs(client, use_runners):
     assert row["cells"]["fake:full"] == {
         "allowed": True, "ok": False, "code": "pool-busy", "detail": "fake says no",
         "data": {
-            "mode": None, "code": "no-dataset-binding", "dataset": "demo",
-            "detail": "'demo' has no binding for fake:full and no default source to fall back to",
+            "strategy": None, "source": None, "target": None, "state": "blocked",
+            "code": "dataset-unavailable", "detail": "Unknown runtime kind 'fake'", "action": None,
+            "dataset": "demo",
         },
     }
     assert set(row["estimate"]) >= {"hours", "tier"}

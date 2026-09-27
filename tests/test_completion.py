@@ -384,7 +384,7 @@ def test_machine_dispatch_splits_train_and_eval_args(ssh_box, use_runners, monke
     runner.dispatch(exp, {"attempt_id": "atmpt_x", "resume_of": "atmpt_prev"})
     assert captured["train"] == "--seeds 42 --repeats 1 --epochs 5 --resume"
     assert captured["eval"] == "--seeds 42 --repeats 1 --no-vis"
-    assert ("push", str(settings.repo_root), "/remote/repo") in fake.calls
+    assert ("push", str(settings.repo_root), "/remote/repo", False) in fake.calls
 
 
 # ----------------------------------------------------------------- cancel + stragglers

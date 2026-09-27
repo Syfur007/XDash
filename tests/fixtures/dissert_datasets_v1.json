@@ -1,0 +1,68 @@
+{
+  "busi": {
+    "bindings": {
+      "kaggle:tanvir": {
+        "mode": "attach"
+      }
+    },
+    "checks": {
+      "kaggle:tanvir": {
+        "at": "2026-09-26T20:30:47+00:00",
+        "detail": "no binding resolves",
+        "ok": false
+      }
+    },
+    "name": "busi",
+    "sources": {}
+  },
+  "clinicdb": {
+    "bindings": {
+      "kaggle:emon": {
+        "mode": "attach",
+        "source": "syfur007/syfur007/clinicdb-train-val-test-images-and-masks"
+      },
+      "kaggle:syfur": {
+        "mode": "attach",
+        "source": "syfur007/syfur007/clinicdb-train-val-test-images-and-masks"
+      },
+      "kaggle:tanvir": {
+        "mode": "attach",
+        "source": "syfur007/clinicdb-train-val-test-images-and-masks"
+      }
+    },
+    "checks": {
+      "kaggle:emon": {
+        "at": "2026-09-26T20:46:23+00:00",
+        "detail": "mode: attach",
+        "ok": true
+      },
+      "kaggle:tanvir": {
+        "at": "2026-09-26T20:34:23+00:00",
+        "detail": "mode: attach",
+        "ok": true
+      }
+    },
+    "name": "clinicdb",
+    "sources": {
+      "kaggle": {
+        "slug": "syfur007/clinicdb-images"
+      }
+    }
+  },
+  "colondb": {
+    "bindings": {
+      "kaggle:eva": {
+        "mode": "path"
+      }
+    },
+    "checks": {
+      "kaggle:eva": {
+        "at": "2026-09-26T22:12:25+00:00",
+        "detail": "mode: path",
+        "ok": true
+      }
+    },
+    "name": "colondb",
+    "sources": {}
+  }
+}

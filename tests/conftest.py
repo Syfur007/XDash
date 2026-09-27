@@ -398,14 +398,23 @@ def use_runners(monkeypatch):
 
 class FakeTransport:
     """A remote host that is really a local directory: `remote_root` stands
-    for the host's repo_root. Only the calls MachineRunner makes."""
+    for the host's repo_root. Only the calls MachineRunner makes.
+
+    `run()` records every argv it was given (DATASETS_PLAN.md §12 D1 item
+    10, fixes DS12 — the previous version neither executed nor recorded
+    it, so a self-linking `ln -sfn X X` or a leaked `KAGGLE_KEY` was
+    invisible to every test). `run_returncode`/`run_stderr` script a
+    failing command without a real one existing."""
 
     def __init__(self, host_id: str, remote_repo_root: Path, local_mirror: Path):
         self.host_id = host_id
         self.remote_repo_root = Path(remote_repo_root)
         self.mirror = Path(local_mirror)
         self.calls: List[tuple] = []
+        self.run_calls: List[List[str]] = []
         self.fail: Optional[str] = None
+        self.run_returncode = 0
+        self.run_stderr = ""
 
     def _local(self, remote_path) -> Path:
         rel = Path(remote_path).relative_to(self.remote_repo_root)
@@ -432,16 +441,104 @@ class FakeTransport:
         Path(local_path).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(str(self._local(remote_path)), str(local_path))
 
-    def push(self, local_dir, remote_dir, excludes=()):
+    def push(self, local_dir, remote_dir, excludes=(), delete=False):
         self._check()
-        self.calls.append(("push", str(local_dir), str(remote_dir)))
+        self.calls.append(("push", str(local_dir), str(remote_dir), delete))
+
+    def put_text(self, remote_path, text, mode=0o600):
+        self._check()
+        self.calls.append(("put_text", str(remote_path), text))
+        # Never resolves against the real filesystem's home or cwd: a
+        # "~/..." path (the shape Colab credential writes use) is rehomed
+        # under the mirror's own synthetic "home" — a literal "~" directory
+        # here once actually leaked into the real repo checkout via
+        # Path("~/...").parent.mkdir(), which does NOT expand "~".
+        remote_str = str(remote_path)
+        if remote_str.startswith(str(self.remote_repo_root)):
+            p = self._local(remote_path)
+        elif remote_str.startswith("~/"):
+            p = self.mirror / "home" / remote_str[2:]
+        elif remote_str.startswith("/"):
+            p = self.mirror / "abs" / remote_str.lstrip("/")
+        else:
+            p = self.mirror / "home" / remote_str
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
 
     def run(self, argv, timeout=None):
         self._check()
-        return subprocess.CompletedProcess(args=list(argv), returncode=0, stdout="", stderr="")
+        self.run_calls.append(list(argv))
+        return subprocess.CompletedProcess(
+            args=list(argv), returncode=self.run_returncode, stdout="", stderr=self.run_stderr,
+        )
 
     def available(self):
         return not self.fail
+
+
+class ShellTransport:
+    """Runs `sh` for real, inside a temporary directory standing in for a
+    remote host's repo_root (DATASETS_PLAN.md §12 D1 item 10) — exercises
+    dataset placement against a real `ln`, `mkdir -p` and `find`/`test`,
+    not a fake that only records what it was told to do. `root` plays the
+    part of the remote repo_root; every relative path callers pass is
+    resolved directly against it (mirrors how a real SshTransport's
+    argv/rsync targets are already absolute-or-remote-relative)."""
+
+    def __init__(self, root: Path, host_id: str = "shell"):
+        self.host_id = host_id
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.calls: List[tuple] = []
+        self.run_calls: List[List[str]] = []
+
+    def run(self, argv, timeout=None):
+        self.run_calls.append(list(argv))
+        return subprocess.run(list(argv), capture_output=True, text=True, timeout=timeout)
+
+    def push(self, local_dir, remote_dir, excludes=(), delete=False):
+        self.calls.append(("push", str(local_dir), str(remote_dir), delete))
+        dest = Path(remote_dir)
+        if delete and dest.is_dir():
+            shutil.rmtree(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        for item in Path(local_dir).iterdir():
+            target = dest / item.name
+            if item.is_dir():
+                shutil.copytree(str(item), str(target), dirs_exist_ok=True)
+            else:
+                shutil.copy2(str(item), str(target))
+
+    def pull(self, remote_dir, local_dir, excludes=()):
+        Path(local_dir).mkdir(parents=True, exist_ok=True)
+        shutil.copytree(str(remote_dir), str(local_dir), dirs_exist_ok=True)
+
+    def pull_file(self, remote_path, local_path):
+        Path(local_path).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(str(remote_path), str(local_path))
+
+    def put_text(self, remote_path, text, mode=0o600):
+        self.calls.append(("put_text", str(remote_path), text))
+        # Same rehoming as FakeTransport.put_text() above, for the same
+        # reason: Path("~/...") does not expand "~", so a literal one must
+        # never be handed to mkdir()/write_text() as-is.
+        remote_str = str(remote_path)
+        if remote_str.startswith("~/"):
+            p = self.root / "home" / remote_str[2:]
+        elif remote_str.startswith("/"):
+            p = self.root / "abs" / remote_str.lstrip("/")
+        else:
+            p = self.root / remote_str
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text)
+        p.chmod(mode)
+
+    def exists(self, remote_path, kind="d"):
+        p = Path(remote_path)
+        return p.is_dir() if kind == "d" else p.is_file()
+
+    def available(self):
+        return True
 
 
 # --------------------------------------------------------------------------- run-dir builders

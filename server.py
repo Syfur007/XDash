@@ -33,7 +33,6 @@ from backend import tensorboard_manager as tb
 from backend import tmux_runner as tmux
 from backend import ledger
 from backend import bridge
-from backend import datasets_info
 from backend import kaggle as kaggle_ops
 from backend import colab as colab_ops
 from backend import snapshot as snapshot_ops
@@ -43,7 +42,6 @@ from backend import repos as repos_ops
 from backend import runners as runner_registry
 from backend.runners import registry as runner_slots
 from backend.runners.base import ACTIVE_STATUSES
-from backend import dataset_map
 from backend import datasets as dataset_registry
 from backend import profile_ops
 from backend import runtimes as runtimes_mod
@@ -305,40 +303,6 @@ def api_models_profile():
         return err("Body must be {'kwargs': {'name': ..., ...}}", 400)
     try:
         return jsonify(bridge.run_bridge_script("profile_model.py", [json.dumps(kwargs)], use_cache=False))
-    except bridge.BridgeError as e:
-        return err(str(e), 422)
-    except bridge.BridgeUnavailable as e:
-        return err(str(e), 503)
-
-
-# --------------------------------------------------------------------------- datasets (Data Studio)
-@app.route("/api/datasets", methods=["GET"])
-def api_list_datasets():
-    return jsonify({"datasets": datasets_info.list_dataset_fragments()})
-
-
-@app.route("/api/datasets/channel-preview", methods=["POST"])
-def api_dataset_channel_preview():
-    body = request.get_json(silent=True) or {}
-    image_path = body.get("image_path")
-    mode = body.get("mode", "m1")
-    modality = body.get("modality", "colour")
-    if not image_path:
-        return err("Missing 'image_path'", 400)
-    try:
-        resolved = (settings.repo_root / image_path).resolve()
-    except (OSError, ValueError) as e:
-        return err(f"Invalid image_path: {e}", 400)
-    if settings.repo_root.resolve() not in resolved.parents and resolved != settings.repo_root.resolve():
-        return err("image_path escapes the repo root", 400)
-    try:
-        result = bridge.run_bridge_script(
-            "channel_preview.py",
-            [json.dumps({"image_path": str(resolved), "mode": mode, "modality": modality})],
-            timeout=30,
-            use_cache=False,
-        )
-        return jsonify(result)
     except bridge.BridgeError as e:
         return err(str(e), 422)
     except bridge.BridgeUnavailable as e:
@@ -1119,94 +1083,202 @@ def api_pulse():
 
 
 def _dataset_error(e):
-    return err(str(e), 400)
+    return err(str(e), getattr(e, "status", 400))
 
 
-# XDASH_PLAN.md §5/§7 — the dataset registry (backend/datasets.py): per-runtime
-# placement bindings (path/push/fetch/attach), replacing dataset_map.json's narrow
-# name->Kaggle-slug map (which stays, underneath, as the Kaggle-slug precedence chain
-# resolve_kaggle_dataset() already implements — see datasets.py's own docstring).
-#
-# Deviation from the plan's literal `GET /api/datasets`: that bare route already serves
-# the Data Studio's fragment cards (backend/datasets_info.py, static/js/views/data.js) —
-# a different, working feature this phase doesn't touch. The registry's own list is
-# GET /api/datasets/registry instead; every route with a <name> segment doesn't collide
-# with anything existing, so those match the plan exactly.
-@app.route("/api/datasets/registry", methods=["GET"])
-def api_list_dataset_registry():
+# DATASETS_PLAN.md §9 — the final API surface. Replaces the old fragment-card
+# `GET /api/datasets` (backend/datasets_info.py, static/js/views/data.js) and
+# the separate bindings-registry routes (`/registry`, `/bindings/<runtime>`,
+# `/kaggle-map`) with one store, one slug, delivery computed rather than
+# configured (§0). `stage`/`publish`/`cache`/the jobs route are D3 — not
+# built here (§12).
+@app.route("/api/datasets", methods=["GET"])
+def api_list_datasets():
     return jsonify({"datasets": dataset_registry.list_datasets(), "data_account": dataset_registry.data_account()})
 
 
-@app.route("/api/datasets/registry/data_account", methods=["PUT"])
-def api_set_dataset_data_account():
-    body = request.get_json(silent=True) or {}
-    dataset_registry.set_data_account(body.get("name"))
-    return jsonify({"data_account": dataset_registry.data_account()})
-
-
-@app.route("/api/datasets/<name>", methods=["PUT"])
-def api_upsert_dataset(name):
-    body = request.get_json(silent=True) or {}
+@app.route("/api/datasets/<name>", methods=["GET"])
+def api_get_dataset(name):
     try:
-        return jsonify(dataset_registry.upsert_dataset(name, sources=body.get("sources"), bindings=body.get("bindings")))
+        return jsonify(dataset_registry.get_dataset(name))
     except dataset_registry.DatasetError as e:
         return _dataset_error(e)
 
 
-@app.route("/api/datasets/<name>/bindings/<runtime>", methods=["PUT"])
-def api_set_dataset_binding(name, runtime):
+@app.route("/api/datasets", methods=["POST"])
+def api_create_dataset():
     body = request.get_json(silent=True) or {}
     try:
-        return jsonify(dataset_registry.set_binding(name, runtime, body))
+        return jsonify(dataset_registry.create_draft(body.get("name"), tags=body.get("tags"), sources=body.get("sources")))
+    except dataset_registry.DatasetError as e:
+        return _dataset_error(e)
+
+
+@app.route("/api/datasets/<name>", methods=["PATCH"])
+def api_patch_dataset(name):
+    """Deviation from §9: does not itself run checks — the plan's own D2
+    scope note (§ "Order of work") has the UI call `/check` right after a
+    slug save instead."""
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(dataset_registry.update_dataset(name, tags=body.get("tags"), sources=body.get("sources")))
+    except dataset_registry.DatasetError as e:
+        return _dataset_error(e)
+
+
+@app.route("/api/datasets/<name>", methods=["DELETE"])
+def api_delete_dataset(name):
+    try:
+        dataset_registry.delete_dataset(name)
+        return jsonify({"deleted": name})
+    except dataset_registry.DatasetError as e:
+        return _dataset_error(e)
+
+
+@app.route("/api/datasets/<name>/link", methods=["POST"])
+def api_link_dataset_fragment(name):
+    body = request.get_json(silent=True) or {}
+    fragment = body.get("fragment")
+    if not fragment:
+        return err("Missing 'fragment'", 400)
+    try:
+        return jsonify(dataset_registry.link_fragment(name, fragment))
+    except dataset_registry.DatasetError as e:
+        return _dataset_error(e)
+
+
+@app.route("/api/datasets/<name>/hosts/<slot>", methods=["PUT"])
+def api_set_dataset_host_override(name, slot):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(dataset_registry.set_host_override(name, slot, body.get("path")))
+    except dataset_registry.DatasetError as e:
+        return _dataset_error(e)
+
+
+@app.route("/api/datasets/<name>/hosts/<slot>", methods=["DELETE"])
+def api_delete_dataset_host_override(name, slot):
+    try:
+        return jsonify(dataset_registry.delete_host_override(name, slot))
     except dataset_registry.DatasetError as e:
         return _dataset_error(e)
 
 
 @app.route("/api/datasets/<name>/check", methods=["POST"])
 def api_check_dataset(name):
-    """Runs a binding's check now, over the real runner's own Transport when
-    it has one (local/ssh/colab); Kaggle has none, so it just reports the
-    resolved binding (attach is declarative, nothing to dry-check)."""
-    runtime_id = (request.args.get("runtime") or "").strip()
-    if not runtime_id:
-        return err("?runtime=<id> is required", 400)
-    kind, _ = runner_slots.parse_slot_id(runtime_id)
+    """Deviation from §9: runs synchronously (a 30s timeout per Kaggle
+    account, §12 D1) and returns the results directly — not a job id. The
+    background job table (`GET .../jobs/<id>`) is D3."""
+    body = request.get_json(silent=True) or {}
+    targets = body.get("targets")
     try:
-        runner = runner_slots.get_runner(runtime_id)
-    except KeyError:
-        return err(f"Unknown runtime '{runtime_id}'", 404)
-    transport = getattr(runner, "_transport", None)
-    if transport is None:
-        binding = dataset_registry.resolve_binding(name, runtime_id, kind)
-        ok = bool(binding.get("mode"))
-        detail = "mode: %s" % binding.get("mode") if ok else "no binding resolves"
-        dataset_registry.record_check(name, runtime_id, ok, detail)
-        return jsonify({"ok": ok, "mode": binding.get("mode"), "detail": detail})
-    repo_root = getattr(getattr(runner, "host", None), "repo_root", None) or settings.repo_root
-    return jsonify(dataset_registry.check_binding(name, runtime_id, kind, transport, repo_root))
+        return jsonify(dataset_registry.run_checks(name, targets=targets))
+    except dataset_registry.DatasetError as e:
+        return _dataset_error(e)
 
 
 @app.route("/api/datasets/<name>/configs", methods=["GET"])
 def api_dataset_configs(name):
-    """XDASH_PLAN.md §8.5's dataset detail page: "which configs ... use it"
-    — best-effort, walks every config's own compose chain (backend/datasets.py's
-    `configs_using_dataset()`), not a raw text grep."""
     return jsonify({"configs": dataset_registry.configs_using_dataset(name)})
 
 
-@app.route("/api/datasets/kaggle-map", methods=["GET"])
-def api_get_dataset_map():
-    return jsonify({"entries": dataset_map.map_with_provenance()})
+@app.route("/api/datasets/<name>/tree", methods=["GET"])
+def api_dataset_tree(name):
+    try:
+        page = int(request.args.get("page", "0") or "0")
+    except ValueError:
+        return err("page must be an integer", 400)
+    try:
+        return jsonify(dataset_registry.dataset_tree(name, request.args.get("path"), page=page))
+    except dataset_registry.DatasetError as e:
+        return _dataset_error(e)
 
 
-@app.route("/api/datasets/kaggle-map", methods=["PUT"])
-def api_put_dataset_map():
+@app.route("/api/datasets/<name>/thumb", methods=["GET"])
+def api_dataset_thumb(name):
+    path = request.args.get("path")
+    if not path:
+        return err("Missing 'path'", 400)
+    try:
+        size = int(request.args.get("size", "160") or "160")
+        thumb = dataset_registry.dataset_thumb_path(name, path, size=size)
+    except dataset_registry.DatasetError as e:
+        return _dataset_error(e)
+    except (OSError, ValueError) as e:
+        return err("Could not render thumbnail: %s" % e, 422)
+    return send_file(str(thumb), mimetype="image/jpeg")
+
+
+@app.route("/api/datasets/<name>/file", methods=["GET"])
+def api_dataset_file(name):
+    path = request.args.get("path")
+    if not path:
+        return err("Missing 'path'", 400)
+    try:
+        full = dataset_registry.dataset_file_path(name, path)
+        mask = dataset_registry.dataset_mask_pair(name, path)
+    except dataset_registry.DatasetError as e:
+        return _dataset_error(e)
+    if request.args.get("mask_of") == "1":
+        return jsonify({"mask": mask})
+    return send_file(str(full))
+
+
+@app.route("/api/datasets/<name>/channel-preview", methods=["POST"])
+def api_dataset_channel_preview(name):
     body = request.get_json(silent=True) or {}
-    entries = body.get("entries")
-    if not isinstance(entries, dict):
-        return err('Body must be {"entries": {name: kaggle_dataset, ...}}', 400)
-    saved = dataset_map.save_dataset_map(entries)
-    return jsonify({"entries": dataset_map.map_with_provenance(), "saved": saved})
+    path = body.get("path")
+    mode = body.get("mode", "m1")
+    if not path:
+        return err("Missing 'path'", 400)
+    try:
+        result = dataset_registry.channel_preview(name, path, mode)
+        return jsonify(result)
+    except dataset_registry.DatasetError as e:
+        return _dataset_error(e)
+    except bridge.BridgeError as e:
+        return err(str(e), 422)
+    except bridge.BridgeUnavailable as e:
+        return err(str(e), 503)
+
+
+@app.route("/api/datasets/data-account", methods=["PUT"])
+def api_set_dataset_data_account():
+    body = request.get_json(silent=True) or {}
+    dataset_registry.set_data_account(body.get("name"))
+    return jsonify({"data_account": dataset_registry.data_account()})
+
+
+def _require_api_token():
+    """GET routes skip `_guard_mutating_requests()` entirely (it only runs
+    for state-changing methods) — `/api/fs/list` (§8.5) reads this
+    machine's filesystem, so it needs the same X-Api-Token check even on a
+    GET, when one is configured."""
+    if settings.api_token:
+        supplied = request.headers.get("X-Api-Token", "")
+        if not hmac.compare_digest(supplied, settings.api_token):
+            return err("Missing or invalid X-Api-Token header", 401)
+    return None
+
+
+@app.route("/api/fs/list", methods=["GET"])
+def api_fs_list():
+    denied = _require_api_token()
+    if denied is not None:
+        return denied
+    loopback = settings.server_host in ("127.0.0.1", "localhost", "::1")
+    if not loopback and not settings.datasets_allow_fs_browse:
+        return err(
+            "Browsing this machine's filesystem is disabled: server_host isn't loopback and "
+            "datasets.allow_fs_browse isn't set in the profile", 403,
+        )
+    mode = request.args.get("mode", "dir")
+    if mode not in ("dir", "file"):
+        return err("mode must be 'dir' or 'file'", 400)
+    try:
+        return jsonify(dataset_registry.fs_list(request.args.get("path"), mode=mode))
+    except dataset_registry.DatasetError as e:
+        return _dataset_error(e)
 
 
 # --------------------------------------------------------------------------- notifications
@@ -1436,6 +1508,10 @@ def api_system():
         # can drop its own hardcoded lower_is_better list (static/app.js:6)
         # and read the profile's instead.
         "metrics": {"primary": settings.metrics_primary, "lower_is_better": settings.metrics_lower_is_better},
+        # DATASETS_PLAN.md §8.4 — the sample preview's channel-mode labels
+        # come from the profile (datasets.channel_modes), not hard-coded in
+        # index.html; empty means the channel part of the preview is hidden.
+        "dataset_channel_modes": settings.dataset_channel_modes,
         "bridge": bridge.bridge_status(),
         # Settings → About (XDASH_PLAN.md §8.6): XDash's own per-profile state
         # dir, not the (potentially huge) host repo's outputs/ tree — the size

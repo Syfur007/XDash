@@ -132,8 +132,8 @@ function renderLabAttention(pulse) {
       if (action === "retry") labQuickRetry(id);
       // attempt.blocked only ever carries {code, detail}, never the dataset
       // name itself (backend/runners/*.py's can_accept() drops the extra
-      // "dataset" key data_mode_for_experiment() returns before it reaches
-      // the attempt) — the deep link degrades to the bare Datasets matrix
+      // "dataset" key plan_delivery_for_config() returns before it reaches
+      // the attempt) — the deep link degrades to the bare Datasets list
       // rather than guessing a name out of free-text detail.
       else if (action === "bind-data") navigateToView("data");
       else navigateToExperiment(id, "overview");
@@ -147,7 +147,7 @@ function labAttentionRowHtml(v) {
   let detailHtml, actionsHtml;
   if (v._kind === "blocked") {
     detailHtml = `blocked · ${escapeHtml(b.code || "blocked")}${b.detail ? " — " + escapeHtml(b.detail) : ""}`;
-    const isDataIssue = /dataset/.test(b.code || "");
+    const isDataIssue = /dataset|kaggle-no-access|no-kaggle-source|no-data-account/.test(b.code || "");
     actionsHtml = isDataIssue
       ? `<button class="btn btn-sm btn-ghost" data-lab-action="bind-data" data-experiment-id="${escapeHtml(v.experiment_id)}">Bind data</button>`
       : `<button class="btn btn-sm btn-ghost" data-lab-action="open" data-experiment-id="${escapeHtml(v.experiment_id)}">Open</button>`;

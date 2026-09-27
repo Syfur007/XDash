@@ -126,7 +126,7 @@ def test_train_and_eval_get_the_same_overlay_config(ssh_box_overlay, monkeypatch
     assert captured["cli_config"] == rel
     assert (HOST / rel).is_file()
     # Over the transport, as its own step, to the host's repo.
-    assert ("push", str(settings.repo_root / ".xdash"), "/remote/repo/.xdash") in fake.calls
+    assert ("push", str(settings.repo_root / ".xdash"), "/remote/repo/.xdash", False) in fake.calls
 
 
 def test_scheduler_items_carry_cli_config_into_both_commands(monkeypatch):

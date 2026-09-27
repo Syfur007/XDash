@@ -80,40 +80,57 @@ def test_pulse_includes_the_unified_runtimes_list(client, use_runners):
 
 
 def test_dataset_registry_routes(client):
-    r = client.get("/api/datasets/registry")
+    r = client.get("/api/datasets")
     assert r.status_code == 200
     names = {d["name"] for d in r.get_json()["datasets"]}
     assert "demo" in names
 
-    r = client.put("/api/datasets/demo/bindings/ssh:*", json={"mode": "push"})
+    r = client.patch("/api/datasets/demo", json={"sources": {"kaggle": {"slug": "someone/demo-ds"}}})
     assert r.status_code == 200
-    assert r.get_json()["bindings"]["ssh:*"] == {"mode": "push"}
+    assert r.get_json()["sources"]["kaggle"]["slug"] == "someone/demo-ds"
 
-    r = client.put("/api/datasets/demo/bindings/ssh:*", json={"mode": "not-a-mode"})
+    r = client.patch("/api/datasets/demo", json={"sources": {"kaggle": {"slug": "a/b/c"}}})
     assert r.status_code == 400
 
-    r = client.put("/api/datasets/registry/data_account", json={"name": "acct1"})
+    r = client.put("/api/datasets/data-account", json={"name": "acct1"})
     assert r.status_code == 200 and r.get_json()["data_account"] == "acct1"
 
+    r = client.post("/api/datasets", json={"name": "New-Draft"})
+    assert r.status_code == 200 and r.get_json()["identity_source"] == "draft"
+    r = client.post("/api/datasets", json={"name": "New-Draft"})
+    assert r.status_code == 409
+    # "demo" already has a record from the PATCH above, so it's not a good
+    # "unrecorded fragment" case any more — ColonDB still is.
+    r = client.post("/api/datasets", json={"name": "ColonDB"})
+    assert r.status_code == 200 and r.get_json() == {"exists": "fragment", "name": "ColonDB"}
 
-def test_dataset_check_route_reports_over_a_fake_transport(client, use_runners, monkeypatch, tmp_path):
-    from backend import hosts, transport as transport_mod
-    from conftest import FakeTransport
-    hosts.upsert_host({
-        "id": "box", "kind": "ssh", "label": "Box", "max_concurrent": 1,
-        "ssh": {"host": "box.example"}, "repos": {"fake": {"repo_root": "/remote/repo"}},
-    })
-    (tmp_path / "data" / "demo").mkdir(parents=True)
-    fake = FakeTransport("box", __import__("pathlib").Path("/remote/repo"), tmp_path)
-    monkeypatch.setattr(transport_mod, "for_host_record", lambda h: fake if h.id == "box" else transport_mod.SshTransport(h))
-    r = client.post("/api/datasets/demo/check?runtime=ssh:box")
+    r = client.delete("/api/datasets/New-Draft")
     assert r.status_code == 200
-    body = r.get_json()
-    assert body["ok"] is True and body["mode"] == "path"
-
-    r = client.get("/api/datasets/registry")
-    checked = next(d for d in r.get_json()["datasets"] if d["name"] == "demo")
-    assert checked["checks"]["ssh:box"]["ok"] is True
-
-    r = client.post("/api/datasets/demo/check?runtime=unknown:x")
+    r = client.get("/api/datasets/New-Draft")
     assert r.status_code == 404
+
+
+def test_dataset_check_route_runs_synchronously_over_a_real_shell(client, tmp_path, monkeypatch):
+    from backend import hosts, transport as transport_mod
+    from conftest import ShellTransport
+
+    hosts.upsert_host({
+        "id": "checkbox", "kind": "ssh", "label": "Box", "max_concurrent": 1,
+        "ssh": {"host": "box.example"}, "repos": {"fake": {"repo_root": str(tmp_path / "remote")}},
+    })
+    target = tmp_path / "remote" / "data" / "demo"
+    target.mkdir(parents=True)
+    (target / "f.txt").write_text("x\n")
+
+    shell = ShellTransport(tmp_path / "remote", host_id="checkbox")
+    monkeypatch.setattr(transport_mod, "for_host_record", lambda h: shell if h.id == "checkbox" else transport_mod.SshTransport(h))
+
+    r = client.post("/api/datasets/demo/check", json={"targets": ["ssh:checkbox"]})
+    assert r.status_code == 200
+    assert r.get_json()["checks"]["ssh:checkbox"]["state"] == "ready"
+
+    r = client.get("/api/datasets/demo")
+    assert r.get_json()["checks"]["ssh:checkbox"]["state"] == "ready"
+
+    r = client.post("/api/datasets/unknown-dataset-xyz/check")
+    assert r.status_code in (200, 404)  # a never-declared name has nothing to check, not a crash

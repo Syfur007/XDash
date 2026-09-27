@@ -200,15 +200,16 @@ class KaggleRunner(Runner):
         if account is None:
             return {"code": "no-account", "detail": "Account not found"}
 
-        # XDASH_PLAN.md §5, X4 — `attach` is Kaggle's kind default; the slug
-        # itself still comes from dataset_map.resolve_kaggle_dataset()'s
-        # existing §3.4 precedence (a config's own dataset.kaggle_dataset,
-        # then dataset_map.json, then the profile yaml), via datasets.py's
-        # own fallback to it.
+        # DATASETS_PLAN.md §4.2 — Kaggle's only strategy is a declarative
+        # attach, using the dataset's one slug (§3.3): a fragment's own
+        # dataset.kaggle_dataset when declared, else the registry's own
+        # sources.kaggle.slug. Needs this account's last access check to be
+        # not-blocked; an unknown check doesn't block (the check just never
+        # ran yet).
         from .. import datasets
-        data = datasets.data_mode_for_experiment(experiment["config_path"], self.id, self.kind)
-        if not data.get("mode"):
-            return {"code": data.get("code", "no-dataset-binding"), "detail": data.get("detail", "")}
+        plan = datasets.plan_delivery_for_config(experiment["config_path"], self.id, self.kind)
+        if plan.get("state") == "blocked":
+            return {"code": plan.get("code") or "no-kaggle-source", "detail": plan.get("detail", "")}
 
         block = _code_block(framework.code_state())
         if block is not None:
@@ -264,8 +265,12 @@ class KaggleRunner(Runner):
         return {"snapshot_slug": slug}
 
     def dispatch(self, experiment: Dict[str, Any], attempt: Dict[str, Any]) -> Dict[str, Any]:
-        from .. import dataset_map
-        required_dataset = dataset_map.resolve_kaggle_dataset(experiment["config_path"])
+        # DATASETS_PLAN.md §4.2/DS2 fix: resolved through the same
+        # plan_delivery() can_accept() just used, not a second, independently
+        # resolved slug — the two could disagree before this change.
+        from .. import datasets
+        plan = datasets.plan_delivery_for_config(experiment["config_path"], self.id, self.kind)
+        required_dataset = plan.get("source")
         dataset_sources = [required_dataset] if required_dataset else []
         # Training dataset first, snapshot second — push_experiment_attempt's
         # own dataset_source placeholder (the training-data fallback) always

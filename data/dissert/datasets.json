@@ -1,52 +1,236 @@
 {
-  "busi": {
-    "bindings": {
-      "kaggle:tanvir": {
-        "mode": "attach"
-      }
-    },
-    "checks": {
-      "kaggle:tanvir": {
-        "at": "2026-09-26T20:30:47+00:00",
-        "detail": "no binding resolves",
-        "ok": false
-      }
-    },
-    "name": "busi",
-    "sources": {}
+  "__meta__": {
+    "data_account": "syfur",
+    "schema": 2
   },
-  "clinicdb": {
-    "bindings": {
+  "busi": {
+    "checks": {
       "kaggle:emon": {
-        "mode": "attach",
-        "source": "syfur007/syfur007/clinicdb-train-val-test-images-and-masks"
+        "at": "2026-09-27T15:30:02+00:00",
+        "code": null,
+        "detail": "k6VRAkZcvPqyjM8sf2T0TNvktzTfcnl2QIaBGWJhksjt-5dKS-5ppZXFk4f\nname                                          size  creationDate                \n------------------------------------------  ------  --------------------------  \nDataset_BUSI_with_GT/benign/benign (1).png  334346  2023-03-01 00:30:36.350000",
+        "state": "ready"
+      },
+      "kaggle:eva": {
+        "at": "2026-09-27T15:30:02+00:00",
+        "code": null,
+        "detail": "hSuu8VSdK6zm3x_k4SB5_ZEGgmzH_e51-DmjUmCdUtQ9nJQ19dg-2G_tMv6\nname                                          size  creationDate                \n------------------------------------------  ------  --------------------------  \nDataset_BUSI_with_GT/benign/benign (1).png  334346  2023-03-01 00:30:36.350000",
+        "state": "ready"
       },
       "kaggle:syfur": {
-        "mode": "attach",
-        "source": "syfur007/syfur007/clinicdb-train-val-test-images-and-masks"
+        "at": "2026-09-27T15:30:02+00:00",
+        "code": null,
+        "detail": "P57DWFiCmfaEfyBLXbVitLpFrl6GVfYMzCwoqF2Cv4TORb5Sh0WKCFBDFAi\nname                                          size  creationDate                \n------------------------------------------  ------  --------------------------  \nDataset_BUSI_with_GT/benign/benign (1).png  334346  2023-03-01 00:30:36.350000",
+        "state": "ready"
       },
       "kaggle:tanvir": {
-        "mode": "attach",
-        "source": "syfur007/clinicdb-train-val-test-images-and-masks"
-      }
-    },
-    "checks": {
-      "kaggle:emon": {
-        "at": "2026-09-26T20:46:23+00:00",
-        "detail": "mode: attach",
-        "ok": true
+        "at": "2026-09-27T15:30:02+00:00",
+        "code": null,
+        "detail": "RUemU6waBBpe6L2Bku1bJNNCfyjEgqgt6XT8rg9P9IoykJ8kB--usVF9nrL\nname                                          size  creationDate                \n------------------------------------------  ------  --------------------------  \nDataset_BUSI_with_GT/benign/benign (1).png  334346  2023-03-01 00:30:36.350000",
+        "state": "ready"
       },
-      "kaggle:tanvir": {
-        "at": "2026-09-26T20:34:23+00:00",
-        "detail": "mode: attach",
-        "ok": true
+      "local": {
+        "at": "2026-09-27T15:30:02+00:00",
+        "code": "dataset-unavailable",
+        "detail": "not found at /home/syfur/Workspace/dissert/data/busi/Dataset_BUSI_with_GT",
+        "state": "blocked"
+      },
+      "ssh:mclab": {
+        "at": "2026-09-27T15:30:02+00:00",
+        "code": "dataset-unavailable",
+        "detail": "not found at /home/syfur/Workspace/dissert/data/busi/Dataset_BUSI_with_GT",
+        "state": "blocked"
       }
     },
-    "name": "clinicdb",
+    "name": "BUSI",
     "sources": {
       "kaggle": {
-        "slug": "syfur007/clinicdb-images"
+        "slug": "sabahesaraki/breast-ultrasound-images-dataset"
       }
-    }
+    },
+    "tags": []
+  },
+  "clinicdb": {
+    "checks": {
+      "kaggle:emon": {
+        "at": "2026-09-27T15:28:13+00:00",
+        "code": null,
+        "detail": "Ar5o9IUIbnuj-D34dTTLPB06tCLIpAVHzA2UNNyXUP5h_zrDfI4vYEGywubbtyCU5LPPDFJPKWrHYBFw9JjL1hX8VM_4BsehQLVtiw3w\nname                           size  creationDate                \n----------------------------  -----  --------------------------  \nClinicDB/test/images/117.png  90829  2026-06-20 21:50:12.518000",
+        "state": "ready"
+      },
+      "kaggle:eva": {
+        "at": "2026-09-27T15:28:13+00:00",
+        "code": null,
+        "detail": "qiXxTR-6CkWCwk1E54-CHVII3A8Sn9HEYISIN6D2SFeNFl_OLlDqTDO00aL2nNC1hfo1Y_GUFwNpMZe0yiQ0Cxz4yirZ5WH-3e32uRCw\nname                           size  creationDate                \n----------------------------  -----  --------------------------  \nClinicDB/test/images/117.png  90829  2026-06-20 21:50:12.518000",
+        "state": "ready"
+      },
+      "kaggle:syfur": {
+        "at": "2026-09-27T15:28:13+00:00",
+        "code": null,
+        "detail": "6n2qqR5EEHWdQuS9zUpG8h0Eox3HoGwcADSEaLxIcgcVq4I_H5rRmI5Uu6hIvHFV5jwH_Epb-Oh-OWbPylEzVku-HlayAo-UoAHw-R1w\nname                           size  creationDate                \n----------------------------  -----  --------------------------  \nClinicDB/test/images/117.png  90829  2026-06-20 21:50:12.518000",
+        "state": "ready"
+      },
+      "kaggle:tanvir": {
+        "at": "2026-09-27T15:28:13+00:00",
+        "code": null,
+        "detail": "n6rRIWvisf8Gf0j_bQUZPeyluUHFfFtHRQ3c7Olargkfgi8kByYq_2HrdHF6aFiGai7CjI7CaT20ojs5J6-z8Hzy93AkV8jo5x0dtv0w\nname                           size  creationDate                \n----------------------------  -----  --------------------------  \nClinicDB/test/images/117.png  90829  2026-06-20 21:50:12.518000",
+        "state": "ready"
+      },
+      "local": {
+        "at": "2026-09-27T15:28:13+00:00",
+        "code": null,
+        "detail": "1227 files",
+        "state": "ready"
+      },
+      "ssh:mclab": {
+        "at": "2026-09-27T15:33:01+00:00",
+        "code": null,
+        "detail": "1227 files at /home/syf/dissert/data/polyp/ClinicDB",
+        "state": "ready"
+      }
+    },
+    "fingerprints": {
+      "local": {
+        "at": "2026-09-27T15:28:13+00:00",
+        "bytes": 55029657,
+        "files": 1227,
+        "manifest": "sha256:6d58c992947602f3d65998fe390cd72ec36d83a7984cb54fed508c184d892453"
+      },
+      "ssh:mclab": {
+        "at": "2026-09-27T15:33:01+00:00",
+        "bytes": 55029657,
+        "files": 1227,
+        "manifest": "sha256:6d58c992947602f3d65998fe390cd72ec36d83a7984cb54fed508c184d892453"
+      }
+    },
+    "hosts": {
+      "ssh:mclab": {
+        "path": "/home/syf/dissert/data/polyp/ClinicDB"
+      }
+    },
+    "migration_notes": [
+      "dropped conflicting slug syfur007/clinicdb-images (registry default)",
+      "dropped conflicting slug syfur007/syfur007/clinicdb-train-val-test-images-and-masks (kaggle:emon, kaggle:syfur)"
+    ],
+    "name": "ClinicDB",
+    "sources": {
+      "kaggle": {
+        "slug": "syfur007/clinicdb-train-val-test-images-and-masks"
+      }
+    },
+    "tags": []
+  },
+  "colondb": {
+    "checks": {
+      "kaggle:emon": {
+        "at": "2026-09-27T11:25:15+00:00",
+        "code": null,
+        "detail": "BNzq7FGJ1YfHAUHAHAS5AFbqzZINhp9POGUQt5O4qKUNcJ_GnLzheVa6w4jW6N6jTdm68w6KloCU9XnMC4WURYluqAhohE1jiSvvHHZY\nname                           size  creationDate                \n---------------------------  ------  --------------------------  \nColonDB/test/images/106.png  284498  2026-07-05 16:39:04.593000",
+        "state": "ready"
+      },
+      "kaggle:eva": {
+        "at": "2026-09-27T11:25:15+00:00",
+        "code": null,
+        "detail": "A9AOoUYOMxTe1a8_GOKVxV023yQzqxDOwL6LEAWPLBbOJ63QQ0XtA80mbF2yKCiv8Xz-MuozGNJ-6EUEApGMGXh4Sb4Af2Ynja7dsNas\nname                           size  creationDate                \n---------------------------  ------  --------------------------  \nColonDB/test/images/106.png  284498  2026-07-05 16:39:04.593000",
+        "state": "ready"
+      },
+      "kaggle:syfur": {
+        "at": "2026-09-27T11:25:15+00:00",
+        "code": null,
+        "detail": "0Pfx-pORWPSGxsL6LK4mDcc6bznqq2TlYlHtaiCzjRYx8Yw2em2C54Ut7PA8qW5zIyJuFCA1P3G3DT8O8QL8Znx3TZPM4D9dx3qT2A2z\nname                           size  creationDate                \n---------------------------  ------  --------------------------  \nColonDB/test/images/106.png  284498  2026-07-05 16:39:04.593000",
+        "state": "ready"
+      },
+      "kaggle:tanvir": {
+        "at": "2026-09-27T11:25:15+00:00",
+        "code": null,
+        "detail": "cmkCLD7nbipMV-U9MbooRUfybnU1B1BdXuzw_Oiczg81t7Kv_LGYVlm7XIFMr8ELqNeaY1mxg09XwIGly1uEJ2sQNbYUCjFrWxnAaHnM\nname                           size  creationDate                \n---------------------------  ------  --------------------------  \nColonDB/test/images/106.png  284498  2026-07-05 16:39:04.593000",
+        "state": "ready"
+      },
+      "local": {
+        "at": "2026-09-27T11:25:15+00:00",
+        "code": null,
+        "detail": "761 files",
+        "state": "ready"
+      },
+      "ssh:mclab": {
+        "at": "2026-09-27T15:33:32+00:00",
+        "code": null,
+        "detail": "761 files at /home/syf/dissert/data/polyp/ColonDB",
+        "state": "ready"
+      }
+    },
+    "fingerprints": {
+      "local": {
+        "at": "2026-09-27T11:25:15+00:00",
+        "bytes": 95673424,
+        "files": 761,
+        "manifest": "sha256:66dad596464b22531c2bcb445330b47323a990d8fc06e9e355d1e7e8bc21bb76"
+      },
+      "ssh:mclab": {
+        "at": "2026-09-27T15:33:32+00:00",
+        "bytes": 95673424,
+        "files": 761,
+        "manifest": "sha256:66dad596464b22531c2bcb445330b47323a990d8fc06e9e355d1e7e8bc21bb76"
+      }
+    },
+    "hosts": {
+      "ssh:mclab": {
+        "path": "/home/syf/dissert/data/polyp/ColonDB"
+      }
+    },
+    "name": "ColonDB",
+    "sources": {
+      "kaggle": {
+        "slug": "syfur007/colondb-train-val-test-images-and-masks"
+      }
+    },
+    "tags": []
+  },
+  "isic18": {
+    "checks": {
+      "kaggle:emon": {
+        "at": "2026-09-27T15:30:58+00:00",
+        "code": null,
+        "detail": "nFom6k422BOyKGZUSRH2t-AYmpbxhVW52ZyEMl5DloqsfaXNnUkHkZmH5kDqiw\nname                                         size  creationDate                \n-------------------------------------------  ----  --------------------------  \nISIC2018_Task1-2_Test_Input/ATTRIBUTION.txt   414  2020-07-14 12:11:21.250000",
+        "state": "ready"
+      },
+      "kaggle:eva": {
+        "at": "2026-09-27T15:30:58+00:00",
+        "code": null,
+        "detail": "P7WxjBtGphdxc0PUL5pGVv1t03bB194kVBrfxX6SICgMJsGjf7LUUtprCIpSbo\nname                                         size  creationDate                \n-------------------------------------------  ----  --------------------------  \nISIC2018_Task1-2_Test_Input/ATTRIBUTION.txt   414  2020-07-14 12:11:21.250000",
+        "state": "ready"
+      },
+      "kaggle:syfur": {
+        "at": "2026-09-27T15:30:58+00:00",
+        "code": null,
+        "detail": "bK2foz5yff5r_O-A8L9cN0vyTHkC2gsWZMFsEgsd559ddpYgdqXYg5nMJDeBCo\nname                                         size  creationDate                \n-------------------------------------------  ----  --------------------------  \nISIC2018_Task1-2_Test_Input/ATTRIBUTION.txt   414  2020-07-14 12:11:21.250000",
+        "state": "ready"
+      },
+      "kaggle:tanvir": {
+        "at": "2026-09-27T15:30:58+00:00",
+        "code": null,
+        "detail": "BK6UxE--ErddEomXlNxcGkkYSANUc3Pr8DW9VrUelTOJR41UMtmlHuG-h-5-nE\nname                                         size  creationDate                \n-------------------------------------------  ----  --------------------------  \nISIC2018_Task1-2_Test_Input/ATTRIBUTION.txt   414  2020-07-14 12:11:21.250000",
+        "state": "ready"
+      },
+      "local": {
+        "at": "2026-09-27T15:30:58+00:00",
+        "code": "dataset-unavailable",
+        "detail": "not found at /home/syfur/Workspace/dissert/data/isic18",
+        "state": "blocked"
+      },
+      "ssh:mclab": {
+        "at": "2026-09-27T15:30:58+00:00",
+        "code": "dataset-unavailable",
+        "detail": "not found at /home/syfur/Workspace/dissert/data/isic18",
+        "state": "blocked"
+      }
+    },
+    "name": "ISIC18",
+    "sources": {
+      "kaggle": {
+        "slug": "tschandl/isic2018-challenge-task1-data-segmentation"
+      }
+    },
+    "tags": []
   }
 }

@@ -23,7 +23,7 @@ _EFFECTIVE_FIELDS = [
     "repo_root", "configs_dir", "dataset_name_key", "dataset_root_key",
     "overlay_compose_key", "run_id_pattern", "python_executable", "env_activate_cmd",
     "commands", "hooks", "allow_unpushed", "eval_default_args", "bridge_python_executable",
-    "kaggle_dataset_map", "manifest_layout",
+    "manifest_layout",
 ]
 
 # A representative flat profile — everything backend/config.py's legacy
