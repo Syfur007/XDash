@@ -139,6 +139,9 @@ def test_unpushed_code_blocks_kaggle_and_allow_unpushed_downgrades_it(kaggle_acc
     monkeypatch.setattr(framework, "code_state", lambda *a, **k: {"commit": "b" * 40, "dirty": False, "pushed": False})
     block = runner.can_accept(_experiment(), 1.0)
     assert block["code"] == "code-not-pushed" and "not on any remote branch" in block["detail"]
+    # XDASH_FIXES_PLAN.md D7 — a copyable command, not a "click here to push"
+    # button (Q1 ruled that out): the action is the exact git invocation.
+    assert block["action"] == "git -C %s push" % settings.repo_root
     monkeypatch.setattr(framework, "code_state", lambda *a, **k: {"commit": "b" * 40, "dirty": True, "pushed": True})
     assert runner.can_accept(_experiment(), 1.0)["code"] == "code-not-pushed"
     monkeypatch.setattr(settings, "allow_unpushed", True)
@@ -226,3 +229,100 @@ def test_diagnose_maps_secret_missing_with_a_deep_link(kaggle_account):
     d = kaggle_account.diagnose(attempt, {"failure_message": None}, ["RuntimeError: XDASH_CODE_COMMIT_NOT_FOUND: ..."])
     assert d["code"] == "code-not-pushed"
     assert kaggle_account.diagnose(attempt, {"failure_message": "CUDA OOM"}, ["boom"]) is None
+
+
+# ----------------------------------------------------------------- XDASH_FIXES_PLAN.md F0.3
+def test_kaggle_runtime_needs_attention_with_no_credentials_stored(kaggle_account):
+    """kaggle_account's own list_accounts() stub (above) reports neither
+    has_legacy_key nor has_api_token — real shape for a freshly-added
+    account nobody has attached credentials to yet."""
+    from backend import runtimes
+    view = runtimes.runtime_view(kaggle_account)
+    assert view["state"] == "attention"
+    assert view["health"]["error"] == "No credentials stored for this account"
+
+
+def test_kaggle_runtime_needs_attention_when_code_is_not_pinnable(monkeypatch):
+    monkeypatch.setattr(kaggle, "_load_accounts", lambda: {"accounts": [
+        {"name": "acct2", "kaggle_username": "someone", "workers": [], "scope": "system"}]})
+    monkeypatch.setattr(kaggle, "list_accounts", lambda: [
+        {"name": "acct2", "kaggle_username": "someone", "has_api_token": True,
+         "usage_estimate": {"remaining_hours": 30.0}}])
+    monkeypatch.setattr(kaggle, "estimate_usage", lambda name: {"remaining_hours": 30.0})
+    monkeypatch.setattr(framework, "code_state", lambda *a, **k: {"commit": "b" * 40, "dirty": False, "pushed": False})
+    from backend import runtimes
+    runner = kaggle_runner.KaggleRunner("acct2")
+    view = runtimes.runtime_view(runner)
+    assert view["state"] == "attention"
+    assert view["health"]["error"] == "Code isn't pinnable to a pushed commit (code-not-pushed)"
+
+
+def test_kaggle_runtime_is_not_attention_with_credentials_and_pinnable_code(monkeypatch):
+    monkeypatch.setattr(kaggle, "_load_accounts", lambda: {"accounts": [
+        {"name": "acct3", "kaggle_username": "someone", "workers": [], "scope": "system"}]})
+    monkeypatch.setattr(kaggle, "list_accounts", lambda: [
+        {"name": "acct3", "kaggle_username": "someone", "has_api_token": True,
+         "usage_estimate": {"remaining_hours": 30.0}}])
+    monkeypatch.setattr(kaggle, "estimate_usage", lambda name: {"remaining_hours": 30.0})
+    monkeypatch.setattr(framework, "code_state", lambda *a, **k: {"commit": "c" * 40, "dirty": False, "pushed": True})
+    from backend import runtimes
+    runner = kaggle_runner.KaggleRunner("acct3")
+    view = runtimes.runtime_view(runner)
+    assert view["health"]["error"] is None
+    assert view["state"] != "attention"
+
+
+# ----------------------------------------------------------------- XDASH_FIXES_PLAN.md F2 (tools registry, measured quota)
+def test_kaggle_runtime_needs_attention_when_cli_is_missing(kaggle_account, monkeypatch):
+    from backend import runtimes, tools
+    monkeypatch.setattr(framework, "code_state", lambda *a, **k: {"commit": "d" * 40, "dirty": False, "pushed": True})
+    monkeypatch.setattr(tools, "status", lambda name, refresh=False: tools.ToolStatus(
+        name=name, path=name, source="not-found", exists=False, executable=False,
+        version=None, min_version="2.2.1", version_ok=None, required=True,
+        error="not found (checked an override, /fake/bin, and PATH)",
+    ) if name == "kaggle" else tools._compute_status(name))
+    monkeypatch.setattr(kaggle_account, "_account", lambda: {
+        "name": "acct", "kaggle_username": "someone", "has_api_token": True,
+        "usage_estimate": {"remaining_hours": 30.0}, "usage_history": [],
+    })
+    view = runtimes.runtime_view(kaggle_account)
+    assert view["state"] == "attention"
+    assert "Kaggle CLI" in view["health"]["error"]
+
+
+def test_kaggle_can_accept_uses_measured_quota_first(kaggle_account, monkeypatch):
+    """XDASH_FIXES_PLAN.md F2.6 — measured quota (once available) gates
+    dispatch instead of the self-tracked estimate, with weekly_budget_hours
+    narrowing it as an optional cap."""
+    monkeypatch.setattr(framework, "code_is_pinnable", lambda *a, **k: True)
+    monkeypatch.setattr(kaggle, "get_measured_quota", lambda name, force=False: {
+        "available": True, "used": 29.0, "limit": 30.0, "unit": "h/week",
+        "resets_at": "2026-10-05", "source": "measured",
+    })
+    monkeypatch.setattr(kaggle_account, "_account", lambda: {
+        "name": "acct", "kaggle_username": "someone", "has_api_token": True,
+        "usage_estimate": {"remaining_hours": 30.0},  # self-tracked would allow this — measured must win
+    })
+    from backend import datasets
+    monkeypatch.setattr(datasets, "plan_delivery_for_config", lambda *a, **k: {"state": "ok"})
+    block = kaggle_account.can_accept(_experiment(), est_hours=2.0)
+    assert block == {
+        "code": "quota-exhausted", "detail": "This account is over its weekly budget (measured)",
+        "clears_at": block["clears_at"],
+    }
+
+
+def test_kaggle_can_accept_falls_back_to_self_tracked_with_reason(kaggle_account, monkeypatch):
+    monkeypatch.setattr(framework, "code_is_pinnable", lambda *a, **k: True)
+    monkeypatch.setattr(kaggle, "get_measured_quota", lambda name, force=False: {
+        "available": False, "detail": "no credentials",
+    })
+    monkeypatch.setattr(kaggle_account, "_account", lambda: {
+        "name": "acct", "kaggle_username": "someone", "has_api_token": True,
+        "usage_estimate": {"remaining_hours": 1.0},
+    })
+    from backend import datasets
+    monkeypatch.setattr(datasets, "plan_delivery_for_config", lambda *a, **k: {"state": "ok"})
+    block = kaggle_account.can_accept(_experiment(), est_hours=2.0)
+    assert block["code"] == "quota-exhausted"
+    assert "self-tracked estimate (no credentials)" in block["detail"]

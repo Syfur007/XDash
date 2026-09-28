@@ -35,6 +35,9 @@ const STATUS_BADGE_CLASS = {
   // .entity-card-accent.interrupted's own red already in styles.css.
   stopping: "amber",
   interrupted: "red",
+  // XDASH_FIXES_PLAN.md F0.6 — terminals._reconcile_lost()'s own status, a
+  // dead record with no exit code and no report ever coming.
+  lost: "red",
   skipped: "slate",
   unmanaged: "slate",
   // Kaggle kernel statuses (backend/kaggle.py) — "complete" is Kaggle's own

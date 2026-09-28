@@ -31,7 +31,19 @@ from . import notifications as notif
 
 _lock = threading.RLock()
 
-TERMINAL_STATUSES = {"completed", "failed", "stopped", "interrupted"}
+TERMINAL_STATUSES = {"completed", "failed", "stopped", "interrupted", "lost"}
+
+# A scheduler *item*'s own terminal statuses (see _new_item's status comment
+# below) — a different vocabulary from TERMINAL_STATUSES above, which is
+# checked against a terminal *record*'s status inside _tick(), never an
+# item's own. XDASH_FIXES_PLAN.md F0.7: add_item's queue-size cap used to
+# count every item ever created, finished or not (backend/scheduler.py:127
+# before this fix) — about 90 more real dispatches from today would have
+# hit "queue is at its limit" even though most of the queue was history.
+_ITEM_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "skipped"})
+# Public alias — backend/housekeeping.py's "scheduler history" sweep (F5)
+# needs to recognize a terminal item from outside this module too.
+ITEM_TERMINAL_STATUSES = _ITEM_TERMINAL_STATUSES
 _DEFAULTS = {"items": [], "max_concurrent": 1, "paused": False, "notify_on_finish": False, "templates": []}
 
 
@@ -124,7 +136,8 @@ def add_item(
     with _lock:
         data = _load()
         n_new = 2 if mode == "both" else 1
-        if len(data["items"]) + n_new > settings.scheduler_max_queue_size:
+        active = sum(1 for i in data["items"] if i["status"] not in _ITEM_TERMINAL_STATUSES)
+        if active + n_new > settings.scheduler_max_queue_size:
             raise ValueError(
                 f"Scheduler queue is at its limit ({settings.scheduler_max_queue_size} items). "
                 "Remove some completed/cancelled items before adding more."

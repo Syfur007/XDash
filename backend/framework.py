@@ -43,6 +43,7 @@ import yaml
 
 from . import bridge
 from . import configs as cfg
+from . import tools
 from .config import settings
 from .store import atomic_write_text
 
@@ -298,7 +299,10 @@ _code_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 def _git(root: Path, *args: str) -> subprocess.CompletedProcess:
     # --no-optional-locks: `git status` otherwise refreshes the host repo's
     # index (taking .git/index.lock) — XDash only ever reads the host repo.
-    return subprocess.run(["git", "--no-optional-locks", "-C", str(root), *args],
+    # git itself always runs locally, regardless of which host the config
+    # under root belongs to (code provenance is checked against XDash's own
+    # checkout, never over ssh) — tools.path() is the right resolution here.
+    return subprocess.run([tools.path("git"), "--no-optional-locks", "-C", str(root), *args],
                           capture_output=True, text=True, timeout=20)
 
 

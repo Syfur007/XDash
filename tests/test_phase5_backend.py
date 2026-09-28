@@ -13,7 +13,6 @@ import sys
 import pytest
 
 from backend import colab, hosts, kaggle, runtimes, transport
-from backend.config import settings
 from backend.runners import machine as machine_mod
 
 
@@ -152,8 +151,14 @@ def test_kaggle_test_credentials_rejects_a_bad_key():
 
 
 def test_kaggle_test_credentials_real_subprocess_path_ok(monkeypatch, tmp_path):
+    # XDASH_FIXES_PLAN.md F2 — settings.kaggle_executable is gone; the "clean
+    # override path for tests" is backend/tools.set_override, though
+    # _run_kaggle_argv itself is monkeypatched below anyway, so this is only
+    # here to prove the seam exists (a real caller of tools.path("kaggle")
+    # would need it, this one doesn't).
+    from backend import tools
+    tools.set_override("kaggle", sys.executable)
     script = _fake_kaggle_script(tmp_path, exit_code=0, stdout="kernel1\n")
-    monkeypatch.setattr(settings, "kaggle_executable", sys.executable)
     monkeypatch.setattr(kaggle, "_run_kaggle_argv", lambda args, env, timeout=None: subprocess.run(
         [sys.executable, str(script)], env=env, capture_output=True, text=True, timeout=timeout,
     ))
@@ -179,48 +184,102 @@ def test_kaggle_test_credentials_never_writes_into_the_account_store(monkeypatch
     assert kaggle.list_accounts() == before
 
 
-# --------------------------------------------------------------- kaggle quota parsing (CLI 2.x groundwork)
-def test_parse_quota_json_top_level_gpu_object():
-    parsed = kaggle.parse_quota_json({
-        "gpu": {"time_used": 12.5, "time_reserved": 0.5, "total_time_allowed": 30, "quota_refresh_time": "2026-09-29T00:00:00Z"},
-    })
-    assert parsed == {"used": 13.0, "limit": 30.0, "unit": "h/week", "resets_at": "2026-09-29T00:00:00Z", "source": "measured"}
+# --------------------------------------------------------------- kaggle quota parsing (CLI 2.2.4 contract, F2.6)
+# Fixtures below are exactly the shape kagglesdk's quota_view_cli builds
+# (rows via print_json) — see kaggle/api/kaggle_api_extended.py in the
+# installed 2.2.4 source: a JSON LIST, one row per accelerator, string
+# values with an "h" suffix, key "refreshAt" (camelCase, not the RPC's own
+# "refresh_at" — print_json's label defaults to the field name it was asked
+# for). The dict-shaped payload an earlier version of this parser guessed at
+# (time_used/total_time_allowed/quota_refresh_time) has never been real.
+_QUOTA_ROWS_GPU_ONLY = [
+    {"resource": "GPU", "used": "3.20h", "remaining": "26.80h", "total": "30.00h", "refreshAt": "2026-09-29T00:00:00Z"},
+]
+_QUOTA_ROWS_GPU_AND_TPU = _QUOTA_ROWS_GPU_ONLY + [
+    {"resource": "TPU", "used": "0.00h", "remaining": "20.00h", "total": "20.00h", "refreshAt": "2026-09-29T00:00:00Z"},
+]
 
 
-def test_parse_quota_json_flat_shape():
-    parsed = kaggle.parse_quota_json({"time_used": 5, "total_time_allowed": 30})
-    assert parsed["used"] == 5.0 and parsed["limit"] == 30.0 and parsed["source"] == "measured"
+def test_parse_quota_json_gpu_row():
+    parsed = kaggle.parse_quota_json(_QUOTA_ROWS_GPU_ONLY)
+    assert parsed == {
+        "used": 3.2, "limit": 30.0, "unit": "h/week",
+        "resets_at": "2026-09-29T00:00:00Z", "source": "measured",
+    }
+
+
+def test_parse_quota_json_keeps_tpu_row_for_display():
+    parsed = kaggle.parse_quota_json(_QUOTA_ROWS_GPU_AND_TPU)
+    assert parsed["tpu"] == {"used": 0.0, "limit": 20.0, "resets_at": "2026-09-29T00:00:00Z"}
 
 
 def test_parse_quota_json_unparseable_is_none():
-    assert kaggle.parse_quota_json({"unrelated": True}) is None
+    assert kaggle.parse_quota_json({"unrelated": True}) is None  # the old (never-real) dict shape
+    assert kaggle.parse_quota_json([{"resource": "TPU", "used": "1h", "total": "2h"}]) is None  # no GPU row
     assert kaggle.parse_quota_json(None) is None
-    assert kaggle.parse_quota_json("not a dict") is None
+    assert kaggle.parse_quota_json("not a list") is None
 
 
-def test_get_measured_quota_degrades_on_an_old_cli(monkeypatch):
+def test_get_measured_quota_no_quota_information(monkeypatch):
     monkeypatch.setattr(kaggle, "_run_kaggle", lambda args, name, timeout=None: subprocess.CompletedProcess(
-        args=args, returncode=2, stdout="", stderr="kaggle quota: error: invalid choice: 'quota'",
+        args=args, returncode=0, stdout="No quota information available\n", stderr="",
     ))
     result = kaggle.get_measured_quota("acct")
-    assert result["available"] is False and "quota" in result["detail"]
+    assert result == {"available": False, "detail": "No quota information available"}
+
+
+def test_get_measured_quota_401(monkeypatch):
+    monkeypatch.setattr(kaggle, "_run_kaggle", lambda args, name, timeout=None: subprocess.CompletedProcess(
+        args=args, returncode=1, stdout="", stderr="401 Client Error: Unauthorized",
+    ))
+    result = kaggle.get_measured_quota("acct")
+    assert result["available"] is False and "401" in result["detail"]
 
 
 def test_get_measured_quota_real_json(monkeypatch):
     import json as _json
     monkeypatch.setattr(kaggle, "_run_kaggle", lambda args, name, timeout=None: subprocess.CompletedProcess(
-        args=args, returncode=0,
-        stdout=_json.dumps({"gpu": {"time_used": 1.0, "total_time_allowed": 30, "quota_refresh_time": "2026-10-01"}}),
-        stderr="",
+        args=args, returncode=0, stdout=_json.dumps(_QUOTA_ROWS_GPU_ONLY), stderr="",
     ))
     result = kaggle.get_measured_quota("acct")
-    assert result == {"available": True, "used": 1.0, "limit": 30.0, "unit": "h/week", "resets_at": "2026-10-01", "source": "measured"}
+    assert result == {
+        "available": True, "used": 3.2, "limit": 30.0, "unit": "h/week",
+        "resets_at": "2026-09-29T00:00:00Z", "source": "measured",
+    }
+
+
+def test_get_measured_quota_is_cached_per_account(monkeypatch):
+    calls = []
+
+    def fake_run(args, name, timeout=None):
+        calls.append(name)
+        import json as _json
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=_json.dumps(_QUOTA_ROWS_GPU_ONLY), stderr="")
+
+    monkeypatch.setattr(kaggle, "_run_kaggle", fake_run)
+    kaggle.get_measured_quota("acct")
+    kaggle.get_measured_quota("acct")  # cache hit — no second subprocess
+    assert calls == ["acct"]
+    kaggle.get_measured_quota("acct", force=True)  # Diagnostics' manual Refresh bypasses it
+    assert calls == ["acct", "acct"]
 
 
 def test_kaggle_quota_route(client, monkeypatch):
-    monkeypatch.setattr(kaggle, "get_measured_quota", lambda name: {"available": False, "detail": "old cli"})
+    monkeypatch.setattr(kaggle, "get_measured_quota", lambda name, force=False: {"available": False, "detail": "old cli"})
     r = client.get("/api/kaggle/accounts/acct/quota")
     assert r.status_code == 200 and r.get_json() == {"available": False, "detail": "old cli"}
+
+
+def test_kaggle_quota_route_refresh_param_forces(client, monkeypatch):
+    seen = {}
+
+    def fake(name, force=False):
+        seen["force"] = force
+        return {"available": False, "detail": "x"}
+
+    monkeypatch.setattr(kaggle, "get_measured_quota", fake)
+    client.get("/api/kaggle/accounts/acct/quota?refresh=1")
+    assert seen["force"] is True
 
 
 # --------------------------------------------------------------- colab.test_config

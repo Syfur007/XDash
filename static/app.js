@@ -66,7 +66,7 @@ function radarAxisValue(metrics, key) {
 const state = {
   system: null,
   repos: [],
-  pollFailStreak: { terminals: 0, monitors: 0, scheduler: 0 },
+  pollFailStreak: { terminals: 0, scheduler: 0 },
   pollStale: false,
   configs: [],
   configFilter: "",
@@ -100,11 +100,6 @@ const state = {
   selectedHistoryFile: null,
   historySource: "logs",
 
-  monitors: [],
-  monitorExpanded: new Set(),
-  monitorPrevAlive: {},
-  monitorListIds: [],
-
   builderConfig: {},
   creatorInitialized: false,
 
@@ -125,6 +120,10 @@ const state = {
 };
 
 // ---------------------------------------------------------------- utilities
+function cssEscapeAttr(s) {
+  return String(s).replace(/"/g, '\\"');
+}
+
 async function api(path, opts = {}) {
   const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
   if (!res.ok) {
@@ -327,7 +326,7 @@ function switchView(view) {
   if (view === "lab") { loadLab(); startLabPolling(); } else { stopLabPolling(); }
   if (view === "data") { loadDatasetsScreen(); }
   if (view === "compute") { loadComputeCapacity(); loadRuntimeBoard(); startComputeBoardPolling(); }
-  else { stopComputeBoardPolling(); }
+  else { stopComputeBoardPolling(); stopComputeDetailPolling(); }
   // XDASH_PLAN.md Phase 3: the old flat spine table (loadSpine) is retired —
   // js/screens/experiments2.js owns the Experiments screen now. Sessions'
   // glance (also-running-on-Kaggle / also-running-under-other-repos) is kept
@@ -424,7 +423,6 @@ async function loadSystem() {
   const lowerIsBetter = state.system.metrics && state.system.metrics.lower_is_better;
   if (Array.isArray(lowerIsBetter)) LOWER_IS_BETTER = new Set(lowerIsBetter);
   document.getElementById("footer-repo").textContent = state.system.repo_root;
-  document.getElementById("tb-logdir").textContent = state.system.runs_dir;
   document.getElementById("history-logdir").textContent = historySourceDir();
   document.getElementById("history-dir-label").textContent = historySourceDir();
   document.getElementById("reports-dir-label").textContent = state.system.reports_dir;
@@ -494,7 +492,6 @@ async function switchRepo(profileId) {
   await loadSystem();
   await loadRepos();
   await loadTerminals();
-  await loadMonitors();
   await loadScheduler();
   await loadConfigs();
   switchView(currentView); // re-enters the current tab so its own (now-unguarded) load fires
@@ -795,6 +792,8 @@ async function runConfig() {
 const STATUS_LABEL = {
   running: "Running", completed: "Completed", stopped: "Stopped",
   failed: "Failed", interrupted: "Interrupted", unmanaged: "External session",
+  // XDASH_FIXES_PLAN.md F0.6 — a dead record reconciled once, never re-probed.
+  lost: "Lost",
 };
 
 async function loadTerminals() {
@@ -2459,256 +2458,6 @@ async function saveCreatorConfig() {
   }
 }
 
-// ============================================================================
-// MACHINE STATS (MONITORS)
-// ============================================================================
-async function loadMonitors() {
-  let data;
-  try { data = await api("/api/monitors"); } catch (e) { notePollResult("monitors", false); return; }
-  notePollResult("monitors", true);
-  const newMonitors = data.monitors;
-
-  // Auto pop the dropdown open the moment a service starts, and auto-close
-  // it the moment it stops. Manual toggles (see the click handler below)
-  // persist across polls as long as the alive/not-alive state itself hasn't
-  // changed.
-  for (const m of newMonitors) {
-    const prevAlive = state.monitorPrevAlive[m.id];
-    if (m.alive && prevAlive !== true) state.monitorExpanded.add(m.id);
-    else if (!m.alive && prevAlive === true) state.monitorExpanded.delete(m.id);
-    state.monitorPrevAlive[m.id] = m.alive;
-  }
-
-  state.monitors = newMonitors;
-  renderMonitorList();
-  for (const id of state.monitorExpanded) {
-    if (state.monitors.some((m) => m.id === id)) loadMonitorOutput(id);
-  }
-}
-
-function monitorCardHtml(m) {
-  const expanded = state.monitorExpanded.has(m.id);
-  const statusClass = m.alive ? "running" : "stopped";
-  const intervalTag = m.watch_interval ? `<span class="mode-tag">watch ${m.watch_interval}s</span>` : `<span class="mode-tag">self-refreshing</span>`;
-  // host_id absent/"local" means the local device — matches backend/hosts.py's
-  // own None-means-local convention (Multi_runner_XDash.md Phase 1/6), so
-  // only a genuinely remote host gets a visible tag.
-  const hostTag = m.host_id && m.host_id !== "local" ? `<span class="mode-tag" title="Runs on this host">${escapeHtml(m.host_id)}</span>` : "";
-  return `<div class="monitor-card ${expanded ? "expanded" : ""}" data-id="${escapeHtml(m.id)}">
-      <div class="monitor-card-row">
-        <div class="term-card-accent ${statusClass}"></div>
-        <div class="term-card-body">
-          <div class="term-card-title" title="${escapeHtml(m.name)}">${escapeHtml(m.name)}${hostTag}${intervalTag}</div>
-          <div class="term-card-sub" title="${escapeHtml(m.command)}">${escapeHtml(m.command)}</div>
-          <div class="term-card-footer">
-            <span class="term-card-status ${statusClass}">${m.alive ? "Running" : "Stopped"}</span>
-            <div class="job-actions">${monitorActionButtonsHtml(m)}</div>
-          </div>
-        </div>
-        <div class="monitor-chevron">▾</div>
-      </div>
-      <div class="monitor-output-drawer">
-        <div class="log-console no-wrap" id="monitor-output-${m.id}"></div>
-      </div>
-    </div>`;
-}
-
-function monitorActionButtonsHtml(m) {
-  return `${m.alive
-    ? `<button class="btn btn-sm" data-action="stop" data-id="${m.id}">Stop</button>`
-    : `<button class="btn btn-sm btn-primary" data-action="start" data-id="${m.id}">Start</button>`}
-    ${!m.builtin ? `<button class="btn btn-sm btn-danger" data-action="remove" data-id="${m.id}">Remove</button>` : ""}`;
-}
-
-function wireMonitorCard(card) {
-  const row = card.querySelector(".monitor-card-row");
-  row.addEventListener("click", (e) => {
-    if (e.target.closest("button")) return;
-    const id = card.dataset.id;
-    const nowExpanded = !state.monitorExpanded.has(id);
-    if (nowExpanded) { state.monitorExpanded.add(id); loadMonitorOutput(id); }
-    else state.monitorExpanded.delete(id);
-    card.classList.toggle("expanded", nowExpanded);
-  });
-  card.querySelectorAll("button[data-action]").forEach((btn) => {
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const id = btn.dataset.id;
-      if (btn.dataset.action === "start") startMonitor(id);
-      else if (btn.dataset.action === "stop") stopMonitor(id);
-      else if (btn.dataset.action === "remove") removeMonitor(id);
-    });
-  });
-}
-
-function renderMonitorList() {
-  const body = document.getElementById("monitor-list-body");
-  if (!state.monitors.length) {
-    body.innerHTML = `<div class="empty-state">No monitors configured.</div>`;
-    state.monitorListIds = [];
-    return;
-  }
-
-  const currentIds = state.monitors.map((m) => m.id);
-  const structureChanged = currentIds.join(",") !== (state.monitorListIds || []).join(",");
-
-  if (structureChanged) {
-    // Full rebuild only when monitors were actually added/removed — this is
-    // the only path that recreates the output <div>s, so doing it on every
-    // 2s poll (even when nothing structural changed) was what caused the
-    // flicker: the visible output was being wiped and redrawn constantly.
-    body.innerHTML = state.monitors.map(monitorCardHtml).join("");
-    body.querySelectorAll(".monitor-card").forEach(wireMonitorCard);
-    state.monitorListIds = currentIds;
-    return;
-  }
-
-  // Otherwise, update just the bits that can change in place, leaving the
-  // output drawers (and their scroll position / transition state) alone.
-  for (const m of state.monitors) {
-    const card = body.querySelector(`.monitor-card[data-id="${cssEscapeAttr(m.id)}"]`);
-    if (!card) continue;
-    const statusClass = m.alive ? "running" : "stopped";
-    card.classList.toggle("expanded", state.monitorExpanded.has(m.id));
-    const accent = card.querySelector(".term-card-accent");
-    if (accent) accent.className = `term-card-accent ${statusClass}`;
-    const statusEl = card.querySelector(".term-card-status");
-    if (statusEl) { statusEl.className = `term-card-status ${statusClass}`; statusEl.textContent = m.alive ? "Running" : "Stopped"; }
-    const actions = card.querySelector(".job-actions");
-    if (actions) {
-      const newHtml = monitorActionButtonsHtml(m);
-      if (actions.innerHTML !== newHtml) {
-        actions.innerHTML = newHtml;
-        actions.querySelectorAll("button[data-action]").forEach((btn) => {
-          btn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            const id = btn.dataset.id;
-            if (btn.dataset.action === "start") startMonitor(id);
-            else if (btn.dataset.action === "stop") stopMonitor(id);
-            else if (btn.dataset.action === "remove") removeMonitor(id);
-          });
-        });
-      }
-    }
-  }
-}
-
-function cssEscapeAttr(s) {
-  return String(s).replace(/"/g, '\\"');
-}
-
-async function loadMonitorOutput(id) {
-  const el = document.getElementById(`monitor-output-${id}`);
-  if (!el) return;
-  try {
-    const data = await api(`/api/monitors/${encodeURIComponent(id)}/output`);
-    if (!data.alive) { el.innerHTML = `<span class="empty-log">Not running — click Start to launch it.</span>`; return; }
-    const wasAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
-    el.textContent = data.output || "";
-    if (wasAtBottom) el.scrollTop = el.scrollHeight;
-  } catch (e) {}
-}
-
-async function startMonitor(id) {
-  try { await api(`/api/monitors/${encodeURIComponent(id)}/start`, { method: "POST" }); toast("Monitor started", "ok"); loadMonitors(); }
-  catch (e) { toast("Couldn't start: " + e.message, "err"); }
-}
-
-async function stopMonitor(id) {
-  try { await api(`/api/monitors/${encodeURIComponent(id)}/stop`, { method: "POST" }); toast("Monitor stopped", "ok"); loadMonitors(); }
-  catch (e) { toast("Couldn't stop: " + e.message, "err"); }
-}
-
-async function removeMonitor(id) {
-  const confirmed = await showConfirm("Remove this metric?", "This stops it (if running) and removes it from your list permanently.");
-  if (!confirmed) return;
-  try {
-    await api(`/api/monitors/${encodeURIComponent(id)}`, { method: "DELETE" });
-    state.monitorExpanded.delete(id);
-    delete state.monitorPrevAlive[id];
-    toast("Removed", "ok");
-    loadMonitors();
-  } catch (e) {
-    toast("Couldn't remove: " + e.message, "err");
-  }
-}
-
-async function addMonitor() {
-  const name = document.getElementById("monitor-name-input").value.trim();
-  const command = document.getElementById("monitor-command-input").value.trim();
-  const interval = parseInt(document.getElementById("monitor-interval-input").value, 10) || 0;
-  const hostSelect = document.getElementById("monitor-host-select");
-  const hostId = hostSelect && hostSelect.value ? hostSelect.value : undefined;
-  if (!name || !command) { toast("Name and command are both required", "err"); return; }
-  try {
-    const body = { name, command, watch_interval: interval };
-    if (hostId) body.host_id = hostId;
-    await api("/api/monitors", { method: "POST", body: JSON.stringify(body) });
-    document.getElementById("monitor-name-input").value = "";
-    document.getElementById("monitor-command-input").value = "";
-    toast("Metric added", "ok");
-    loadMonitors();
-  } catch (e) {
-    toast("Couldn't add metric: " + e.message, "err");
-  }
-}
-
-// ============================================================================
-// TENSORBOARD
-// ============================================================================
-async function refreshTensorboardStatus() {
-  const status = await api("/api/tensorboard/status").catch(() => ({ running: false }));
-  applyTensorboardStatus(status);
-}
-
-function applyTensorboardStatus(status) {
-  const dot = document.getElementById("tb-dot");
-  const label = document.getElementById("tb-status-label");
-  const sub = document.getElementById("tb-status-sub");
-  const startBtn = document.getElementById("btn-tb-start");
-  const stopBtn = document.getElementById("btn-tb-stop");
-  const openLink = document.getElementById("btn-tb-open");
-
-  if (status.running) {
-    const url = `http://${window.location.hostname}:${status.port}/`;
-    dot.classList.add("live");
-    label.textContent = "Running";
-    sub.textContent = `Serving ${status.logdir || "runs/"} on port ${status.port}.`;
-    startBtn.classList.add("hidden");
-    stopBtn.classList.remove("hidden");
-    openLink.classList.remove("hidden");
-    openLink.href = url;
-  } else {
-    dot.classList.remove("live");
-    label.textContent = "Not running";
-    sub.textContent = "Starts a tensorboard process on the server and opens it in a new browser tab.";
-    startBtn.classList.remove("hidden");
-    stopBtn.classList.add("hidden");
-    openLink.classList.add("hidden");
-  }
-}
-
-async function startTensorboard() {
-  const confirmed = await showConfirm(
-    "Start TensorBoard?",
-    "This starts a tensorboard process on the server (reading runs/) and opens it in a new browser tab."
-  );
-  if (!confirmed) return;
-  toast("Starting TensorBoard…");
-  try {
-    const status = await api("/api/tensorboard/start", { method: "POST" });
-    applyTensorboardStatus(status);
-    window.open(`http://${window.location.hostname}:${status.port}/`, "_blank", "noopener");
-  } catch (e) {
-    toast("Couldn't start TensorBoard: " + e.message, "err");
-  }
-}
-
-async function stopTensorboard() {
-  const status = await api("/api/tensorboard/stop", { method: "POST" }).catch(() => null);
-  if (status) applyTensorboardStatus(status);
-}
-
 // ---------------------------------------------------------------- boot
 function initButtons() {
   initToastHoverPause();
@@ -2745,18 +2494,12 @@ function initButtons() {
   document.getElementById("btn-refresh-history").addEventListener("click", loadHistory);
   document.getElementById("history-source").addEventListener("change", (e) => switchHistorySource(e.target.value));
 
-  document.getElementById("btn-refresh-monitors").addEventListener("click", loadMonitors);
-  document.getElementById("btn-add-monitor").addEventListener("click", addMonitor);
-
   document.getElementById("btn-load-base").addEventListener("click", loadBaseConfig);
   document.getElementById("btn-blank-base").addEventListener("click", startBlankConfig);
   document.getElementById("btn-save-creator-config").addEventListener("click", saveCreatorConfig);
   document.getElementById("creator-folder-select").addEventListener("change", (e) => {
     document.getElementById("creator-new-folder-input").classList.toggle("hidden", e.target.value !== "__new__");
   });
-
-  document.getElementById("btn-tb-start").addEventListener("click", startTensorboard);
-  document.getElementById("btn-tb-stop").addEventListener("click", stopTensorboard);
 
   document.getElementById("repo-switcher").addEventListener("change", (e) => switchRepo(e.target.value));
 
@@ -2778,7 +2521,7 @@ async function boot() {
   await loadReports();
   await loadConfigs();
   const interval = (state.system && state.system.poll_interval_ms) || 2000;
-  state.pollTimer = setInterval(() => { loadTerminals(); loadMonitors(); loadScheduler(); }, interval);
+  state.pollTimer = setInterval(() => { loadTerminals(); loadScheduler(); }, interval);
   // Lab is the default landing view (XDASH_V2_PLAN.md §6.3) — unlike the Overview tab it
   // replaces, it must actually have data the instant the page opens, not only after a manual
   // tab switch away and back (switchView() is what every other tab relies on for its first load).

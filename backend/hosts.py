@@ -117,11 +117,24 @@ class _Host:
 
     @property
     def python_executable(self) -> str:
-        return self._fallback("python_executable", settings.python_executable)
+        """XDASH_FIXES_PLAN.md D5 — only the local machine reads through to
+        the active profile's own `commands.python`. A remote host that
+        hasn't declared its own interpreter gets the literal default
+        ("python" on its own PATH), never silently borrows this machine's —
+        issue 2/6's root cause was exactly that inheritance running an SSH
+        box against a conda env that only exists here."""
+        if self.is_local:
+            return self._fallback("python_executable", settings.python_executable)
+        return self._r.get("python_executable") or "python"
 
     @property
     def env_activate_cmd(self) -> str:
-        return self._fallback("env_activate_cmd", settings.env_activate_cmd)
+        """See python_executable above — same D5 reasoning. Unset on a
+        remote host means no activation at all, not this machine's
+        `conda activate thesis`."""
+        if self.is_local:
+            return self._fallback("env_activate_cmd", settings.env_activate_cmd)
+        return self._r.get("env_activate_cmd") or ""
 
     @property
     def tmux_session_prefix(self) -> str:
@@ -237,6 +250,51 @@ def upsert_host(record: Dict[str, Any]) -> _Host:
         records = _load_records()
         records = [r for r in records if r.get("id") != host_id]
         records.append({**record, "id": host_id, "kind": kind})
+        _save_records(records)
+    return get_host(host_id)
+
+
+def _deep_merge(base: Dict[str, Any], patch: Dict[str, Any]) -> Dict[str, Any]:
+    """*patch* merged onto *base*: a dict value merges key-by-key
+    (recursively), anything else (a scalar, a list, an explicit None)
+    replaces the base value outright. What lets a PATCH that only touched
+    `repos.<profile>.repo_root` (XDASH_FIXES_PLAN.md F1.3) leave every other
+    key — `accelerator`, another profile's repo entry, `ssh.port` it never
+    saw — exactly as it was, instead of upsert_host()'s own full-record
+    replace (§2/#6's root cause: a Settings Save that doesn't show
+    `accelerator` used to erase it)."""
+    out = dict(base)
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def patch_host(host_id: str, patch: Dict[str, Any]) -> _Host:
+    """Merges *patch* onto the existing record (XDASH_FIXES_PLAN.md F1.3) —
+    the only writer the Settings tab and the legacy Machines editor use to
+    *edit* a host now; POST stays create-only (server.py returns 409 for an
+    id that already exists). 'local' is synthesized first if it has no row
+    yet, same as set_accelerator() already does, since PATCHing it (e.g. a
+    per-profile repo_root override) must work even before its first real
+    write. id/kind are never changed by a patch — a PATCH is not how a host
+    changes identity or kind."""
+    if not isinstance(patch, dict):
+        raise HostError("PATCH body must be an object")
+    with _lock:
+        records = _load_records()
+        existing = next((r for r in records if r.get("id") == host_id), None)
+        if existing is None:
+            if host_id != LOCAL_HOST_ID:
+                raise HostError("Unknown host '%s'" % host_id)
+            existing = _default_local_record()
+        merged = _deep_merge(existing, patch)
+        merged["id"] = existing["id"]
+        merged["kind"] = existing.get("kind") or KIND_LOCAL
+        records = [r for r in records if r.get("id") != host_id]
+        records.append(merged)
         _save_records(records)
     return get_host(host_id)
 

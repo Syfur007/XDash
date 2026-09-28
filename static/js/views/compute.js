@@ -5,16 +5,19 @@
 // kaggle.js (kaggle.js is deleted; its notification half moved to
 // settings.js). A capacity board over every runner kind (GET /api/runners,
 // which already carries capability flags — volatile/provisioned/
-// budget_metered — per kind), then a Queue|Machines|Kaggle|Colab|Monitors
-// subtab strip. Queue/Monitors/TensorBoard are pre-existing scheduler/
-// Machine-Stats/TensorBoard markup relocated here unchanged — their JS
-// stays in app.js, this file only adds the subtab wiring around them.
-// Machines/Kaggle/Colab are this file's own.
+// budget_metered — per kind), then a Queue|Kaggle|Colab subtab strip.
+// Queue is pre-existing scheduler markup relocated here unchanged — its JS
+// stays in app.js, this file only adds the subtab wiring around it.
+// Kaggle/Colab are this file's own. The Machines and Monitors subtabs that
+// used to live here are gone (XDASH_FIXES_PLAN.md D1/F3): the runtime
+// detail page's own Settings and Tools tabs (js/screens/compute.js) replace
+// them, one host at a time instead of one global editor/board — Machines'
+// host editor duplicated that Settings tab with fewer fields (and dropped
+// `accelerator`); Monitors' host picker only ever applied to a *newly
+// added* metric, never to starting an existing one (issue #5).
 //
 // Same classic-<script>-sharing-global-scope model as every other view file.
 
-state.computeHosts = [];
-state.computeHostEditId = null;   // host id whose edit form is open, or null
 state.kaggleAccounts = [];        // carried over from the old kaggle.js verbatim
 state.kaggleCredEditOpen = new Set();
 state.kaggleNameEditOpen = new Set();
@@ -33,14 +36,13 @@ function _computeSetPref(key, value) {
 
 function initComputeSubtabs() {
   initSubtabStrip("compute-subtabs", (key) => {
-    if (key === "machines") loadComputeMachines();
-    else if (key === "kaggle") loadKaggle();
+    if (key === "kaggle") loadKaggle();
     else if (key === "colab") loadComputeColab();
-    else if (key === "monitors") { refreshTensorboardStatus(); populateMonitorHostSelect(); }
-    // "queue" (and Monitors' own Machine Stats body) are already kept warm
-    // by boot()'s own always-on pollTimer (loadScheduler/loadMonitors), so
-    // nothing to do the first time either opens — only TensorBoard's status
-    // isn't on that timer.
+    // "queue" is already kept warm by boot()'s own always-on pollTimer
+    // (loadScheduler), so nothing to do the first time it opens. Machines
+    // and Monitors (XDASH_FIXES_PLAN.md D1/F3) are gone — the runtime detail
+    // page's own Settings and Tools tabs (js/screens/compute.js) replace
+    // them, per host, instead of one global editor/board.
   });
 }
 
@@ -91,199 +93,6 @@ function computeCapacityCardHtml(r) {
   </div>`;
 }
 
-// ---------------------------------------------------------------- Machines subtab
-async function loadComputeMachines() {
-  const body = document.getElementById("compute-machines-body");
-  if (!body) return;
-  let hosts;
-  try {
-    const data = await api("/api/hosts");
-    hosts = data.hosts || [];
-  } catch (e) {
-    body.innerHTML = `<div class="empty-state">Couldn't load hosts: ${escapeHtml(e.message)}</div>`;
-    return;
-  }
-  state.computeHosts = hosts;
-  renderComputeMachines();
-}
-
-function renderComputeMachines() {
-  const body = document.getElementById("compute-machines-body");
-  const countEl = document.getElementById("compute-machines-count");
-  if (countEl) countEl.textContent = `${state.computeHosts.length} host${state.computeHosts.length === 1 ? "" : "s"}`;
-  if (!body) return;
-  body.innerHTML = state.computeHosts.map(computeHostCardHtml).join("");
-  body.querySelectorAll("button[data-action]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const id = btn.dataset.id;
-      const action = btn.dataset.action;
-      if (action === "host-edit") toggleComputeHostEdit(id);
-      else if (action === "host-save") saveComputeHost(id);
-      else if (action === "host-test") testComputeHost(id);
-      else if (action === "host-remove") removeComputeHost(id);
-    });
-  });
-}
-
-function computeHostCardHtml(h) {
-  const editOpen = state.computeHostEditId === h.id;
-  const resolved = h.resolved || {};
-  return `<div class="kaggle-card">
-    <div class="kaggle-card-accent ${h.kind === "local" ? "emerald" : "teal"}"></div>
-    <div class="kaggle-card-body">
-      <div class="kaggle-card-header">
-        <div style="min-width:0;">
-          <div class="kaggle-card-title-row"><span class="kaggle-card-title">${escapeHtml(h.label || h.id)}</span></div>
-          <div class="kaggle-card-sub">${escapeHtml(h.kind)}${h.kind !== "local" ? ` · ${escapeHtml((h.ssh && h.ssh.host) || "")}` : ""}</div>
-        </div>
-        <span class="kaggle-chip on">${escapeHtml(String(resolved.max_concurrent ?? "?"))} slot${resolved.max_concurrent === 1 ? "" : "s"}</span>
-      </div>
-      <table class="kv-table">
-        <tr><td>Repo root</td><td title="${escapeHtml(resolved.repo_root || "")}">${escapeHtml(resolved.repo_root || "—")}${resolved.declares_repo_root ? "" : " (inherited)"}</td></tr>
-        <tr><td>Env activate</td><td>${escapeHtml(resolved.env_activate_cmd || "(none)")}</td></tr>
-      </table>
-      ${editOpen ? computeHostEditFormHtml(h) : ""}
-      <div class="kaggle-card-footer">
-        <button class="btn btn-sm btn-ghost" data-action="host-test" data-id="${escapeHtml(h.id)}">Test connection</button>
-        <button class="btn btn-sm btn-ghost" data-action="host-edit" data-id="${escapeHtml(h.id)}">${editOpen ? "Cancel" : "Edit"}</button>
-        ${h.kind !== "local" ? `<button class="btn btn-sm btn-danger" data-action="host-remove" data-id="${escapeHtml(h.id)}">Remove</button>` : ""}
-      </div>
-    </div>
-  </div>`;
-}
-
-function computeHostEditFormHtml(h) {
-  const ssh = h.ssh || {};
-  const profileRepo = ((h.repos || {})[(state.system && state.system.profile_name) || ""]) || {};
-  const sshFields = h.kind === "local" ? "" : `
-    <div class="field"><label>SSH host</label><input class="text-input" id="compute-host-ssh-host-${escapeHtml(h.id)}" value="${escapeHtml(ssh.host || "")}" autocomplete="off" /></div>
-    <div class="field"><label>User</label><input class="text-input" id="compute-host-ssh-user-${escapeHtml(h.id)}" value="${escapeHtml(ssh.user || "")}" autocomplete="off" /></div>
-    <div class="field" style="width:80px;"><label>Port</label><input class="text-input" id="compute-host-ssh-port-${escapeHtml(h.id)}" value="${escapeHtml(ssh.port || "")}" autocomplete="off" /></div>
-    <div class="field grow"><label>Identity file</label><input class="text-input grow" id="compute-host-ssh-identity-${escapeHtml(h.id)}" value="${escapeHtml(ssh.identity_file || "")}" autocomplete="off" /></div>`;
-  return `<div class="scheduler-add-form" style="padding-top:9px; border-top:1px dashed var(--border-soft); flex-wrap:wrap;">
-    ${sshFields}
-    <div class="field grow">
-      <label>Repo root for this profile (blank = inherit)</label>
-      <input class="text-input grow" id="compute-host-repo-root-${escapeHtml(h.id)}" value="${escapeHtml(profileRepo.repo_root || "")}" autocomplete="off" />
-    </div>
-    <div class="field grow">
-      <label>Env activate (blank = inherit)</label>
-      <input class="text-input grow" id="compute-host-env-${escapeHtml(h.id)}" value="${escapeHtml(h.env_activate_cmd || "")}" autocomplete="off" />
-    </div>
-    <div class="field" style="width:110px;">
-      <label>Max concurrent (blank = inherit)</label>
-      <input class="text-input" id="compute-host-max-concurrent-${escapeHtml(h.id)}" value="${h.max_concurrent != null ? h.max_concurrent : ""}" autocomplete="off" />
-    </div>
-    <button class="btn btn-sm btn-primary" data-action="host-save" data-id="${escapeHtml(h.id)}">Save</button>
-  </div>`;
-}
-
-function toggleComputeHostEdit(id) {
-  state.computeHostEditId = state.computeHostEditId === id ? null : id;
-  renderComputeMachines();
-}
-
-async function saveComputeHost(id) {
-  const existing = state.computeHosts.find((h) => h.id === id) || {};
-  const repoRoot = document.getElementById(`compute-host-repo-root-${id}`).value.trim();
-  const envActivate = document.getElementById(`compute-host-env-${id}`).value.trim();
-  const maxConcurrentRaw = document.getElementById(`compute-host-max-concurrent-${id}`).value.trim();
-  const profileName = (state.system && state.system.profile_name) || "";
-  const record = {
-    id: existing.id, kind: existing.kind, label: existing.label,
-    max_concurrent: maxConcurrentRaw ? Number(maxConcurrentRaw) : null,
-    python_executable: existing.python_executable != null ? existing.python_executable : null,
-    env_activate_cmd: envActivate || null,
-    tmux_session_prefix: existing.tmux_session_prefix != null ? existing.tmux_session_prefix : null,
-    repos: { ...(existing.repos || {}) },
-  };
-  if (repoRoot) record.repos[profileName] = { repo_root: repoRoot };
-  else delete record.repos[profileName];
-  if (existing.kind !== "local") {
-    const port = document.getElementById(`compute-host-ssh-port-${id}`).value.trim();
-    record.ssh = {
-      host: document.getElementById(`compute-host-ssh-host-${id}`).value.trim(),
-      user: document.getElementById(`compute-host-ssh-user-${id}`).value.trim(),
-      identity_file: document.getElementById(`compute-host-ssh-identity-${id}`).value.trim(),
-    };
-    if (port) record.ssh.port = Number(port);
-  }
-  try {
-    await api("/api/hosts", { method: "POST", body: JSON.stringify(record) });
-    toast(`Saved '${id}'`, "ok");
-    state.computeHostEditId = null;
-    loadComputeMachines();
-  } catch (e) {
-    toast(`Couldn't save host: ${e.message}`, "err");
-  }
-}
-
-async function testComputeHost(id) {
-  try {
-    const result = await api(`/api/hosts/${encodeURIComponent(id)}/test`, { method: "POST" });
-    toast(
-      result.reachable ? `'${id}' reachable${result.tmux_available ? " (tmux available)" : " (tmux not found)"}` : `'${id}' is not reachable`,
-      result.reachable ? "ok" : "err"
-    );
-  } catch (e) {
-    toast(`Test failed: ${e.message}`, "err");
-  }
-}
-
-async function removeComputeHost(id) {
-  const ok = await showConfirm("Remove host?", `Deregisters '${id}'. Any dispatch already using it will fail its next operation rather than being cancelled — cancel in-flight work on this host first.`);
-  if (!ok) return;
-  try {
-    await api(`/api/hosts/${encodeURIComponent(id)}`, { method: "DELETE" });
-    toast(`Removed '${id}'`, "ok");
-    loadComputeMachines();
-  } catch (e) {
-    toast(`Couldn't remove host: ${e.message}`, "err");
-  }
-}
-
-function toggleComputeAddHostForm() {
-  const form = document.getElementById("compute-add-host-form");
-  const btn = document.getElementById("btn-compute-toggle-add-host");
-  const nowHidden = !form.classList.toggle("hidden");
-  btn.textContent = nowHidden ? "+ Add SSH host" : "Cancel";
-  if (!nowHidden) form.querySelector("input")?.focus();
-}
-
-async function addComputeHost() {
-  const id = document.getElementById("compute-new-host-id").value.trim();
-  const label = document.getElementById("compute-new-host-label").value.trim();
-  const sshHost = document.getElementById("compute-new-host-ssh-host").value.trim();
-  const sshUser = document.getElementById("compute-new-host-ssh-user").value.trim();
-  const identity = document.getElementById("compute-new-host-identity").value.trim();
-  if (!id || !sshHost) { toast("Host id and SSH host are required", "err"); return; }
-  try {
-    await api("/api/hosts", {
-      method: "POST",
-      body: JSON.stringify({ id, kind: "ssh", label: label || id, ssh: { host: sshHost, user: sshUser, identity_file: identity } }),
-    });
-    toast(`Host '${id}' added`, "ok");
-    ["compute-new-host-id", "compute-new-host-label", "compute-new-host-ssh-host", "compute-new-host-ssh-user", "compute-new-host-identity"]
-      .forEach((elId) => (document.getElementById(elId).value = ""));
-    toggleComputeAddHostForm();
-    loadComputeMachines();
-  } catch (e) {
-    toast(`Couldn't add host: ${e.message}`, "err");
-  }
-}
-
-// Machine Stats "Add a new metric" form's host selector (Multi_runner_XDash.md
-// Phase 6 — "Machine Stats gains a host selector") — populated once when the
-// Monitors subtab first opens, not on every 2s poll.
-async function populateMonitorHostSelect() {
-  const select = document.getElementById("monitor-host-select");
-  if (!select) return;
-  try {
-    const data = await api("/api/hosts");
-    select.innerHTML = (data.hosts || []).map((h) => `<option value="${escapeHtml(h.id)}">${escapeHtml(h.label || h.id)}</option>`).join("");
-  } catch (e) { /* leave whatever's already there (just "This machine") */ }
-}
-
 // ---------------------------------------------------------------- Kaggle subtab
 // The following (through the end of the notification-schema section this file
 // deliberately does NOT include — see static/js/views/settings.js) is carried
@@ -324,13 +133,24 @@ function renderKaggleSummary() {
 // Auto-refresh polls the (read-only, cheap) /api/kaggle/accounts endpoint —
 // the actual Kaggle status checks are the dispatcher's own job, which keeps
 // running server-side whether or not this tab is open or this toggle is on.
+// XDASH_FIXES_PLAN.md F1.2 — loadKaggle()'s own renderKaggleAccounts()
+// rebuilds every account card from scratch, including any open credential
+// form (§2/#6: this auto-refresh used to wipe a mid-typed key/token every
+// 30s). Only the *auto-refresh tick* is guarded — an explicit reload right
+// after a save (e.g. saveKaggleCredentials()'s own loadKaggle() call) must
+// still go through even though focus is still inside the container.
+function kaggleAutoRefreshTick() {
+  if (formPollGuard("kaggle-accounts-body")) return;
+  loadKaggle();
+}
+
 function setKaggleAutoRefresh(enabled) {
   state.kaggleAutoRefresh = enabled;
   _computeSetPref("kaggleAutoRefresh", enabled);
   const btn = document.getElementById("btn-kaggle-toggle-autorefresh");
   if (btn) btn.textContent = `Auto-refresh: ${enabled ? "on" : "off"}`;
   if (state.kaggleAutoRefreshTimer) { clearInterval(state.kaggleAutoRefreshTimer); state.kaggleAutoRefreshTimer = null; }
-  if (enabled) state.kaggleAutoRefreshTimer = setInterval(loadKaggle, 30000);
+  if (enabled) state.kaggleAutoRefreshTimer = setInterval(kaggleAutoRefreshTick, 30000);
 }
 
 function renderKaggleAccounts() {
@@ -705,8 +525,6 @@ async function removeComputeColabAccount(name) {
 }
 
 function initComputeButtons() {
-  document.getElementById("btn-compute-toggle-add-host").addEventListener("click", toggleComputeAddHostForm);
-  document.getElementById("btn-compute-add-host").addEventListener("click", addComputeHost);
   document.getElementById("btn-kaggle-add-account").addEventListener("click", addKaggleAccount);
   document.getElementById("btn-kaggle-toggle-add-account").addEventListener("click", () =>
     toggleComputeAddForm("kaggle-add-account-form", "btn-kaggle-toggle-add-account", "+ Add account", "Cancel"));

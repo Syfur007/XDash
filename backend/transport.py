@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 from . import hosts
+from . import tools
 from .config import DATA_DIR
 
 # Multiplexing is not an optimization here, it is a correctness requirement:
@@ -27,6 +28,9 @@ from .config import DATA_DIR
 # given host must share one master. ControlPersist keeps it warm between the
 # poll loop's frequent short commands.
 _CONTROL_DIR = DATA_DIR / ".ssh-control"
+# Public alias — backend/housekeeping.py's "SSH control sockets" sweep (F5)
+# needs this path from outside the module too.
+CONTROL_DIR = _CONTROL_DIR
 _SSH_BASE_OPTS = [
     "-o", "ControlMaster=auto",
     "-o", "ControlPersist=10m",
@@ -193,7 +197,7 @@ class SshTransport(Transport):
         (the server runs under python3.8), where it does not exist.
         """
         remote_cmd = " ".join(shlex.quote(a) for a in argv)
-        return ["ssh"] + self._opts() + [self._target(), remote_cmd]
+        return [tools.path("ssh")] + self._opts() + [self._target(), remote_cmd]
 
     def run(self, argv: Sequence[str], timeout: Optional[float] = None) -> subprocess.CompletedProcess:
         try:
@@ -205,15 +209,26 @@ class SshTransport(Transport):
 
     # -- files -----------------------------------------------------------
     def _rsh(self) -> str:
-        return " ".join(["ssh"] + [shlex.quote(o) for o in self._opts()])
+        # This is rsync's own `-e` (remote shell) argument, run locally by
+        # rsync itself to reach the other side — tools.path("ssh") here, not
+        # a bare name, for the same D3 reason argv() above resolves it.
+        return " ".join([tools.path("ssh")] + [shlex.quote(o) for o in self._opts()])
 
-    def _rsync(self, src: str, dst: str, excludes: Sequence[str], delete: bool, timeout: float):
-        argv = ["rsync", "-az", "--partial", "-e", self._rsh()]
+    def _rsync_argv(self, src: str, dst: str, excludes: Sequence[str], delete: bool) -> List[str]:
+        """Pure argv construction, split out of _rsync() (XDASH_FIXES_PLAN.md
+        F2) so the local-only resolution of 'rsync' is testable without going
+        through _rsync() itself, which the test harness always fakes (tests
+        never ssh/rsync — see tests/conftest.py's world fixture)."""
+        argv = [tools.path("rsync"), "-az", "--partial", "-e", self._rsh()]
         if delete:
             argv.append("--delete")
         for pattern in excludes:
             argv += ["--exclude", pattern]
         argv += [src, dst]
+        return argv
+
+    def _rsync(self, src: str, dst: str, excludes: Sequence[str], delete: bool, timeout: float):
+        argv = self._rsync_argv(src, dst, excludes, delete)
         try:
             proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
         except FileNotFoundError:
@@ -246,7 +261,7 @@ class SshTransport(Transport):
         here."""
         remote = remote_shell_path(remote_path)
         cmd = "mkdir -p $(dirname %s) && umask 077 && cat > %s && chmod %o %s" % (remote, remote, mode, remote)
-        argv = ["ssh"] + self._opts() + [self._target(), cmd]
+        argv = [tools.path("ssh")] + self._opts() + [self._target(), cmd]
         try:
             proc = subprocess.run(argv, input=text, capture_output=True, text=True, timeout=timeout)
         except FileNotFoundError:
@@ -286,6 +301,32 @@ class SshTransport(Transport):
             return self.run(["true"], timeout=15).returncode == 0
         except TransportError:
             return False
+
+    # -- port forwarding (XDASH_FIXES_PLAN.md F3.4 — per-host TensorBoard) ---
+    # A local forward over the ControlMaster this host already keeps warm
+    # (ControlPersist=10m, see _SSH_BASE_OPTS): `-O forward`/`-O cancel` are
+    # control commands to the *existing* master connection, never a second
+    # `ssh` session of their own — load-bearing for Colab specifically (a
+    # second concurrent `colab ssh` 429s, Colab-constraints table).
+    def forward_argv(self, local_port: int, remote_port: int) -> List[str]:
+        spec = "127.0.0.1:%d:127.0.0.1:%d" % (local_port, remote_port)
+        return [tools.path("ssh")] + self._opts() + ["-O", "forward", "-L", spec, self._target()]
+
+    def cancel_forward_argv(self, local_port: int, remote_port: int) -> List[str]:
+        spec = "127.0.0.1:%d:127.0.0.1:%d" % (local_port, remote_port)
+        return [tools.path("ssh")] + self._opts() + ["-O", "cancel", "-L", spec, self._target()]
+
+    def open_forward(self, local_port: int, remote_port: int, timeout: float = 15.0) -> subprocess.CompletedProcess:
+        """Runs the `-O forward` control command directly (never through
+        `.run()`, which wraps its argument as a REMOTE command to hand to
+        the login shell — this is a local ssh invocation controlling an
+        already-open connection). Always faked in tests (tests/conftest.py's
+        `world` fixture refuses it exactly like `.run()`/`._rsync()` — no
+        test ever opens a real forward)."""
+        return subprocess.run(self.forward_argv(local_port, remote_port), capture_output=True, text=True, timeout=timeout)
+
+    def close_forward(self, local_port: int, remote_port: int, timeout: float = 15.0) -> subprocess.CompletedProcess:
+        return subprocess.run(self.cancel_forward_argv(local_port, remote_port), capture_output=True, text=True, timeout=timeout)
 
 
 class _AdHocSshHost:

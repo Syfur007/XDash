@@ -86,8 +86,11 @@ function navigateToSettingsSection(section) {
 // js/screens/compute.js — same "id segment reached only via the URL" shape
 // as navigateToDataset()/navigateToExperiment() above. Passing no *runtimeId*
 // (or one equal to the current selection) returns to the bare board.
-function navigateToRuntime(runtimeId) {
-  const hash = runtimeId ? `#/compute/${encodeURIComponent(runtimeId)}` : "#/compute";
+// *tab* (XDASH_FIXES_PLAN.md F1.6) is the third segment — Now/Queue/History/
+// Settings/Diagnostics today, ready for a future Tools tab (F3) without any
+// change here: that phase only adds another value this same segment can be.
+function navigateToRuntime(runtimeId, tab) {
+  const hash = runtimeId ? `#/compute/${encodeURIComponent(runtimeId)}${tab ? "/" + encodeURIComponent(tab) : ""}` : "#/compute";
   if (location.hash === hash) handleRoute();
   else location.hash = hash;
 }
@@ -118,9 +121,11 @@ function handleRoute() {
     applySettingsRouteParams(second ? decodeURIComponent(second) : null);
   } else if (view === "compute") {
     // js/screens/compute.js (Phase 5): `second` is a runtime id (#3.6's
-    // `id`, e.g. "ssh:mclab-gpu2"), or undefined for the bare board. This
-    // was the one segment Phase 3 left switchView(view) to ignore.
-    applyComputeRouteParams(second ? decodeURIComponent(second) : null);
+    // `id`, e.g. "ssh:mclab-gpu2"), or undefined for the bare board. `third`
+    // (XDASH_FIXES_PLAN.md F1.6) is the open tab — Now/Queue/History/
+    // Settings/Diagnostics — so a reload or a shared link lands on the
+    // right one instead of always resetting to "now".
+    applyComputeRouteParams(second ? decodeURIComponent(second) : null, third ? decodeURIComponent(third) : null);
   }
 }
 

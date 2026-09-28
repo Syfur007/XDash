@@ -49,6 +49,7 @@ from .config import (
 )
 from . import configs as cfg
 from . import results_ingest
+from . import tools
 from .store import JsonStore, StoreCorruptError, atomic_write_text
 
 _lock = threading.Lock()          # guards kaggle_accounts.json
@@ -56,19 +57,21 @@ _lock = threading.Lock()          # guards kaggle_accounts.json
 STATUS_RE = re.compile(r'has status "([^"]+)"')
 FAILURE_RE = re.compile(r'Failure message:\s*"?(.*?)"?\s*$', re.MULTILINE)
 _ENUM_PREFIX_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\.")
-# Live-verified 2026-09 against the actually-installed `kaggle` CLI (pip package "kaggle" 1.7.4.5,
-# github.com/Kaggle/kaggle-api): `kernels status` prints the Python enum's own repr — e.g.
-# `has status "KernelWorkerStatus.RUNNING"` — not the bare lowercase string
-# IN_PROGRESS_STATUSES/FINAL_STATUSES below expect. Confirmed via a real push +
-# status poll during this feature's own testing (DASHBOARD_REDESIGN_PLAN.md §2.1's fact-check).
-# Without this normalization, over-budget detection and the dispatcher's own
-# final-status/notification trigger silently never fire against this CLI version — every
-# comparison below is an exact-match against a lowercase set.
+# `kernels status` prints Python's own repr of kagglesdk's KernelWorkerStatus
+# enum — e.g. `has status "KernelWorkerStatus.CANCEL_ACKNOWLEDGED"` — not a
+# bare lowercase string. Confirmed against the installed CLI 2.2.4's own
+# source (kagglesdk/kernels/types/kernels_enums.py): this is the CLI's
+# permanent output shape, not a version artifact to hedge around — every
+# comparison below is still an exact-match against a lowercase, underscore-
+# free set, so both the class-name prefix and the enum member's own
+# underscores (SCREAMING_SNAKE_CASE, e.g. CANCEL_ACKNOWLEDGED) have to come
+# off before matching. Without this, over-budget detection and the
+# dispatcher's own final-status/notification trigger silently never fire.
 _STATUS_ALIASES = {"cancelacknowledged": "cancelAcknowledged"}
 
 
 def _normalize_kaggle_status(raw: str) -> str:
-    value = _ENUM_PREFIX_RE.sub("", (raw or "").strip()).strip().lower()
+    value = _ENUM_PREFIX_RE.sub("", (raw or "").strip()).strip().lower().replace("_", "")
     return _STATUS_ALIASES.get(value, value)
 
 
@@ -528,15 +531,16 @@ def _env_for_creds_dir(creds_dir: Path, account_name: str = "") -> Dict[str, str
 
 
 def _run_kaggle_argv(args: List[str], env: Dict[str, str], timeout: Optional[float] = None) -> subprocess.CompletedProcess:
+    exe = tools.path("kaggle")
     try:
         return subprocess.run(
-            [settings.kaggle_executable, *args],
+            [exe, *args],
             env=env, capture_output=True, text=True, timeout=timeout,
         )
     except FileNotFoundError:
         raise KaggleOpsError(
-            f"'{settings.kaggle_executable}' was not found on PATH. Set kaggle_executable in "
-            f"repos/{settings.profile_name}.yaml to wherever it's installed."
+            f"'{exe}' was not found. Set an override for 'kaggle' in Settings -> Tools, or make "
+            f"sure it's installed in the environment running server.py."
         )
     except subprocess.TimeoutExpired:
         raise KaggleOpsError(f"kaggle {' '.join(args)} timed out after {timeout}s")
@@ -562,7 +566,8 @@ def test_credentials(username: str = "", key: str = "", api_token: str = "") -> 
     creds dir (never the account store), runs the same cheap authenticated
     call validate_account() does, then always cleans the scratch dir up. A
     real call to Kaggle's API when actually invoked — every test in this
-    suite points settings.kaggle_executable at a local fixture script."""
+    suite points tools.path("kaggle") at a local fixture script (via
+    tools.set_override, see tests/test_phase5_backend.py)."""
     legacy = _validate_legacy_pair(username, key) if (key or "").strip() else None
     token = _validate_access_token(api_token) if (api_token or "").strip() else None
     if not legacy and not token:
@@ -580,62 +585,88 @@ def test_credentials(username: str = "", key: str = "", api_token: str = "") -> 
     return {"ok": ok, "detail": detail or ("looks valid" if ok else "authentication failed")}
 
 
-# --------------------------------------------------------------------------- CLI 2.x groundwork (XDASH_PLAN.md §10 Phase 5)
-# `kaggle quota` (CLI >= 2.2.1) replaces the self-tracked weekly-hours estimate
-# with Kaggle's own measured used/reserved/total/refresh numbers (KAGGLE_API.md
-# §"Quota"). The installed 1.7.4.5 has no such command; settings.kaggle_executable
-# (repos/<profile>.yaml, already read at backend/config.py:331 — no new setting
-# needed) is exactly the "separate Python 3.11+ env" pointer the plan asks for.
-# Until that env exists, get_measured_quota() degrades to {"available": False}
-# and every existing self-tracked path (estimate_usage(), list_slots(),
-# runtimes._quota()'s source="self-tracked") is untouched.
+# --------------------------------------------------------------------------- measured quota (XDASH_FIXES_PLAN.md §2/#8, F2.6)
+# `kaggle quota` (CLI >= 2.2.1, installed here as 2.2.4) replaces the
+# self-tracked weekly-hours estimate with Kaggle's own measured
+# used/remaining/total numbers. Confirmed against the installed CLI's own
+# source (kaggle/api/kaggle_api_extended.py's quota_view_cli): it builds one
+# row per accelerator and prints them with print_json — a JSON LIST, not a
+# dict of RPC field names. A previous version of this parser guessed at
+# undocumented dict-shaped fields (time_used/total_time_allowed/
+# quota_refresh_time) that this CLI has never actually printed, so it
+# returned None for every real invocation — see the plan's own root-cause
+# writeup.
+_QUOTA_HOURS_RE = re.compile(r"^\s*([\d.]+)\s*h?\s*$", re.IGNORECASE)
+
+
+def _quota_hours(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    m = _QUOTA_HOURS_RE.match(str(value))
+    if not m:
+        return None
+    return float(m.group(1))
+
+
 def parse_quota_json(data: Any) -> Optional[Dict[str, Any]]:
-    """*data* is `kaggle quota --format json`'s parsed payload. Its exact key
-    casing/nesting is undocumented (KAGGLE_API.md only names the four RPC
-    fields — time_used/time_reserved/total_time_allowed/quota_refresh_time —
-    not a worked JSON example), so this reads defensively: a top-level "gpu"
-    object, or the fields directly at top level (either shape wins), and
-    returns None rather than guessing further if neither is present. None
-    means "couldn't parse this," never "zero quota used" — get_measured_quota
-    falls back to the self-tracked estimate on None, exactly like a missing
-    command does."""
-    if not isinstance(data, dict):
+    """*data* is `kaggle quota --format json`'s parsed payload — a JSON list
+    of row dicts, one per accelerator:
+    `{"resource": "GPU", "used": "3.20h", "remaining": "26.80h",
+    "total": "30.00h", "refreshAt": "<iso>"}` (the "h" suffix is stripped
+    here). None means "couldn't parse this," never "zero quota used" —
+    get_measured_quota() falls back to the self-tracked estimate on None,
+    exactly like a missing command does. TPU's row (if present) rides along
+    for display only; every gate in this codebase is GPU-hours."""
+    if not isinstance(data, list):
         return None
-    gpu = data.get("gpu") if isinstance(data.get("gpu"), dict) else data
-    used, reserved, total, resets = (
-        gpu.get("time_used"), gpu.get("time_reserved"), gpu.get("total_time_allowed"), gpu.get("quota_refresh_time"),
-    )
-    if used is None and total is None:
+    rows = {str(r.get("resource") or "").strip().upper(): r for r in data if isinstance(r, dict)}
+    gpu = rows.get("GPU")
+    if gpu is None:
         return None
-    try:
-        used_f = float(used) if used is not None else None
-        reserved_f = float(reserved) if reserved is not None else 0.0
-        total_f = float(total) if total is not None else None
-    except (TypeError, ValueError):
+    used, total = _quota_hours(gpu.get("used")), _quota_hours(gpu.get("total"))
+    if used is None or total is None:
         return None
-    return {
-        "used": round((used_f or 0.0) + reserved_f, 2) if used_f is not None else None,
-        "limit": total_f,
-        "unit": "h/week",
-        "resets_at": resets,
-        "source": "measured",
+    result: Dict[str, Any] = {
+        "used": used, "limit": total, "unit": "h/week",
+        "resets_at": gpu.get("refreshAt"), "source": "measured",
     }
+    tpu = rows.get("TPU")
+    if tpu is not None:
+        result["tpu"] = {
+            "used": _quota_hours(tpu.get("used")), "limit": _quota_hours(tpu.get("total")),
+            "resets_at": tpu.get("refreshAt"),
+        }
+    return result
 
 
-def get_measured_quota(account_name: str) -> Dict[str, Any]:
-    """`{"available": True, **parse_quota_json(...)}`, or `{"available":
-    False, "detail": ...}` when the installed CLI predates `quota` (old
-    1.7.4.5: "invalid choice: 'quota'"/similar argparse error, non-zero exit)
-    or the account has no credentials yet. Never raises — a Diagnostics
-    panel button, not something that should 500 the page."""
+# Per-account cache (XDASH_FIXES_PLAN.md F2.6): a real `kaggle quota` call is
+# a network round trip, and this number is read from several places that
+# don't coordinate with each other (the board's 5s poll via
+# runtimes._quota(), KaggleRunner.can_accept() once per pending experiment
+# per dispatch tick, Diagnostics on open) — without a shared cache, each of
+# those would re-run the subprocess independently, exactly the "measured
+# quota per experiment per tick" cost the plan calls out. A 15-minute TTL
+# keeps the number fresh enough to gate dispatch by, while bounding the real
+# cost to one call per account per window no matter how many callers ask.
+# Diagnostics' manual Refresh (force=True) is the only way to bypass it
+# before it expires.
+_QUOTA_CACHE_TTL_SECONDS = 900.0
+_quota_cache: Dict[str, tuple] = {}  # account_name -> (monotonic_time, result)
+
+
+def _measure_quota_uncached(account_name: str) -> Dict[str, Any]:
     try:
         proc = _run_kaggle(["quota", "--format", "json"], account_name, timeout=30)
     except KaggleOpsError as e:
         return {"available": False, "detail": str(e)}
     if proc.returncode != 0:
+        # A non-zero exit (e.g. a 401) shows the real stderr, never a guess.
         return {"available": False, "detail": (proc.stderr or proc.stdout or "").strip()[-300:] or "kaggle quota failed"}
+    stdout = (proc.stdout or "").strip()
+    if not stdout or "no quota information available" in stdout.lower():
+        return {"available": False, "detail": stdout or "No quota information available"}
     try:
-        parsed = json.loads(proc.stdout)
+        parsed = json.loads(stdout)
     except ValueError:
         parsed = None
     result = parse_quota_json(parsed)
@@ -644,12 +675,29 @@ def get_measured_quota(account_name: str) -> Dict[str, Any]:
     return {"available": True, **result}
 
 
+def get_measured_quota(account_name: str, force: bool = False) -> Dict[str, Any]:
+    """`{"available": True, **parse_quota_json(...)}`, or `{"available":
+    False, "detail": ...}` when the account has no credentials yet, the CLI
+    is missing/too old, or Kaggle itself returned nothing parseable. Never
+    raises — a Diagnostics panel button, not something that should 500 the
+    page. *force* (the Diagnostics "Refresh" button) bypasses the 15-minute
+    cache; every other caller shares it."""
+    now = time.monotonic()
+    cached = _quota_cache.get(account_name)
+    if not force and cached is not None and (now - cached[0]) < _QUOTA_CACHE_TTL_SECONDS:
+        return cached[1]
+    result = _measure_quota_uncached(account_name)
+    _quota_cache[account_name] = (now, result)
+    return result
+
+
 # Live `kernels logs -f` (CLI >= 2.0.2, KAGGLE_API.md §4.4) — the same
 # start/poll/stop shape backend/colab.py uses for its OAuth subprocess
 # (backend/procsession.py), reused here for a live log panel instead of an
 # interactive prompt. A real call to Kaggle's API when actually started;
-# tests point settings.kaggle_executable at a local fixture script that just
-# prints a few lines and exits, never at a real kernel.
+# tests point tools.path("kaggle") (via tools.set_override) at a local
+# fixture script that just prints a few lines and exits, never at a real
+# kernel.
 def _log_session_key(account_name: str, kernel_slug: str) -> str:
     return f"kaggle-log:{account_name}:{kernel_slug}"
 
@@ -657,8 +705,8 @@ def _log_session_key(account_name: str, kernel_slug: str) -> str:
 def _kernel_logs_argv(kernel_slug: str) -> List[str]:
     """Factored out so tests can point this one line at a local fixture
     script (see tests/test_procsession.py) without also having to fake
-    settings.kaggle_executable's other, unrelated call sites."""
-    return [settings.kaggle_executable, "kernels", "logs", kernel_slug, "-f"]
+    tools.path("kaggle")'s other, unrelated call sites."""
+    return [tools.path("kaggle"), "kernels", "logs", kernel_slug, "-f"]
 
 
 def start_kernel_log_follow(account_name: str, kernel_slug: str) -> Dict[str, Any]:

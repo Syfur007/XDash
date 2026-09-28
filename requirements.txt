@@ -4,9 +4,9 @@
 # through backend/bridge.py, which shells out to the host repo's own interpreter
 # instead (see IMPLEMENTATION_PLAN.md Phase 1 / design principle 3).
 #
-# Flask 2.3.3 / Werkzeug 2.3.8 (was 2.2.5 / 2.2.3): Werkzeug 2.2's router builds
-# its URL functions with ast.Str, which Python 3.14 removed, so `import server`
-# failed outright in the xdash env (Python 3.14). 2.3.x still supports Python 3.8.
+# Flask 2.3.3 / Werkzeug 2.3.8: Werkzeug 2.2's router builds its URL functions
+# with ast.Str, which newer Pythons removed, so `import server` failed outright
+# without this bump.
 Flask==2.3.3
 Werkzeug==2.3.8
 PyYAML>=5.4
@@ -14,8 +14,24 @@ tensorboard>=2.9
 # XDASH_PLAN.md decision #9: PyYAML drops comments on write, and the profile YAML's
 # comments are its documentation (and Settings' help text) — ruamel.yaml round-trips
 # them. Used only by backend/profile_ops.py (GET/PATCH /api/profile, the migration
-# script); every other YAML read in this codebase keeps using plain PyYAML above.
+# script) and backend/tools.py's own profile migration; every other YAML read in
+# this codebase keeps using plain PyYAML above.
 ruamel.yaml>=0.17
+# XDASH_FIXES_PLAN.md F2 (#7) — declared, not bundled/vendored: backend/kaggle.py
+# always shells out to the `kaggle` CLI via subprocess (see its own module
+# docstring for why), never imports this package in-process. Declaring it here
+# just means `pip install -r requirements.txt` in XDash's own env is enough to
+# get a working CLI, instead of relying on it happening to already be installed
+# system-wide. Python floor below is driven by this (>= 3.11) and by
+# google-colab-cli (>= 3.12) together.
+kaggle>=2.2.1
+# Same subprocess-only relationship as kaggle above (see backend/colab.py).
+# Needs Python >= 3.12 (XDASH_FIXES_PLAN.md D4) — that's this file's real
+# floor now, not Flask's.
+google-colab-cli
+# Used by backend/datasets.py for thumbnail generation — previously installed
+# incidentally (a transitive dependency of something else) and undeclared.
+Pillow
 
 # Dev only (not needed to run the dashboard): the test suite under tests/.
 #   conda run -n xdash python -m pytest tests -q

@@ -65,6 +65,7 @@ from . import runtimes as runtimes_mod
 from . import scheduler
 from . import snapshot
 from . import tb_curves
+from . import terminals
 from . import transport as transport_mod
 from .config import background_disabled, settings
 from .runners import registry
@@ -958,7 +959,21 @@ def create_experiments(
     ({"train", "eval"}, or a train-only string) is only for flags that are
     not config (e.g. `--max-hours`) — config changes are the overlay.
 
-    Returns {experiments, created, matched, warnings, then}."""
+    Each `configs[]` entry may also carry its own `runtime` (§6.3 policy,
+    XDASH_FIXES_PLAN.md F4.3 — the Composer's per-row Runtime picker),
+    normalized the same way as the request-level *runtime* and overriding
+    it for that entry's rows. On a **new** experiment the entry's own
+    policy is stored outright. On a **matched** (already-existing)
+    experiment, it's applied as a `set_runtime` — only when it actually
+    differs from what's already stored, and refused (added to the
+    response's `runtime_changes.skipped`, same `{id, reason}` shape
+    `apply_action` uses) while that experiment is in flight
+    (dispatching/running), exactly like `set_runtime` refuses it via
+    `/api/experiments/actions`. Every entry's runtime is validated up
+    front, before anything is stored — a bad one fails the whole request,
+    like a bad overlay does.
+
+    Returns {experiments, created, matched, warnings, then, runtime_changes}."""
     if then not in (None, "", "queue", "run_now"):
         raise ExperimentError(f"then must be 'queue' or 'run_now', got {then!r}")
     if not configs:
@@ -974,42 +989,70 @@ def create_experiments(
     max_legs = _as_int(max_legs, "max_legs", 1)
 
     warnings: List[str] = []
-    planned: List[Tuple[str, Any, str]] = []
+    planned: List[Tuple[str, Any, str, Optional[Dict[str, Any]]]] = []
     for entry in configs:
         config_path = (entry.get("path") or "").strip() if isinstance(entry, dict) else ""
         if not config_path:
             raise ExperimentError("Every config entry needs a path")
         _check_config(config_path)
         _check_overlay(config_path, flat_overlay, warnings)
+        # F4.3: an entry-level runtime override, validated here (before the
+        # write lock below, so a bad one still fails the whole request and
+        # stores nothing) — a falsy value (absent, None, "") means "use the
+        # request-level policy", not "auto, allow everything".
+        raw_entry_runtime = entry.get("runtime") if isinstance(entry, dict) else None
+        entry_policy = normalize_runtime(raw_entry_runtime) if raw_entry_runtime else None
         for seed in entry.get("seeds") or [None]:
-            planned.append((config_path, seed, experiment_id_for(config_path, seed, flat_overlay)))
+            planned.append((config_path, seed, experiment_id_for(config_path, seed, flat_overlay), entry_policy))
 
     created: List[str] = []
     matched: List[str] = []
+    runtime_changes: Dict[str, List[Any]] = {"ok": [], "skipped": []}
     with _lock:
         data = _load()
         memberships = _requested_memberships(data, study_id, group, studies, batch_name)
-        for config_path, seed, eid in planned:
+        for config_path, seed, eid, entry_policy in planned:
             if eid in created or eid in matched:
                 continue
             experiment = data["experiments"].get(eid)
             if experiment is None:
                 experiment = _new_experiment(
-                    eid, config_path, seed, flat_overlay, row_extra_args, policy,
+                    eid, config_path, seed, flat_overlay, row_extra_args,
+                    entry_policy if entry_policy is not None else policy,
                     priority, max_retries, bool(force_on_retry), max_legs, notes=str(notes or ""),
                 )
                 data["experiments"][eid] = experiment
                 created.append(eid)
             else:
                 matched.append(eid)
+                # F4.3: a matched row whose per-row Runtime pick differs
+                # from what this experiment already has — apply it like
+                # set_runtime would, refusing (not raising) while in
+                # flight, same rule _set_field's own EDITABLE table gives
+                # /api/experiments/actions.
+                if entry_policy is not None and entry_policy != _experiment_policy(experiment):
+                    status = _status_in(data, experiment)
+                    if "runtime" in _EDITABLE.get(status, set()):
+                        experiment["runtime"] = entry_policy
+                        experiment.pop("pool", None)
+                        experiment["updated_at"] = _now_iso()
+                        runtime_changes["ok"].append(eid)
+                    else:
+                        _skip(runtime_changes, eid, f"can't change runtime while {status}")
             for m in memberships:
                 if _add_membership(experiment, m["study_id"], m["group"]):
                     experiment["updated_at"] = _now_iso()
         autopilot = any((data["studies"].get(m["study_id"]) or {}).get("autopilot", {}).get("enabled") for m in memberships)
         _save(data)
 
+    if runtime_changes["ok"]:
+        _dispatch_tick()  # a blocked experiment may be placeable under its new policy (mirrors _set_field)
+
     touched = created + matched
-    result: Dict[str, Any] = {"created": created, "matched": matched, "warnings": warnings, "then": None}
+    result: Dict[str, Any] = {
+        "created": created, "matched": matched, "warnings": warnings, "then": None,
+        "runtime_changes": runtime_changes,
+    }
     if then:
         result["then"] = apply_action(then, ids=touched, params={"rerun": bool(rerun)})
     elif autopilot:
@@ -1328,6 +1371,12 @@ def delete_experiment(
                 f"Experiment '{experiment_id}' is {current['status']} — cancel it first"
             )
         run_ids = [a["run_id"] for a in _attempts_for(data, experiment) if a.get("run_id")]
+        # Snapshotted before popping (XDASH_FIXES_PLAN.md F5's cascade):
+        # every Attempt's log dir, scheduler items and leftover tmux
+        # session are cleaned up below, once the store no longer
+        # references them, so nothing here can race a still-open handle
+        # on the record being deleted.
+        deleted_attempts = [data["attempts"][aid] for aid in experiment.get("attempt_ids", []) if aid in data["attempts"]]
         for aid in experiment.get("attempt_ids", []):
             data["attempts"].pop(aid, None)
         del data["experiments"][experiment_id]
@@ -1347,6 +1396,41 @@ def delete_experiment(
     if remove_ledger:
         for run_id in run_ids:
             ledger.delete_run(run_id)
+
+    # XDASH_FIXES_PLAN.md F5's cascade: an Attempt's own log dir, scheduler
+    # items and any tmux session still running for it must not outlive the
+    # Experiment that owned them — otherwise they're exactly the "orphan"
+    # categories backend/housekeeping.py's automatic sweep exists to find
+    # later, for no reason (this experiment is already gone; there's nothing
+    # left to keep them for).
+    logs_root = settings.attempt_logs_root
+    for attempt in deleted_attempts:
+        aid = attempt.get("attempt_id") or ""
+        if aid and "/" not in aid and aid not in (".", ".."):
+            log_dir = logs_root / aid
+            if log_dir.is_dir():
+                shutil.rmtree(log_dir, ignore_errors=True)
+        unit_ref = attempt.get("unit_ref") or {}
+        items_by_id = scheduler.items_by_id()
+        for key in ("train_item_id", "eval_item_id"):
+            item_id = unit_ref.get(key)
+            if not item_id:
+                continue
+            item = items_by_id.get(item_id)
+            session_name = (item or {}).get("session_name")
+            if session_name:
+                # terminals.kill() persists the pane (if not already
+                # snapshotted) before killing the session, then forgets the
+                # terminal record — exactly what a deleted experiment's
+                # leftover session needs, whether it's still alive or not.
+                try:
+                    terminals.kill(session_name)
+                except ValueError:
+                    pass  # already gone / not a managed session record
+            try:
+                scheduler.remove_item(item_id)
+            except Exception:
+                pass
     return True
 
 
@@ -1367,6 +1451,46 @@ def is_slot_busy(slot: str) -> bool:
     Phase 4 lands) needs, and the only place that ever reads IN_FLIGHT_STATUSES
     against a slot."""
     return any(a["status"] in IN_FLIGHT_STATUSES for a in attempts_for_slot(slot))
+
+
+# --------------------------------------------------------------------------- housekeeping (XDASH_FIXES_PLAN.md F5)
+def known_experiment_ids() -> set:
+    """Every Experiment id currently in the store — backend/housekeeping.py's
+    orphan check for `<repo>/.xdash/overlays/<id>.yaml`: an overlay file
+    whose id isn't here belongs to an experiment that was deleted (normally
+    delete_experiment() removes its own overlay file already; this only
+    catches leftovers from before that existed, or from state edited by
+    hand)."""
+    with _lock:
+        return set(_load()["experiments"].keys())
+
+
+def known_attempt_ids() -> set:
+    """Every Attempt id currently in the store (any status) — housekeeping's
+    orphan check for `data/<profile>/logs/<attempt_id>/` and
+    `outputs/remote/<host>/<attempt_id>/`: a directory whose attempt id
+    isn't here was left behind by a deleted experiment."""
+    with _lock:
+        return set(_load()["attempts"].keys())
+
+
+def scheduler_item_ids_for_non_terminal_attempts() -> set:
+    """Every scheduler item id (train/eval) referenced by an Attempt whose
+    own status isn't yet terminal — housekeeping's own safety rule for its
+    'scheduler history' sweep: never remove a scheduler item a still-live
+    attempt might still need to read (MachineRunner.poll()/_persist_logs()
+    both look items up by id via scheduler.items_by_id())."""
+    with _lock:
+        data = _load()
+        ids = set()
+        for attempt in data["attempts"].values():
+            if attempt.get("status") in TERMINAL_STATUSES:
+                continue
+            unit_ref = attempt.get("unit_ref") or {}
+            for key in ("train_item_id", "eval_item_id"):
+                if unit_ref.get(key):
+                    ids.add(unit_ref[key])
+    return ids
 
 
 # --------------------------------------------------------------------------- dispatch
@@ -1659,6 +1783,7 @@ def _claim_and_dispatch(experiment: Dict[str, Any], attempt: Dict[str, Any], run
 def _fail_or_retry(
     experiment_id: str, attempt_id: str, expected_status: str, detail: str, code: str,
     raw_status: Optional[str] = None, retry: bool = True, extra: Optional[Dict[str, Any]] = None,
+    stages: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
     """Marks *attempt_id* failed, then starts a fresh Attempt if the Experiment
     hasn't used up max_retries yet — a retry is a new Attempt record
@@ -1674,13 +1799,19 @@ def _fail_or_retry(
 
     *retry* False (a diagnosed failure a retry would only repeat, e.g.
     kaggle-secret-missing) fails without opening a new attempt. *extra*
-    carries additional block fields (e.g. `action_url`)."""
+    carries additional block fields (e.g. `action_url`). *stages*
+    (XDASH_FIXES_PLAN.md F0.5) is the runner's own poll()'s live `stages`
+    list, stored on the now-terminal attempt — None for every dispatch-time
+    failure (overlay-failed, sync-failed, …), which never had a stage to
+    report in the first place."""
     patch = {
         "status": "failed", "ended_at": _now_iso(),
         "blocked": {**(extra or {}), "code": code, "detail": detail[:300], "since": _now_iso()},
     }
     if raw_status is not None:
         patch["raw_status"] = raw_status
+    if stages:
+        patch["stages"] = stages
     claimed = _claim_attempt(attempt_id, expected_status, patch)
     if claimed is None:
         return  # already resolved by someone else (e.g. a concurrent cancel) — nothing to retry
@@ -2219,6 +2350,25 @@ def preflight(ids: Optional[List[str]] = None, specs: Optional[List[Dict[str, An
     }
 
 
+def experiment_id_for_scheduler_item(item_id: str) -> Optional[str]:
+    """The Experiment id owning *item_id* (a scheduler item's own id), or
+    None. Used by MachineRunner._session_label (backend/runners/machine.py,
+    XDASH_FIXES_PLAN.md F0.6/issue 9) to label an attempt-owned tmux session
+    by experiment id instead of its bare config name — the fix for three
+    attempts of one config rendering as three identical "running:
+    <config>" rows on the Lab tile. Same lookup as on_scheduler_item_finished
+    just below, kept separate since that one also needs the attempt's
+    current status, this one just its owner."""
+    with _lock:
+        data = _load()
+        attempt = next(
+            (a for a in data["attempts"].values()
+             if item_id in ((a.get("unit_ref") or {}).get("eval_item_id"), (a.get("unit_ref") or {}).get("train_item_id"))),
+            None,
+        )
+    return attempt["experiment_id"] if attempt else None
+
+
 # --------------------------------------------------------------------------- completion hooks
 def _spawn(fn: Callable[..., None], *args: Any) -> None:
     """Runs *fn* off the calling thread. A module attribute so the test
@@ -2357,10 +2507,18 @@ def _resolve_attempt(
     attempt: Dict[str, Any], succeeded: bool, raw_status: str,
     classification: Optional[Dict[str, Any]] = None,
     failure: Optional[Dict[str, Any]] = None,
+    stages: Optional[List[Dict[str, Any]]] = None,
 ) -> None:
+    """*stages* (XDASH_FIXES_PLAN.md F0.5): the runner's own poll()'s live
+    `stages` list, stored onto the terminal attempt here — the one place
+    every resolution path (done, chain-stopped, deleted-experiment, failed)
+    goes through. Before this, a terminal attempt kept whatever `stages` its
+    dispatch() patch set at launch time (pending/pending) forever; history
+    and the Experiment page never learned that, say, only `eval` failed."""
     with _lock:
         data = _load()
         experiment = data["experiments"].get(attempt["experiment_id"])
+    stages_patch = {"stages": stages} if stages else {}
 
     # Multi_runner_XDash.md Phase 5 — a self-limited leg exits 0 exactly like
     # a genuinely finished one (both are "succeeded" from the runner's own
@@ -2377,6 +2535,7 @@ def _resolve_attempt(
                 "detail": _chain_stop_reason(attempt, experiment, classification),
                 "since": _now_iso(),
             },
+            **stages_patch,
         })
         notif.send_all(f"Experiment '{experiment['experiment_id']}' resume chain stopped without finishing.")
         return
@@ -2388,6 +2547,7 @@ def _resolve_attempt(
         )
         claimed = _claim_attempt(attempt["attempt_id"], "running", {
             "status": "done", "ended_at": _now_iso(), "raw_status": raw_status, "run_id": run_id,
+            **stages_patch,
         })
         if claimed is not None and experiment is not None:
             notif.send_all(f"Experiment '{experiment['experiment_id']}' is now done ({raw_status}).")
@@ -2397,6 +2557,7 @@ def _resolve_attempt(
         # Experiment was deleted out from under an in-flight attempt — nothing to retry into.
         _claim_attempt(attempt["attempt_id"], "running", {
             "status": "failed", "ended_at": _now_iso(), "raw_status": raw_status,
+            **stages_patch,
         })
         return
     if failure:
@@ -2408,6 +2569,7 @@ def _resolve_attempt(
             failure.get("detail") or failure["code"], failure["code"], raw_status=raw_status,
             retry=bool(failure.get("retry", True)),
             extra={k: v for k, v in failure.items() if k in ("action_url", "action")},
+            stages=stages,
         )
         link = f" Fix: {failure['action_url']}" if failure.get("action_url") else ""
         notif.send_all(f"Experiment '{experiment['experiment_id']}' failed: {failure['code']} — {failure.get('detail', '')}{link}")
@@ -2415,6 +2577,7 @@ def _resolve_attempt(
     _fail_or_retry(
         experiment["experiment_id"], attempt["attempt_id"], "running",
         f"unit ended: {raw_status}", "attempt-failed", raw_status=raw_status,
+        stages=stages,
     )
     notif.send_all(f"Experiment '{experiment['experiment_id']}' attempt ended: {raw_status}.")
 
@@ -2560,7 +2723,7 @@ def _poll_and_resolve(attempt: Dict[str, Any]) -> None:
                 failure = runner.diagnose(attempt, live, _attempt_log_texts(attempt_id))
             except Exception:
                 failure = None
-        _resolve_attempt(attempt, succeeded, live.get("raw_status"), classification, failure)
+        _resolve_attempt(attempt, succeeded, live.get("raw_status"), classification, failure, live.get("stages"))
     finally:
         _end_resolving(attempt_id)
 

@@ -1,36 +1,168 @@
 {
   "experiments": {
-    "gmkunet_t_clinicdb-s42": {
-      "experiment_id": "gmkunet_t_clinicdb-s42",
-      "config_path": "experiment/gmkunet/gmkunet_t_clinicdb.yaml",
+    "mkunet_t_clinicdb-s42": {
+      "experiment_id": "mkunet_t_clinicdb-s42",
+      "name": "mkunet_t_clinicdb-s42",
+      "config_path": "experiment/mkunet/mkunet_t_clinicdb.yaml",
       "seed": 42,
-      "batch_name": null,
-      "pool": "kaggle_only",
-      "extra_args": "--seed 42",
+      "overlay": {},
+      "extra_args": {
+        "train": "",
+        "eval": ""
+      },
+      "studies": [],
+      "runtime": {
+        "mode": "pinned",
+        "slot": "kaggle:syfur"
+      },
+      "priority": 0,
       "max_retries": 1,
-      "force_on_retry": false,
+      "force_on_retry": true,
       "max_legs": 6,
-      "created_at": "2026-09-24T10:43:12+00:00",
+      "notes": "",
+      "created_at": "2026-09-27T17:11:39+00:00",
+      "updated_at": "2026-09-28T06:41:41+00:00",
       "attempt_ids": [
-        "atmpt_0ba9c0780b",
-        "atmpt_3589a546b3"
+        "atmpt_1265cdba97",
+        "atmpt_d9dfbeda18",
+        "atmpt_be8328be81"
       ],
-      "current_attempt_id": "atmpt_3589a546b3"
+      "current_attempt_id": "atmpt_be8328be81"
     }
   },
   "attempts": {
-    "atmpt_0ba9c0780b": {
-      "attempt_id": "atmpt_0ba9c0780b",
-      "experiment_id": "gmkunet_t_clinicdb-s42",
+    "atmpt_1265cdba97": {
+      "attempt_id": "atmpt_1265cdba97",
+      "experiment_id": "mkunet_t_clinicdb-s42",
       "attempt_index": 1,
+      "queued_by": "user",
+      "queued_at": "2026-09-27T17:11:39+00:00",
       "leg_index": 1,
       "resume_of": null,
       "resumed_by": null,
       "epochs_completed": null,
       "checkpoint_files": null,
-      "slot": "kaggle:tanvir",
+      "slot": "local",
       "status": "failed",
-      "raw_status": "error",
+      "raw_status": "skipped",
+      "stages": [
+        {
+          "name": "train",
+          "status": "pending"
+        },
+        {
+          "name": "eval",
+          "status": "pending"
+        }
+      ],
+      "unit_ref": {
+        "train_item_id": "5c0fa80bfc",
+        "eval_item_id": "e83fd60216"
+      },
+      "started_at": "2026-09-27T17:11:39+00:00",
+      "ended_at": "2026-09-27T17:11:49+00:00",
+      "blocked": {
+        "code": "attempt-failed",
+        "detail": "unit ended: skipped",
+        "since": "2026-09-27T17:11:49+00:00"
+      },
+      "run_id": null,
+      "code": {
+        "commit": "25c9339e4f16ae776ecf7d441c9454a89a92106b",
+        "dirty": false,
+        "pushed": false
+      },
+      "run": {
+        "config": "configs/experiment/mkunet/mkunet_t_clinicdb.yaml",
+        "config_hash": "f76c81ecde7dedc6db5f395a2749414828a2ecbb",
+        "experiment_name": "mkunet_t_clinicdb",
+        "run_dir": "outputs/experiments/mkunet_t_clinicdb/f76c81e-s42",
+        "run_ids": [
+          "R-f76c81e-s42-f-"
+        ]
+      },
+      "log_ref": "data/dissert/logs/atmpt_1265cdba97",
+      "collect": {
+        "state": "empty",
+        "at": "2026-09-27T17:11:49+00:00"
+      },
+      "flags": [],
+      "warnings": [],
+      "updated_at": "2026-09-27T17:11:49+00:00"
+    },
+    "atmpt_d9dfbeda18": {
+      "attempt_id": "atmpt_d9dfbeda18",
+      "experiment_id": "mkunet_t_clinicdb-s42",
+      "attempt_index": 2,
+      "queued_by": "retry",
+      "queued_at": "2026-09-27T17:11:49+00:00",
+      "leg_index": 1,
+      "resume_of": null,
+      "resumed_by": null,
+      "epochs_completed": null,
+      "checkpoint_files": null,
+      "slot": "local",
+      "status": "failed",
+      "raw_status": "skipped",
+      "stages": [
+        {
+          "name": "train",
+          "status": "pending"
+        },
+        {
+          "name": "eval",
+          "status": "pending"
+        }
+      ],
+      "unit_ref": {
+        "train_item_id": "0f2a41dbc0",
+        "eval_item_id": "0acb638b6d"
+      },
+      "started_at": "2026-09-27T17:11:49+00:00",
+      "ended_at": "2026-09-27T17:11:56+00:00",
+      "blocked": {
+        "code": "attempt-failed",
+        "detail": "unit ended: skipped",
+        "since": "2026-09-27T17:11:56+00:00"
+      },
+      "run_id": null,
+      "code": {
+        "commit": "25c9339e4f16ae776ecf7d441c9454a89a92106b",
+        "dirty": false,
+        "pushed": false
+      },
+      "run": {
+        "config": "configs/experiment/mkunet/mkunet_t_clinicdb.yaml",
+        "config_hash": "f76c81ecde7dedc6db5f395a2749414828a2ecbb",
+        "experiment_name": "mkunet_t_clinicdb",
+        "run_dir": "outputs/experiments/mkunet_t_clinicdb/f76c81e-s42",
+        "run_ids": [
+          "R-f76c81e-s42-f-"
+        ]
+      },
+      "log_ref": "data/dissert/logs/atmpt_d9dfbeda18",
+      "collect": {
+        "state": "empty",
+        "at": "2026-09-27T17:11:56+00:00"
+      },
+      "flags": [],
+      "warnings": [],
+      "updated_at": "2026-09-27T17:11:56+00:00"
+    },
+    "atmpt_be8328be81": {
+      "attempt_id": "atmpt_be8328be81",
+      "experiment_id": "mkunet_t_clinicdb-s42",
+      "attempt_index": 3,
+      "queued_by": "user",
+      "queued_at": "2026-09-28T06:41:45+00:00",
+      "leg_index": 1,
+      "resume_of": null,
+      "resumed_by": null,
+      "epochs_completed": null,
+      "checkpoint_files": null,
+      "slot": "kaggle:syfur",
+      "status": "running",
+      "raw_status": null,
       "stages": [
         {
           "name": "run",
@@ -38,45 +170,81 @@
         }
       ],
       "unit_ref": {
-        "account": "tanvir",
+        "account": "syfur",
         "snapshot_slug": null,
-        "kernel_slug": "xdash-dissert-slot-tanvir",
-        "results_dir": "outputs/kaggle/gmkunet_t_clinicdb-s42"
+        "kernel_slug": "xdash-dissert-slot-syfur",
+        "results_dir": "outputs/kaggle/mkunet_t_clinicdb-s42",
+        "code_commit": "a01dedd11806bbeb471420e96fece9ae4dfc0057"
       },
-      "started_at": "2026-09-24T10:43:12+00:00",
-      "ended_at": "2026-09-24T10:58:09+00:00",
-      "blocked": {
-        "code": "attempt-failed",
-        "detail": "unit ended: error",
-        "since": "2026-09-24T10:58:09+00:00"
-      },
+      "started_at": "2026-09-28T06:41:45+00:00",
+      "ended_at": null,
+      "blocked": null,
       "run_id": null,
-      "updated_at": "2026-09-24T10:58:09+00:00"
-    },
-    "atmpt_3589a546b3": {
-      "attempt_id": "atmpt_3589a546b3",
-      "experiment_id": "gmkunet_t_clinicdb-s42",
-      "attempt_index": 2,
-      "leg_index": 1,
-      "resume_of": null,
-      "resumed_by": null,
-      "epochs_completed": null,
-      "checkpoint_files": null,
-      "slot": "kaggle:emon",
-      "status": "failed",
-      "raw_status": null,
-      "stages": [],
-      "unit_ref": null,
-      "started_at": "2026-09-24T10:58:09+00:00",
-      "ended_at": "2026-09-24T10:58:10+00:00",
-      "blocked": {
-        "code": "dispatch-failed",
-        "detail": "Push failed for experiment 'gmkunet_t_clinicdb-s42': 401 Client Error: Unauthorized for url: https://www.kaggle.com/api/v1/kernels/push",
-        "since": "2026-09-24T10:58:10+00:00"
+      "code": {
+        "commit": "a01dedd11806bbeb471420e96fece9ae4dfc0057",
+        "dirty": false,
+        "pushed": true
       },
-      "run_id": null,
-      "updated_at": "2026-09-24T10:58:10+00:00"
+      "run": {
+        "config": "configs/experiment/mkunet/mkunet_t_clinicdb.yaml",
+        "config_hash": "f76c81ecde7dedc6db5f395a2749414828a2ecbb",
+        "experiment_name": "mkunet_t_clinicdb",
+        "run_dir": "outputs/experiments/mkunet_t_clinicdb/f76c81e-s42",
+        "run_ids": [
+          "R-f76c81e-s42-f-"
+        ]
+      },
+      "log_ref": "data/dissert/logs/atmpt_be8328be81",
+      "collect": {
+        "state": "pending",
+        "tries": 3,
+        "error": "KaggleOpsError: kaggle kernels output syfur007/xdash-dissert-slot-syfur -p /tmp/kaggle_download_up89btd1 timed out after 900s",
+        "at": "2026-09-28T07:35:23+00:00"
+      },
+      "flags": [],
+      "warnings": [],
+      "updated_at": "2026-09-28T07:35:23+00:00"
     }
   },
-  "batches": {}
+  "studies": {
+    "st_18e865": {
+      "study_id": "st_18e865",
+      "name": "diss-test",
+      "question": "",
+      "description": "Imported from the retired batch runner's batches.json. Its 1 row(s) were assignments, not experiments, so it has no members.",
+      "tags": [],
+      "primary_metric": null,
+      "baseline": null,
+      "defaults": {
+        "seeds": [],
+        "overlay": {},
+        "runtime": {
+          "mode": "auto",
+          "allow": [
+            "kaggle"
+          ],
+          "requires": {
+            "min_vram_gb": null
+          }
+        }
+      },
+      "autopilot": {
+        "enabled": false,
+        "max_parallel": 2
+      },
+      "priority": 0,
+      "archived": true,
+      "created_at": "2026-09-15T23:22:45",
+      "updated_at": "2026-09-15T23:22:45",
+      "migrated_from": {
+        "batch": "diss-test",
+        "pool": "kaggle_only",
+        "max_retries": 1,
+        "force_on_retry": false,
+        "status": "done",
+        "row_count": 1
+      }
+    }
+  },
+  "schema_version": 3
 }

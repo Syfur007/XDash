@@ -443,3 +443,408 @@ def test_ledger_reader_finds_hash_scoped_manifests(settings):
     make_run_dir(HOST, "outputs/experiments/old_exp-s7", "R-old-s7")  # the pre-52477d1 flat layout
     ids = {r["run_id"] for r in ledger.list_runs()}
     assert ids == {"R-abc1234-s42-f-", "R-old-s7"}
+
+
+# ============================================================================
+# XDASH_FIXES_PLAN.md F0 — Truthful dispatch
+# ============================================================================
+
+# ----------------------------------------------------------------- F0.4: MachineRunner.diagnose()
+# The two real crash logs issue 11 turned up, copied verbatim (never read
+# from the real data/ dir — see XDASH_FIXES_PLAN.md's own instruction).
+TIMM_LAYERS_LOG = """\
+syfur@blackbox:~/Workspace/XDash$ cd /home/syfur/Workspace/dissert
+syfur@blackbox:~/Workspace/dissert$ conda activate thesis
+Traceback (most recent call last):
+  File "train.py", line 9, in <module>
+    from dissert.cli.train import main
+  File "/home/syfur/Workspace/dissert/src/dissert/cli/train.py", line 38, in <module>
+    from dissert.models import get_model
+  File "/home/syfur/Workspace/dissert/src/dissert/models/__init__.py", line 1, in <module>
+    from .blocks import ConvBlock, ResBlock, DoubleConv, EncoderBlock, DecoderBlock, AttentionBlock
+  File "/home/syfur/Workspace/dissert/src/dissert/models/blocks.py", line 6, in <module>
+    from timm.layers import trunc_normal_tf_
+ModuleNotFoundError: No module named 'timm.layers'
+(thesis) syfur@blackbox:~/Workspace/dissert$
+"""
+
+NO_DISSERT_MODULE_LOG = """\
+$ cd /home/syf/dissert
+$ conda activate emcadenv
+(emcadenv) $ Traceback (most recent call last):
+  File "train.py", line 9, in <module>
+    from dissert.cli.train import main
+ModuleNotFoundError: No module named 'dissert'
+(emcadenv) $
+"""
+
+
+def test_classify_failure_marks_both_real_crashes_env_broken_no_retry():
+    from backend.runners.machine import _classify_failure
+    assert _classify_failure(TIMM_LAYERS_LOG) == ("env-broken", False)
+    assert _classify_failure(NO_DISSERT_MODULE_LOG) == ("env-broken", False)
+
+
+def test_classify_failure_oom_and_data_missing_and_generic():
+    from backend.runners.machine import _classify_failure
+    assert _classify_failure("RuntimeError: CUDA out of memory. Tried to allocate 2.00 GiB") == ("oom", False)
+    assert _classify_failure("FileNotFoundError: [Errno 2] No such file or directory: 'data/demo/x.png'") == ("data-missing", False)
+    assert _classify_failure("RuntimeError: something unrelated blew up") == ("attempt-failed", True)
+
+
+def test_classify_failure_env_broken_only_before_any_epoch():
+    """A ModuleNotFoundError *after* training got underway is a mid-run crash
+    (retryable), not a broken environment — the plan's own "before any
+    epoch" qualifier."""
+    from backend.runners.machine import _classify_failure
+    text = "epoch 1: loss 0.4\nepoch 2: loss 0.3\nModuleNotFoundError: No module named 'plotly'\n"
+    assert _classify_failure(text) == ("attempt-failed", True)
+
+
+def test_machine_diagnose_reports_stage_exit_code_and_last_exception_line():
+    from backend.runners import machine
+    runner = machine.MachineRunner(hosts.get_host("local"))
+    data = scheduler._load()
+    data["items"] += [
+        {"id": "trainitem", "status": "failed", "return_code": 1, "session_name": "sess_train"},
+        {"id": "evalitem", "status": "skipped", "return_code": None, "session_name": "sess_eval"},
+    ]
+    scheduler._save(data)
+    attempt = {"attempt_id": "atmpt_diag", "unit_ref": {"train_item_id": "trainitem", "eval_item_id": "evalitem"}}
+    live = {"stages": [{"name": "train", "status": "failed"}, {"name": "eval", "status": "skipped"}]}
+    failure = runner.diagnose(attempt, live, [TIMM_LAYERS_LOG])
+    assert failure["code"] == "env-broken" and failure["retry"] is False
+    assert failure["detail"] == "train exited 1: ModuleNotFoundError: No module named 'timm.layers'"
+    assert failure["action"].startswith("Fix 'train' on This machine:")  # hosts.py's local default label
+
+
+def test_machine_diagnose_returns_none_for_empty_logs():
+    from backend.runners import machine
+    runner = machine.MachineRunner(hosts.get_host("local"))
+    attempt = {"attempt_id": "atmpt_x", "unit_ref": {}}
+    assert runner.diagnose(attempt, {"stages": []}, []) is None
+    assert runner.diagnose(attempt, {"stages": []}, [""]) is None
+
+
+# ----------------------------------------------------------------- F0.4 + F0.5, end to end: no
+# retry on env-broken, and the final stages get stored on the failed attempt.
+def test_env_broken_failure_does_not_retry_and_stores_final_stages(use_runners, monkeypatch):
+    from backend import terminals
+    from backend.runners import machine
+    runner = machine.MachineRunner(hosts.get_host("local"))
+    use_runners(runner)
+    a = _machine_attempt(runner, eval_status="skipped", train_status="failed")
+    # trainitem's return_code isn't set by _machine_attempt — add it here so
+    # the diagnosis' "exited <code>" detail has a real number to quote.
+    data = scheduler._load()
+    for item in data["items"]:
+        if item["id"] == "trainitem":
+            item["return_code"] = 1
+    scheduler._save(data)
+
+    def fake_get_terminal(name, include_log=False):
+        return {"log_text": TIMM_LAYERS_LOG if name == "sess_train" else ""}
+
+    monkeypatch.setattr(terminals, "get_terminal", fake_get_terminal)
+    experiments._poll_in_flight_attempts()
+
+    done = _stored_attempt(a["attempt_id"])
+    assert done["status"] == "failed"
+    assert done["blocked"]["code"] == "env-broken"
+    assert "ModuleNotFoundError: No module named 'timm.layers'" in done["blocked"]["detail"]
+    assert done["blocked"]["action"].startswith("Fix 'train' on This machine:")
+    # F0.5 — the terminal attempt keeps the real final stages, not the
+    # pending/pending pair dispatch() wrote at launch time.
+    assert done["stages"] == [{"name": "train", "status": "failed"}, {"name": "eval", "status": "skipped"}]
+    # F0.4 — env-broken never retries: no second attempt was opened even
+    # though the experiment's max_retries (1) would otherwise allow one.
+    exp = experiments.get_experiment(a["experiment_id"])
+    assert len(exp["attempt_ids"]) == 1
+
+
+def test_resolve_attempt_stores_final_stages_on_success_too(use_runners):
+    """_resolve_attempt's *stages* patch (F0.5) isn't machine-specific — every
+    runner kind goes through the same function."""
+    runner = FakeRunner()
+    use_runners(runner)
+    exp = _create()
+    a = _attempt(exp["experiment_id"])
+    assert a["stages"] == [{"name": "run", "status": "running"}]  # FakeRunner.dispatch()'s own patch
+    runner.live = {"raw_status": "complete", "stages": [{"name": "run", "status": "done"}], "finished": True, "succeeded": True}
+    experiments._poll_in_flight_attempts()
+    done = _stored_attempt(a["attempt_id"])
+    assert done["stages"] == [{"name": "run", "status": "done"}]
+
+
+# ----------------------------------------------------------------- F0.6 (issue 9): session labels
+def test_attempt_owned_session_is_labelled_by_experiment_id():
+    from backend.runners import machine
+    runner = machine.MachineRunner(hosts.get_host("local"))
+    a = _machine_attempt(runner)  # wires scheduler items "trainitem"/"evalitem", session "sess_train"/"sess_eval"
+    term = {"session_name": "sess_train", "managed": True, "experiment_name": "demo_exp"}
+    assert machine._session_label(term) == a["experiment_id"]
+
+
+def test_ad_hoc_session_keeps_the_config_name_with_a_marker():
+    from backend.runners import machine
+    term = {"session_name": "sess_never_scheduled", "managed": True, "experiment_name": "demo_exp"}
+    assert machine._session_label(term) == "demo_exp (ad hoc)"
+
+
+def test_unmanaged_session_label_is_untouched():
+    from backend.runners import machine
+    term = {"session_name": "someones-manual-tmux", "managed": False}
+    assert machine._session_label(term) == "someones-manual-tmux"
+
+
+# ----------------------------------------------------------------- F0.6: OCCUPYING_STATUSES
+def test_running_labels_ignore_interrupted_and_lost_units():
+    from backend import runtimes
+    from backend.runners.base import RunUnit
+
+    class _StubRunner:
+        id = "local"
+        kind = "local"
+
+        def list_units(self):
+            return [
+                RunUnit(unit_id="a", runner_id="local", label="running-one", status="running", raw_status="running"),
+                RunUnit(unit_id="b", runner_id="local", label="ghost", status="interrupted", raw_status="lost"),
+                RunUnit(unit_id="c", runner_id="local", label="pending-one", status="pending", raw_status="pending"),
+            ]
+
+    assert runtimes._running_labels(_StubRunner()) == ["running-one", "pending-one"]
+
+
+# ----------------------------------------------------------------- F0.6: the lost-record reconcile
+def _ghost_terminal_record(session_name="sess_ghost"):
+    return {
+        "session_name": session_name, "host_id": "local", "config_path": "experiment/demo.yaml",
+        "cli_config": None, "full_command": None, "mode": "train", "extra_args": "",
+        "experiment_name": "demo_exp", "command": "python train.py", "created_at": "2026-09-15T00:00:00",
+        "restart_count": 0, "return_code": None,
+    }
+
+
+def test_a_dead_record_reconciles_to_lost_once_and_stays_lost():
+    from backend import terminals
+    terminals._save([_ghost_terminal_record()])
+    first = terminals.get_terminal("sess_ghost")
+    assert first["status"] == "lost" and first["restart_available"] is True
+    stored = terminals._load()[0]
+    assert stored.get("status") == "lost" and stored.get("lost_at")
+    lost_at = stored["lost_at"]
+    # Never re-probed: a second look doesn't touch lost_at or re-derive.
+    again = terminals.get_terminal("sess_ghost")
+    assert again["status"] == "lost"
+    assert terminals._load()[0]["lost_at"] == lost_at
+
+
+def test_restart_clears_a_lost_reconciliation(monkeypatch):
+    from backend import terminals
+    terminals._save([_ghost_terminal_record()])
+    terminals.get_terminal("sess_ghost")
+    assert terminals._load()[0].get("status") == "lost"
+    # _start_session is the one place restart() would touch a real tmux —
+    # stubbed so this test exercises only the record bookkeeping around it.
+    # The report lookup is stubbed too: restart()'s own trailing
+    # _status_for(record) call re-derives a status immediately (still no
+    # live tmux session in this fake world), and without a "found" report
+    # that re-derivation would call _reconcile_lost() right back — exactly
+    # correct behaviour for a restart that never actually started anything,
+    # but it would defeat this test's ability to see the cleared fields.
+    monkeypatch.setattr(terminals, "_start_session", lambda *a, **k: "python train.py")
+    monkeypatch.setattr(terminals.reports, "find_latest_report_for_experiment", lambda name: {"experiment": name, "timestamp": "z"})
+    terminals.restart("sess_ghost")
+    stored = terminals._load()[0]
+    assert "status" not in stored and "lost_at" not in stored
+    assert stored["restart_count"] == 1
+
+
+# ----------------------------------------------------------------- F0.3: runtime health/attention
+def test_ssh_runtime_needs_attention_when_no_repo_root_configured():
+    from backend import runtimes
+    from backend.runners import machine
+    hosts.upsert_host({"id": "bare", "kind": "ssh", "label": "Bare box", "max_concurrent": 1, "ssh": {"host": "bare.example"}})
+    runner = machine.MachineRunner(hosts.get_host("bare"))
+    view = runtimes.runtime_view(runner)
+    assert view["state"] == "attention"
+    assert view["health"]["error"] == "No repo_root configured for this profile"
+
+
+def test_ssh_runtime_needs_attention_when_unreachable(ssh_box):
+    from backend import runtimes
+    runner, fake, _remote = ssh_box
+    fake.fail = "ssh: connect to host box.example: Connection refused"
+    view = runtimes.runtime_view(runner)
+    assert view["state"] == "attention"
+    assert view["health"]["error"] == "Host is not reachable"
+
+
+# ----------------------------------------------------------------- F0.7: scheduler cap
+def test_add_item_cap_counts_only_non_terminal_items(settings, monkeypatch):
+    monkeypatch.setattr(settings, "scheduler_max_queue_size", 2)
+    data = scheduler._load()
+    data["items"] = [
+        {"id": "old1", "status": "completed", "config_path": "experiment/demo.yaml", "mode": "train",
+         "extra_args": "", "host_id": "local", "session_name": None, "depends_on": None},
+        {"id": "old2", "status": "failed", "config_path": "experiment/demo.yaml", "mode": "train",
+         "extra_args": "", "host_id": "local", "session_name": None, "depends_on": None},
+    ]
+    scheduler._save(data)
+    # Both existing items are terminal — the old cap (every item ever
+    # created, finished or not) would have refused this at max size 2; the
+    # fix counts only non-terminal items, so a third item is still allowed.
+    created = scheduler.add_item("experiment/demo.yaml", "train", "")
+    assert len(created) == 1
+    assert len(scheduler._load()["items"]) == 3
+
+
+# ----------------------------------------------------------------- F1.3: PATCH /api/hosts merge
+def test_patch_host_merges_and_preserves_accelerator():
+    hosts.upsert_host({
+        "id": "gpubox", "kind": "ssh", "label": "GPU box", "max_concurrent": 2,
+        "ssh": {"host": "gpubox.example", "user": "syf"},
+        "accelerator": {"name": "Tesla T4", "vram_gb": 15.0, "source": "nvidia-smi"},
+    })
+    host = hosts.patch_host("gpubox", {"max_concurrent": 4})
+    assert host.max_concurrent == 4
+    assert host.accelerator == {"name": "Tesla T4", "vram_gb": 15.0, "source": "nvidia-smi"}
+    assert host.ssh["host"] == "gpubox.example"  # an untouched nested key survives too
+
+
+def test_patch_host_deep_merges_nested_repos_without_touching_other_profiles():
+    hosts.upsert_host({
+        "id": "multi", "kind": "ssh", "ssh": {"host": "x"},
+        "repos": {"other-profile": {"repo_root": "/keep/me"}},
+    })
+    host = hosts.patch_host("multi", {"repos": {"fake": {"repo_root": "/new/root"}}})
+    as_dict = host.as_dict()
+    assert as_dict["repos"]["other-profile"]["repo_root"] == "/keep/me"
+    assert as_dict["repos"]["fake"]["repo_root"] == "/new/root"
+
+
+def test_patch_host_unknown_id_raises():
+    with pytest.raises(hosts.HostError):
+        hosts.patch_host("does-not-exist", {"max_concurrent": 2})
+
+
+def test_patch_host_synthesizes_local_record_first():
+    host = hosts.patch_host("local", {"max_concurrent": 3})
+    assert host.id == "local"
+    assert host.max_concurrent == 3
+
+
+# ----------------------------------------------------------------- F1.4: D5 — remote hosts stop
+# inheriting this machine's env/python
+def test_remote_host_without_its_own_env_or_python_does_not_inherit_local(settings, monkeypatch):
+    monkeypatch.setattr(settings, "env_activate_cmd", "conda activate thesis")
+    host = hosts.upsert_host({"id": "plain-ssh", "kind": "ssh", "ssh": {"host": "x"}})
+    assert host.env_activate_cmd == ""          # not "conda activate thesis"
+    assert host.python_executable == "python"   # not settings.python_executable's value
+    # The local host is unaffected — it still reads through to the profile.
+    assert hosts.get_host("local").env_activate_cmd == "conda activate thesis"
+
+
+def test_remote_host_with_its_own_env_and_python_uses_them():
+    host = hosts.upsert_host({
+        "id": "own-env", "kind": "ssh", "ssh": {"host": "x"},
+        "env_activate_cmd": "conda activate dissert-py310",
+        "python_executable": "/envs/dissert-py310/bin/python",
+    })
+    assert host.env_activate_cmd == "conda activate dissert-py310"
+    assert host.python_executable == "/envs/dissert-py310/bin/python"
+
+
+# ----------------------------------------------------------------- F1.5: "Verify environment" (D6)
+def test_check_command_renders_the_default_template(settings):
+    from backend import envcheck
+    assert envcheck.check_command("/envs/x/bin/python") == "/envs/x/bin/python train.py --help"
+
+
+def test_verify_environment_runs_cd_then_env_activate_then_check_over_the_hosts_transport(ssh_box):
+    from backend import envcheck
+    runner, fake, _remote = ssh_box
+    host = hosts.patch_host("box", {"env_activate_cmd": "conda activate dissert-py310"})
+    result = envcheck.verify_environment(host, force=True)
+    assert result["ok"] is True
+    argv = fake.run_calls[-1]
+    assert argv[:2] == ["bash", "-ic"]
+    shell_cmd = argv[2]
+    assert "cd /remote/repo" in shell_cmd
+    assert "conda activate dissert-py310" in shell_cmd
+    assert "train.py --help" in shell_cmd
+    assert shell_cmd.index("cd ") < shell_cmd.index("conda activate") < shell_cmd.index("train.py")
+
+
+def test_verify_environment_reports_the_last_exception_line_on_failure(ssh_box):
+    from backend import envcheck
+    runner, fake, _remote = ssh_box
+    fake.run_returncode = 1
+    fake.run_stderr = "Traceback (most recent call last):\nModuleNotFoundError: No module named 'dissert'\n"
+    result = envcheck.verify_environment(runner.host, force=True)
+    assert result["ok"] is False
+    assert result["detail"] == "ModuleNotFoundError: No module named 'dissert'"
+
+
+def test_verify_environment_is_cached_until_a_relevant_field_changes(ssh_box):
+    from backend import envcheck
+    runner, fake, _remote = ssh_box
+    envcheck.verify_environment(runner.host)
+    envcheck.verify_environment(runner.host)
+    assert len(fake.run_calls) == 1  # second call was a cache hit
+
+    # env_activate_cmd is part of the cache key — busts it even inside the TTL.
+    host2 = hosts.patch_host("box", {"env_activate_cmd": "conda activate other"})
+    envcheck.verify_environment(host2)
+    assert len(fake.run_calls) == 2
+
+    envcheck.verify_environment(host2, force=True)
+    assert len(fake.run_calls) == 3  # force always re-runs, cache hit or not
+
+
+def test_gate_for_dispatch_does_not_block_on_a_cold_cache(ssh_box):
+    # XDASH_DISABLE_BACKGROUND=1 (the test harness) skips the background
+    # prime entirely, so a never-checked host is "unknown", not "broken" —
+    # the documented trade-off in backend/envcheck.py: can_accept() must
+    # never stall a dispatch tick on the very first check.
+    runner, fake, _remote = ssh_box
+    fake.run_returncode = 1  # would fail if ever actually run
+    block = runner.can_accept({"config_path": "experiment/demo.yaml", "seed": 1}, 1.0)
+    assert block is None
+    assert fake.run_calls == []  # nothing ran synchronously
+
+
+def test_gate_for_dispatch_blocks_on_a_cached_failure(ssh_box):
+    from backend import envcheck
+    runner, fake, _remote = ssh_box
+    fake.run_returncode = 1
+    fake.run_stderr = "ImportError: No module named 'timm.layers'"
+    envcheck.verify_environment(runner.host, force=True)  # primes the cache
+    block = runner.can_accept({"config_path": "experiment/demo.yaml", "seed": 1}, 1.0)
+    assert block == {"code": "env-broken", "detail": "ImportError: No module named 'timm.layers'"}
+
+
+def test_capacity_reports_env_check_failed_from_cache_only_never_triggers_one(ssh_box):
+    from backend import envcheck
+    runner, fake, _remote = ssh_box
+    cap = runner.capacity()
+    assert cap.extra["env_check_failed"] is False  # nothing cached yet -> not known-broken
+    assert fake.run_calls == []
+    fake.run_returncode = 1
+    fake.run_stderr = "boom"
+    envcheck.verify_environment(runner.host, force=True)
+    cap = runner.capacity()
+    assert cap.extra["env_check_failed"] is True
+    assert cap.extra["env_check_detail"] == "boom"
+
+
+def test_runtime_health_reports_env_check_failed(ssh_box):
+    from backend import envcheck, runtimes
+    runner, fake, _remote = ssh_box
+    fake.run_returncode = 1
+    fake.run_stderr = "ModuleNotFoundError: No module named 'dissert'"
+    envcheck.verify_environment(runner.host, force=True)
+    view = runtimes.runtime_view(runner)
+    assert view["state"] == "attention"
+    assert "ModuleNotFoundError: No module named 'dissert'" in view["health"]["error"]

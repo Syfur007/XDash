@@ -1,0 +1,5 @@
+{
+  "overrides": {
+    "kaggle": "/home/syfur/miniconda3/envs/xdash/bin/kaggle"
+  }
+}

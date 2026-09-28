@@ -28,6 +28,7 @@ from backend import hosts
 from backend import reports
 from backend import history
 from backend import monitors
+from backend import host_tensorboard as host_tb
 from backend import scheduler
 from backend import tensorboard_manager as tb
 from backend import tmux_runner as tmux
@@ -45,7 +46,9 @@ from backend.runners.base import ACTIVE_STATUSES
 from backend import datasets as dataset_registry
 from backend import profile_ops
 from backend import runtimes as runtimes_mod
+from backend import tools as tools_mod
 from backend import experiments
+from backend import housekeeping
 from backend import studies
 from backend import paths
 from backend import templates
@@ -55,11 +58,32 @@ APP_DIR = Path(__file__).resolve().parent
 
 app = Flask(__name__, static_folder=str(APP_DIR / "static"), static_url_path="")
 
+# XDASH_FIXES_PLAN.md D2/F2 — one-time, idempotent move of
+# kaggle_executable/colab_executable out of every repos/<profile>.yaml
+# (comment-preserving) and out of any stale in-memory override those keys
+# seeded, then a fresh resolve + one log line per missing/too-old required
+# dependency. Always runs (not background-loop-gated): it's a fast, local,
+# synchronous file/subprocess check, not a thread that needs
+# XDASH_DISABLE_BACKGROUND to skip in tests.
+tools_mod.migrate_from_profiles()
+tools_mod.validate_startup()
+# XDASH_FIXES_PLAN.md F3.1 — same shape as the tools migration just above:
+# a one-time, idempotent merge of every data/<profile>/monitors.json (the
+# old per-profile, host_id-bound catalog) into the new deployment-level
+# data/monitors.json, dropping host_id and deduping by command.
+monitors.migrate_from_profiles()
+
 scheduler.ensure_worker_started()
 # No separate Kaggle poller any more: experiments.py's dispatcher polls its own
 # Kaggle Attempts (_poll_kaggle_attempts), and the worker registry the old
 # poller existed to watch is gone (XDASH_V2_PLAN.md §3.7).
 experiments.ensure_dispatcher_started()
+# XDASH_FIXES_PLAN.md F5.3 — the automatic housekeeping categories' first
+# sweep, and then once a day after that; see backend/housekeeping.py's own
+# module docstring for what "automatic" covers and its safety rules. Runs
+# in its own background thread (never on the request path), so it can never
+# delay server start, and is skipped entirely under XDASH_DISABLE_BACKGROUND.
+housekeeping.ensure_worker_started()
 
 
 def err(message, code=400):
@@ -571,15 +595,16 @@ def api_kaggle_kernel_info(name):
     })
 
 
-# CLI 2.x groundwork (XDASH_PLAN.md §10 Phase 5) — real `kaggle quota`, once
-# settings.kaggle_executable points at a CLI >= 2.2.1 in a Python 3.11+ env.
-# Degrades to {"available": False} against the installed 1.7.4.5, so the
-# existing self-tracked estimate_usage()/usage_history() stay the only
-# numbers shown until that env exists — see XDASH_PROGRESS.md's Phase 5
-# section for the exact env-creation command.
+# Measured quota (XDASH_FIXES_PLAN.md F2.6, #8) — Kaggle's own `kaggle quota`,
+# cached 15 minutes per account (backend/kaggle.py). Degrades to
+# {"available": False, "detail": ...} on a missing/too-old CLI, missing
+# credentials, or an API error, so the self-tracked estimate_usage()/
+# usage_history() stay the fallback shown wherever this reports unavailable.
+# ?refresh=1 bypasses the cache — Diagnostics' manual Refresh button.
 @app.route("/api/kaggle/accounts/<name>/quota", methods=["GET"])
 def api_kaggle_measured_quota(name):
-    return jsonify(kaggle_ops.get_measured_quota(name))
+    force = request.args.get("refresh") in ("1", "true", "yes")
+    return jsonify(kaggle_ops.get_measured_quota(name, force=force))
 
 
 # Live `kernels logs -f` (CLI >= 2.0.2) for the Compute runtime detail's Now
@@ -719,11 +744,27 @@ def api_list_hosts():
 
 @app.route("/api/hosts", methods=["POST"])
 def api_upsert_host():
+    # Create-only (XDASH_FIXES_PLAN.md F1.3): an id that already exists is a
+    # 409 pointing at PATCH, which is the only way to *edit* a host now —
+    # its merge (backend/hosts.patch_host) is what stops a Save from
+    # dropping a field the editor never showed (accelerator, above all).
     body = request.get_json(silent=True) or {}
+    host_id = (body.get("id") or "").strip()
+    if host_id and hosts.host_exists(host_id):
+        return err(f"Host '{host_id}' already exists — use PATCH to edit it", 409)
     try:
         return jsonify(hosts.upsert_host(body).as_dict())
     except hosts.HostError as e:
         return err(str(e), 400)
+
+
+@app.route("/api/hosts/<host_id>", methods=["PATCH"])
+def api_patch_host(host_id):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(hosts.patch_host(host_id, body).as_dict())
+    except hosts.HostError as e:
+        return err(str(e), 404 if str(e).startswith("Unknown host") else 400)
 
 
 @app.route("/api/hosts/<host_id>", methods=["DELETE"])
@@ -782,6 +823,37 @@ def api_test_runtime():
     return jsonify(runtimes_mod.test_runtime(kind, body.get("fields") or {}))
 
 
+# --------------------------------------------------------------------------- tools (XDASH_FIXES_PLAN.md F2, #7)
+# Deployment-level CLI/binary registry (backend/tools.py) — one Settings ->
+# Tools row per entry: status, resolved path + source, version, an override
+# field, and Test. A missing or too-old required tool is what puts its
+# dependent runtimes into "needs attention" (backend/runtimes.py's _health()).
+@app.route("/api/tools", methods=["GET"])
+def api_list_tools():
+    tools_out = {}
+    for name, st in tools_mod.all_status().items():
+        spec = tools_mod.TOOL_SPECS[name]
+        tools_out[name] = {**st.to_dict(), "label": spec.label, "used_for": spec.used_for}
+    return jsonify({"tools": tools_out})
+
+
+@app.route("/api/tools/<name>", methods=["PUT"])
+def api_set_tool_override(name):
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(tools_mod.set_override(name, body.get("path")).to_dict())
+    except ValueError as e:
+        return err(str(e), 404)
+
+
+@app.route("/api/tools/<name>/test", methods=["POST"])
+def api_test_tool(name):
+    try:
+        return jsonify(tools_mod.status(name, refresh=True).to_dict())
+    except ValueError as e:
+        return err(str(e), 404)
+
+
 # GPU probe (XDASH_PLAN.md §8.4 Compute Diagnostics) — runs nvidia-smi over the
 # host's own transport (local or ssh) and persists the result onto the host
 # record, same field runners/machine.py's accelerator() already reads.
@@ -799,6 +871,21 @@ def api_probe_host_gpu(host_id):
         return jsonify({"found": False, "accelerator": host.accelerator})
     hosts.set_accelerator(host_id, found)
     return jsonify({"found": True, "accelerator": found})
+
+
+# "Verify environment" (XDASH_FIXES_PLAN.md F1.5/D6) — always a fresh,
+# synchronous check (force=True), same as Probe GPU/Test connection above:
+# an explicit click means "tell me right now", never a cached answer. The
+# *dispatch* path's own use of this cache (MachineRunner.can_accept(), via
+# backend/envcheck.gate_for_dispatch) never calls this route.
+@app.route("/api/hosts/<host_id>/verify-env", methods=["POST"])
+def api_verify_host_env(host_id):
+    from backend import envcheck
+    try:
+        host = hosts.get_host(host_id)
+    except hosts.HostError as e:
+        return err(str(e), 404)
+    return jsonify(envcheck.verify_environment(host, force=True))
 
 
 @app.route("/api/experiments/active", methods=["GET"])
@@ -842,10 +929,14 @@ def api_list_experiments():
 def api_create_experiments():
     """Creates **drafts** (X7); `then: "queue" | "run_now"` also executes them (the Run
     Composer sends `then: "queue"`). *configs* accepts either the fully-explicit
-    `[{"path": ..., "seeds": [...]}]` shape or the Run Composer's flatter
+    `[{"path": ..., "seeds": [...], "runtime": {...}}]` shape or the Run Composer's flatter
     `{"configs": ["a.yaml", "b.yaml"], "seeds": [0, 1, 2]}` shorthand, applying the same seed
-    list to every path. The response lists which ids were `created` and which `matched` an
-    existing experiment (§3.3.1)."""
+    list to every path. An entry's own `runtime` (XDASH_FIXES_PLAN.md F4.3 — the Composer's
+    per-row Runtime picker) overrides the request-level `runtime`/`pool` for that entry's rows;
+    omitted, it falls back to the request-level one as before. The response lists which ids
+    were `created` and which `matched` an existing experiment (§3.3.1), plus `runtime_changes`
+    ({ok, skipped} — a matched row whose entry-level runtime differs from what's stored is
+    applied like `set_runtime`, refused while in flight)."""
     body = request.get_json(silent=True) or {}
     configs = body.get("configs") or []
     if configs and isinstance(configs[0], str):
@@ -1366,7 +1457,11 @@ def api_history_raw(source, rel_path):
     return send_file(p, mimetype=history.guess_mimetype(p))
 
 
-# --------------------------------------------------------------------------- monitors (machine stats)
+# --------------------------------------------------------------------------- monitors catalog (XDASH_FIXES_PLAN.md F3, #3/#4/#5)
+# Host-agnostic CRUD — name/command/interval only, never a host. Per-host
+# state (alive/available, start/stop/output) is the /api/hosts/<host_id>/tools
+# family below, which is what fixes #5: the host always comes from the URL,
+# never from the catalog entry.
 @app.route("/api/monitors", methods=["GET"])
 def api_list_monitors():
     return jsonify({"monitors": monitors.list_monitors()})
@@ -1376,10 +1471,8 @@ def api_list_monitors():
 def api_add_monitor():
     body = request.get_json(silent=True) or {}
     try:
-        return jsonify(monitors.add_monitor(
-            body.get("name", ""), body.get("command", ""), body.get("watch_interval", 0), body.get("host_id"),
-        ))
-    except (ValueError, hosts.HostError) as e:
+        return jsonify(monitors.add_monitor(body.get("name", ""), body.get("command", ""), body.get("watch_interval", 0)))
+    except ValueError as e:
         return err(str(e), 400)
 
 
@@ -1394,49 +1487,78 @@ def api_remove_monitor(monitor_id):
     return jsonify({"removed": True})
 
 
-@app.route("/api/monitors/<monitor_id>/start", methods=["POST"])
-def api_start_monitor(monitor_id):
+# --------------------------------------------------------------------------- per-host tools (F3.2/F3.3) — the runtime detail page's Tools tab
+@app.route("/api/hosts/<host_id>/tools", methods=["GET"])
+def api_list_host_tools(host_id):
     try:
-        return jsonify(monitors.start_monitor(monitor_id))
+        return jsonify({"tools": monitors.list_tools_for_host(host_id)})
+    except hosts.HostError as e:
+        return err(str(e), 404)
+
+
+@app.route("/api/hosts/<host_id>/tools/<monitor_id>/start", methods=["POST"])
+def api_start_host_tool(host_id, monitor_id):
+    try:
+        return jsonify(monitors.start_monitor(monitor_id, host_id))
+    except hosts.HostError as e:
+        return err(str(e), 404)
+    except ValueError as e:
+        return err(str(e), 404)
     except tmux.TmuxError as e:
         return err(str(e), 400)
+
+
+@app.route("/api/hosts/<host_id>/tools/<monitor_id>/stop", methods=["POST"])
+def api_stop_host_tool(host_id, monitor_id):
+    try:
+        return jsonify(monitors.stop_monitor(monitor_id, host_id))
+    except hosts.HostError as e:
+        return err(str(e), 404)
     except ValueError as e:
         return err(str(e), 404)
 
 
-@app.route("/api/monitors/<monitor_id>/stop", methods=["POST"])
-def api_stop_monitor(monitor_id):
+@app.route("/api/hosts/<host_id>/tools/<monitor_id>/output", methods=["GET"])
+def api_host_tool_output(host_id, monitor_id):
     try:
-        return jsonify(monitors.stop_monitor(monitor_id))
+        return jsonify(monitors.get_output(monitor_id, host_id))
+    except hosts.HostError as e:
+        return err(str(e), 404)
     except ValueError as e:
         return err(str(e), 404)
 
 
-@app.route("/api/monitors/<monitor_id>/output", methods=["GET"])
-def api_monitor_output(monitor_id):
+# --------------------------------------------------------------------------- per-host TensorBoard (F3.4)
+# Local delegates straight to backend/tensorboard_manager.py (unchanged);
+# SSH and a live Colab host (an ordinary SSH host, see backend/transport.py's
+# own docstring) start it remotely and forward a local port — see
+# backend/host_tensorboard.py. Kaggle isn't a host at all, so this 404s for
+# one, which is F3.4's "no tools" rule for free.
+@app.route("/api/hosts/<host_id>/tensorboard/status", methods=["GET"])
+def api_host_tb_status(host_id):
     try:
-        return jsonify(monitors.get_output(monitor_id))
-    except ValueError as e:
+        return jsonify(host_tb.status(host_id))
+    except hosts.HostError as e:
         return err(str(e), 404)
 
 
-# --------------------------------------------------------------------------- tensorboard
-@app.route("/api/tensorboard/status", methods=["GET"])
-def api_tb_status():
-    return jsonify(tb.status())
-
-
-@app.route("/api/tensorboard/start", methods=["POST"])
-def api_tb_start():
+@app.route("/api/hosts/<host_id>/tensorboard/start", methods=["POST"])
+def api_host_tb_start(host_id):
+    from backend import transport as transport_mod
     try:
-        return jsonify(tb.start())
-    except tb.TensorboardLaunchError as e:
+        return jsonify(host_tb.start(host_id))
+    except hosts.HostError as e:
+        return err(str(e), 404)
+    except (tb.TensorboardLaunchError, transport_mod.TransportError, tmux.TmuxError) as e:
         return err(str(e), 400)
 
 
-@app.route("/api/tensorboard/stop", methods=["POST"])
-def api_tb_stop():
-    return jsonify(tb.stop())
+@app.route("/api/hosts/<host_id>/tensorboard/stop", methods=["POST"])
+def api_host_tb_stop(host_id):
+    try:
+        return jsonify(host_tb.stop(host_id))
+    except hosts.HostError as e:
+        return err(str(e), 404)
 
 
 # --------------------------------------------------------------------------- repos (MULTI_REPO_PLAN.md Phases 1/2/4)
@@ -1503,6 +1625,10 @@ def api_system():
         "poll_interval_ms": settings.poll_interval_ms,
         "tensorboard_port": settings.tensorboard_port,
         "env_activate_cmd": settings.env_activate_cmd,
+        # XDASH_FIXES_PLAN.md F1.4 — the local machine's Settings-tab machine
+        # facts show the profile's own defaults as placeholders; this is
+        # already the value backend/hosts.py's local fallback reads.
+        "python_executable": settings.python_executable,
         "tmux_available": tmux.tmux_available(),
         # XDASH_PLAN.md §4.1's metrics section — served here so the frontend
         # can drop its own hardcoded lower_is_better list (static/app.js:6)
@@ -1580,6 +1706,36 @@ def api_put_profile_raw():
         return jsonify(profile_ops.put_raw(text))
     except profile_ops.ProfileError as e:
         return _profile_error(e)
+
+
+# --------------------------------------------------------------------------- housekeeping (XDASH_FIXES_PLAN.md F5, #1)
+# Settings -> Storage panel: an inventory (per category — count, bytes, what's
+# eligible for removal), a dry-run preview, and a per-category Clean button.
+# The same categories run unattended (housekeeping.ensure_worker_started(),
+# wired above) — this is the manual/inspectable side of the exact same code.
+@app.route("/api/housekeeping", methods=["GET"])
+def api_housekeeping_inventory():
+    return jsonify({"categories": housekeeping.inventory(), "settings": housekeeping.get_settings(),
+                     "auto_categories": housekeeping.AUTO_CATEGORIES})
+
+
+@app.route("/api/housekeeping/clean", methods=["POST"])
+def api_housekeeping_clean():
+    body = request.get_json(silent=True) or {}
+    categories = body.get("categories")
+    if not isinstance(categories, list) or not categories:
+        return err('Body must be {"categories": ["<category>", ...], "dry_run": bool}', 400)
+    dry_run = bool(body.get("dry_run", True))
+    return jsonify({"results": housekeeping.clean(categories, dry_run=dry_run)})
+
+
+@app.route("/api/housekeeping/settings", methods=["PUT"])
+def api_housekeeping_settings():
+    body = request.get_json(silent=True) or {}
+    try:
+        return jsonify(housekeeping.set_settings(body))
+    except ValueError as e:
+        return err(str(e), 400)
 
 
 # --------------------------------------------------------------------------- static frontend

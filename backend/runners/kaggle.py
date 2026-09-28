@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .. import framework
 from .. import kaggle as kaggle_backend
+from .. import tools
 from ..config import settings
 from .base import (
     CapacitySnapshot, LaunchSpec, Runner, RunnerBlocked, RunnerCapabilities, RunnerCapabilityError, RunUnit,
@@ -58,8 +59,13 @@ def _code_block(code: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         why = "commit %s is not on any remote branch" % str(code["commit"])[:7]
     return {
         "code": "code-not-pushed",
-        "detail": "Kaggle clones the repo from GitHub, but %s — it would run different code." % why,
-        "action": "Commit and push the host repo, then retry (or set allow_unpushed: true in the profile).",
+        # XDASH_FIXES_PLAN.md D7/F0 — a copyable command, not just a
+        # sentence: Q1 decided against a "Push" button (outward-facing),
+        # so this is the whole fix XDash offers — a hint the user runs
+        # themselves, then retries (auto-unblocks on the next dispatch tick).
+        "detail": "Kaggle clones the repo from GitHub, but %s — it would run different code. "
+                  "(Or set allow_unpushed: true in the profile to run it as-is.)" % why,
+        "action": "git -C %s push" % settings.repo_root,
         "commit": code.get("commit"),
     }
 
@@ -170,14 +176,35 @@ class KaggleRunner(Runner):
     def capacity(self) -> CapacitySnapshot:
         account = self._account()
         if account is None:
-            return CapacitySnapshot(unit="slots", used=0, limit=1)
+            return CapacitySnapshot(unit="slots", used=0, limit=1, extra={"account_missing": True})
         used = sum(1 for v in self._views() if (v.get("current_attempt") or {}).get("status") in _OCCUPYING)
+        usage_estimate = account.get("usage_estimate") or {}
+        cli_status = tools.status("kaggle")
         return CapacitySnapshot(
             unit="slots", used=used, limit=1,  # Kaggle runs ~1 kernel per account at a time
             extra={
                 "budget_metered": True,
-                "hours_this_week": account.get("usage_estimate", {}).get("hours_this_week"),
+                "hours_this_week": usage_estimate.get("hours_this_week"),
+                # An optional cap *below* Kaggle's real (measured) limit
+                # (XDASH_FIXES_PLAN.md F2.6) — was nested under usage_estimate
+                # alone before, so runtimes._quota()'s own extra.get() read
+                # here never actually found it.
+                "weekly_budget_hours": usage_estimate.get("weekly_budget_hours"),
                 "usage_history": account.get("usage_history"),
+                # XDASH_FIXES_PLAN.md F0.3 — backend/runtimes.py's health check
+                # reads these generically: whether this account has any
+                # credential stored at all, whether the profile-wide,
+                # cached code_state() (framework.code_state's own cache) is
+                # currently pinnable to a real GitHub commit, and whether the
+                # Kaggle CLI itself resolves to something new enough (F2).
+                # All cheap enough for /api/runtimes' own 5s poll — the CLI
+                # version check is itself cached by backend/tools.py, and
+                # get_measured_quota() below is cached 15 minutes per account.
+                "has_credentials": bool(account.get("has_legacy_key") or account.get("has_api_token")),
+                "code_pinnable": framework.code_is_pinnable(framework.code_state()),
+                "cli_ok": cli_status.ok,
+                "cli_detail": cli_status.error,
+                "measured_quota": kaggle_backend.get_measured_quota(self.account_name),
             },
         )
 
@@ -225,14 +252,34 @@ class KaggleRunner(Runner):
                 "detail": f"Estimated {est_hours:.1f}h exceeds this account's session cap ({session_cap:.1f}h)",
             }
 
-        remaining = (account.get("usage_estimate") or {}).get("remaining_hours")
-        if remaining is not None and est_hours > remaining:
+        quota = self._remaining_quota(account)
+        if quota["remaining_hours"] is not None and est_hours > quota["remaining_hours"]:
             clears_at = (kaggle_backend._utc_week_start() + timedelta(weeks=1)).isoformat()
             return {
-                "code": "quota-exhausted", "detail": "This account is over its weekly budget",
+                "code": "quota-exhausted",
+                "detail": "This account is over its weekly budget (%s)" % quota["source"],
                 "clears_at": clears_at,
             }
         return None
+
+    def _remaining_quota(self, account: Dict[str, Any]) -> Dict[str, Any]:
+        """XDASH_FIXES_PLAN.md F2.6 — measured first (Kaggle's own `kaggle
+        quota`, 15-minute cache), self-tracked estimate as the fallback, with
+        the reason recorded either way. `weekly_budget_hours` is an optional
+        cap the account can set *below* Kaggle's real limit — it narrows a
+        measured limit, it never widens one."""
+        measured = kaggle_backend.get_measured_quota(self.account_name)
+        weekly_cap = (account.get("usage_estimate") or {}).get("weekly_budget_hours")
+        if measured.get("available"):
+            limit = measured["limit"]
+            if weekly_cap is not None:
+                limit = min(limit, float(weekly_cap))
+            return {"remaining_hours": round(limit - measured["used"], 2), "source": "measured"}
+        usage = account.get("usage_estimate") or {}
+        return {
+            "remaining_hours": usage.get("remaining_hours"),
+            "source": "self-tracked estimate (%s)" % (measured.get("detail") or "no measured quota"),
+        }
 
     def dispatch_priority(self, experiment: Dict[str, Any], est_hours: float) -> Tuple:
         """Best-fit, not round robin: prefer the account with the most

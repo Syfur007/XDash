@@ -579,6 +579,7 @@
           <button class="subtab-btn" data-subtab="history">History</button>
           <button class="subtab-btn" data-subtab="settings">Settings</button>
           <button class="subtab-btn" data-subtab="diagnostics">Diagnostics</button>
+          <button class="subtab-btn" data-subtab="tools">Tools</button>
         </div>
         <div class="subtab-panel active" data-subtab="now" style="padding:12px 16px 16px;">
           <div id="runtime-detail-now-body"><div class="empty-state">Loading…</div></div>
@@ -595,6 +596,32 @@
         <div class="subtab-panel" data-subtab="diagnostics" style="padding:12px 16px 16px;">
           <div id="runtime-detail-diagnostics-body"></div>
         </div>
+        <!-- ································· Tools (XDASH_FIXES_PLAN.md F3) — local, SSH and live-Colab
+             machine tools (start/stop/expandable output) + per-host TensorBoard. Kaggle has no shell,
+             so its body just says so (js/screens/compute.js's loadRuntimeTools()). -->
+        <div class="subtab-panel" data-subtab="tools" style="padding:12px 16px 16px;">
+          <div id="runtime-detail-tools-body">
+            <div class="job-actions" style="margin-bottom:10px;">
+              <button class="btn btn-sm btn-ghost" id="rtd-tools-reload">Reload</button>
+            </div>
+            <div class="entity-grid" id="rtd-tools-grid"><div class="empty-state">Loading…</div></div>
+            <div class="panel" style="margin-top:16px;">
+              <div class="panel-header"><span>TensorBoard</span></div>
+              <div id="rtd-tb-card" class="tb-panel" style="border:none; padding:14px 16px;">
+                <div class="empty-state">Loading…</div>
+              </div>
+            </div>
+            <div class="panel" style="margin-top:16px;">
+              <div class="panel-header"><span>Add tool</span></div>
+              <div class="scheduler-add-form" id="rtd-tools-add-form" style="padding:12px 16px;">
+                <div class="field"><label>Name</label><input class="text-input" id="rtd-tool-name" placeholder="e.g. GPU processes" autocomplete="off" /></div>
+                <div class="field grow"><label>Command</label><input class="text-input grow" id="rtd-tool-command" placeholder="e.g. iostat -x 1" autocomplete="off" /></div>
+                <div class="field"><label>Watch interval (s, 0 = self-refreshing)</label><input class="text-input" id="rtd-tool-interval" type="number" min="0" value="2" /></div>
+                <button class="btn btn-primary" id="rtd-tool-add">Add tool</button>
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div class="panel hidden" id="compute-legacy-capacity-panel" style="margin-bottom:16px;">
@@ -606,10 +633,8 @@
 
       <div class="subtab-strip" id="compute-subtabs">
         <button class="subtab-btn active" data-subtab="queue">Queue</button>
-        <button class="subtab-btn" data-subtab="machines">Machines</button>
         <button class="subtab-btn" data-subtab="kaggle">Kaggle</button>
         <button class="subtab-btn" data-subtab="colab">Colab</button>
-        <button class="subtab-btn" data-subtab="monitors">Monitors</button>
       </div>
 
       <!-- ····························································· Queue -->
@@ -689,27 +714,6 @@
         </div>
       </div>
 
-      <!-- ····························································· Machines -->
-      <div class="subtab-panel" data-subtab="machines">
-        <div class="job-actions" style="margin-bottom:12px; justify-content:flex-end;">
-          <button class="btn btn-sm btn-ghost" id="btn-compute-toggle-add-host">+ Add SSH host</button>
-        </div>
-        <div class="panel">
-          <div class="panel-header"><span>Hosts</span><span id="compute-machines-count"></span></div>
-          <div class="kaggle-grid" id="compute-machines-body" style="padding:12px 16px;">
-            <div class="empty-state">Loading…</div>
-          </div>
-          <div class="scheduler-add-form hidden" id="compute-add-host-form" style="padding:12px;">
-            <div class="field grow"><label>Host id</label><input class="text-input grow" id="compute-new-host-id" placeholder="e.g. mclab-gpu2" autocomplete="off" /></div>
-            <div class="field grow"><label>Label</label><input class="text-input grow" id="compute-new-host-label" placeholder="e.g. MCLab A6000" autocomplete="off" /></div>
-            <div class="field grow"><label>SSH host</label><input class="text-input grow" id="compute-new-host-ssh-host" placeholder="10.0.0.7 or a hostname" autocomplete="off" /></div>
-            <div class="field grow"><label>SSH user</label><input class="text-input grow" id="compute-new-host-ssh-user" placeholder="e.g. syfur" autocomplete="off" /></div>
-            <div class="field grow"><label>Identity file (optional)</label><input class="text-input grow" id="compute-new-host-identity" placeholder="~/.ssh/id_ed25519" autocomplete="off" /></div>
-            <button class="btn btn-primary" id="btn-compute-add-host">Add host</button>
-          </div>
-        </div>
-      </div>
-
       <!-- ····························································· Kaggle -->
       <div class="subtab-panel" data-subtab="kaggle">
         <div class="job-actions" style="margin-bottom:12px; flex-wrap:wrap;">
@@ -775,58 +779,6 @@
         </div>
       </div>
 
-      <!-- ····························································· Monitors -->
-      <div class="subtab-panel" data-subtab="monitors">
-        <div class="panel">
-          <div class="panel-header">
-            <span>Machine Stats</span>
-            <button class="btn btn-ghost" id="btn-refresh-monitors">Refresh</button>
-          </div>
-          <div class="monitor-list" id="monitor-list-body" style="padding:12px 16px;">
-            <div class="empty-state">Loading…</div>
-          </div>
-          <div style="padding:0 16px 16px;">
-            <div class="panel-header" style="padding-left:0;"><span>Add a new metric</span></div>
-            <div class="add-monitor-form">
-              <div class="field">
-                <label>Name</label>
-                <input class="text-input" id="monitor-name-input" placeholder="e.g. GPU processes" />
-              </div>
-              <div class="field grow">
-                <label>Command</label>
-                <input class="text-input grow" id="monitor-command-input" placeholder="e.g. iostat -x 1" />
-              </div>
-              <div class="field">
-                <label>Watch interval (s, 0 = self-refreshing)</label>
-                <input class="text-input" id="monitor-interval-input" type="number" min="0" value="2" style="width:100%;" />
-              </div>
-              <div class="field">
-                <label>Host</label>
-                <select id="monitor-host-select" style="width:100%;"><option value="local">This machine</option></select>
-              </div>
-              <button class="btn btn-primary" id="btn-add-monitor">Add metric</button>
-            </div>
-          </div>
-        </div>
-
-        <div class="panel" style="margin-top:16px;">
-          <div class="panel-header"><span>TensorBoard</span></div>
-          <div class="tb-panel" style="border:none; padding:14px 16px;">
-            <div class="tb-status-row">
-              <div class="pulse-dot" id="tb-dot"></div>
-              <div>
-                <div class="tb-status-label" id="tb-status-label">Not running</div>
-                <div class="tb-status-sub" id="tb-status-sub">Starts a tensorboard process on the server and opens it in a new browser tab, reading from <span id="tb-logdir" style="font-family:var(--mono)"></span>.</div>
-              </div>
-            </div>
-            <div class="tb-toolbar">
-              <button class="btn btn-primary" id="btn-tb-start">Start TensorBoard</button>
-              <button class="btn btn-danger hidden" id="btn-tb-stop">Stop</button>
-              <a class="btn btn-ghost hidden" id="btn-tb-open" target="_blank" rel="noopener">Open in new tab ↗</a>
-            </div>
-          </div>
-        </div>
-      </div>
     </section>
 
     <!-- ---------------------------------------------------- Data view -->
@@ -1072,7 +1024,7 @@
            already searches), and run_notes.py's tag/note keyed by run_id
            (backend/run_notes.py — the Reports/Runs tabs' existing annotation
            layer), shown here only once this experiment has a run_id. -->
-      <div class="subtab-panel" data-subtab="notes">
+      <div class="subtab-panel" data-subtab="notes" id="xdetail-notes-panel">
         <div class="panel">
           <div class="panel-header"><span>Experiment notes</span></div>
           <div style="padding:14px 16px;">
@@ -1156,7 +1108,7 @@
     </div>
     <div class="scheduler-add-form" style="padding:4px 0 0; flex-wrap:wrap;">
       <div class="field">
-        <label>Runtime</label>
+        <label>Set all rows to…</label>
         <select id="composer-runtime-mode">
           <option value="auto">Auto (any)</option>
           <option value="pinned">Pin to…</option>
@@ -1167,6 +1119,11 @@
         <select id="composer-pin-select"></select>
       </div>
     </div>
+    <!-- XDASH_FIXES_PLAN.md F4.1: the "Runtime" column's per-row <select>s are
+         built by renderComposerPreflightTable() (experiments2.js) — each row
+         gets "Auto -> <best>" plus every runtime marked ok/blocked with its
+         block code, detail on hover. Options come from the preflight response's own
+         `cells` matrix, so a row edit alone never re-runs preflight. -->
     <div class="run-composer-preflight" id="composer-preflight"><span class="preflight-empty">Pick at least one config to see a preview.</span></div>
     <div class="modal-actions">
       <button class="btn btn-ghost" id="composer-cancel">Cancel</button>
@@ -1174,6 +1131,20 @@
       <button class="btn btn-ghost" id="composer-queue">Queue</button>
       <button class="btn btn-primary" id="composer-run-now">Run now</button>
     </div>
+  </div>
+</div>
+
+<!-- XDASH_FIXES_PLAN.md F0.1 — "why not" for any action result carrying
+     `skipped` entries (reportActionResult() in experiments2.js): every id
+     that couldn't run/queue, its reason, the per-runtime refusals (code,
+     detail, action), and "Queue instead" when the result said can_queue.
+     Shared by the Composer's Run now/Queue, the table's row/bulk actions and
+     the Experiment page's own action buttons — one panel, not four. -->
+<div class="modal-backdrop hidden" id="skip-report-backdrop">
+  <div class="modal">
+    <div class="modal-title" id="skip-report-title">Why not?</div>
+    <div class="modal-body" id="skip-report-body" style="max-height:55vh; overflow:auto;"></div>
+    <div class="modal-actions"><button class="btn btn-ghost" id="skip-report-close">Close</button></div>
   </div>
 </div>
 
@@ -1341,6 +1312,11 @@
         <div class="field grow"><label>User</label><input class="text-input grow" id="ar-ssh-user" autocomplete="off" /></div>
         <div class="field" style="width:80px;"><label>Port</label><input class="text-input" id="ar-ssh-port" autocomplete="off" /></div>
         <div class="field grow"><label>Identity file</label><input class="text-input grow" id="ar-ssh-identity" placeholder="~/.ssh/id_ed25519" autocomplete="off" /></div>
+        <!-- XDASH_FIXES_PLAN.md F1.4 — collected by addRuntimeMachineFields(), not
+             addRuntimeFields() (the live-test payload above); all optional. -->
+        <div class="field grow"><label>Repo root for this profile</label><input class="text-input grow" id="ar-ssh-repo-root" autocomplete="off" /></div>
+        <div class="field grow"><label>Env activate</label><input class="text-input grow" id="ar-ssh-env" placeholder="conda activate my-env" autocomplete="off" /></div>
+        <div class="field grow"><label>Python interpreter</label><input class="text-input grow" id="ar-ssh-python" placeholder="python" autocomplete="off" /></div>
       </div>
       <div id="add-runtime-form-kaggle" class="scheduler-add-form hidden" style="padding:4px 0 8px; flex-wrap:wrap;">
         <div class="field grow"><label>Account name</label><input class="text-input grow" id="ar-kaggle-name" autocomplete="off" /></div>

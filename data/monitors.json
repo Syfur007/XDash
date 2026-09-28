@@ -1,0 +1,37 @@
+[
+  {
+    "id": "builtin-nvidia-smi",
+    "name": "GPU (nvidia-smi)",
+    "command": "nvidia-smi",
+    "watch_interval": 2,
+    "builtin": true
+  },
+  {
+    "id": "builtin-nvtop",
+    "name": "GPU (nvtop)",
+    "command": "nvtop",
+    "watch_interval": 0,
+    "builtin": true
+  },
+  {
+    "id": "builtin-htop",
+    "name": "CPU / processes (htop)",
+    "command": "htop",
+    "watch_interval": 0,
+    "builtin": true
+  },
+  {
+    "id": "builtin-free",
+    "name": "Memory (free)",
+    "command": "free -h",
+    "watch_interval": 3,
+    "builtin": true
+  },
+  {
+    "id": "builtin-df",
+    "name": "Disk usage (df)",
+    "command": "df -h",
+    "watch_interval": 5,
+    "builtin": true
+  }
+]

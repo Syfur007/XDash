@@ -230,7 +230,7 @@ def dissert_head(tmp_path_factory) -> Path:
 def world(monkeypatch):
     """A clean data dir and fake-repo outputs for every test, fresh module
     caches, and every outward call replaced by a refusal."""
-    from backend import bridge, colab, experiments, framework, kaggle, transport, tmux_runner
+    from backend import bridge, colab, envcheck, experiments, framework, host_tensorboard, kaggle, monitors, tools, transport, tmux_runner
     from backend.runners import machine
 
     shutil.rmtree(DATA, ignore_errors=True)
@@ -239,11 +239,24 @@ def world(monkeypatch):
     (HOST / "fakefw" / "calls.log").unlink(missing_ok=True)
     DATA.mkdir(parents=True)
     config_mod.settings.reload("fake")
+    # XDASH_FIXES_PLAN.md F2 — data/tools.json already follows XDASH_DATA_DIR
+    # (wiped above like every other per-deployment store), but the in-memory
+    # resolution cache doesn't know that on its own; this is the "clean
+    # override path for tests" the plan asks for (tools.set_override, not a
+    # settings.kaggle_executable/colab_executable monkeypatch any more).
+    tools.reset_cache_for_tests()
+    kaggle._quota_cache.clear()
 
     for cache in (machine._availability_cache, colab._sessions_cache, kaggle._usage_cache, bridge._cache,
-                  framework._code_cache):
+                  framework._code_cache, envcheck._cache):
         cache.clear()
     experiments._resolving.clear()
+    # XDASH_FIXES_PLAN.md F3 — same reasoning as tools.reset_cache_for_tests()
+    # above: data/monitors.json follows XDASH_DATA_DIR already, but the
+    # in-memory per-host availability cache and the in-memory "which local
+    # port forwards to which host" map don't know that on their own.
+    monitors.reset_availability_cache_for_tests()
+    host_tensorboard.reset_for_tests()
 
     # Resolution the scheduler hook would hand to a thread runs inline here.
     monkeypatch.setattr(experiments, "_spawn", lambda fn, *a: fn(*a))
@@ -261,6 +274,11 @@ def world(monkeypatch):
 
     monkeypatch.setattr(transport.SshTransport, "run", refuse)
     monkeypatch.setattr(transport.SshTransport, "_rsync", refuse)
+    # No real ssh port forwarding either (XDASH_FIXES_PLAN.md F3.4) — a test
+    # that needs to exercise the forward/cancel orchestration monkeypatches
+    # these back to a recording fake itself, scoped to that one test.
+    monkeypatch.setattr(transport.SshTransport, "open_forward", refuse)
+    monkeypatch.setattr(transport.SshTransport, "close_forward", refuse)
     # No kaggle / colab CLI unless a test scripts one.
     def refuse_kaggle(*a, **k):
         raise kaggle.KaggleOpsError("tests never call the kaggle CLI")

@@ -46,7 +46,6 @@ from __future__ import annotations
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import threading
 import time
@@ -55,6 +54,7 @@ from typing import Any, Dict, List, Optional
 
 from .config import settings, SYSTEM_COLAB_ACCOUNTS_FILE, SYSTEM_COLAB_CREDS_DIR
 from .store import JsonStore
+from . import tools
 
 _lock = threading.Lock()          # guards colab_accounts.json
 _store = JsonStore(SYSTEM_COLAB_ACCOUNTS_FILE, lambda: {"accounts": []})
@@ -241,12 +241,14 @@ def session_limit_hours(name: str) -> float:
 # --------------------------------------------------------------------------- CLI
 def colab_path() -> Optional[str]:
     """Absolute path of the `colab` executable, or None. Absolute because the
-    ProxyCommand runs without the user's PATH (colab-cli-reference §5.2)."""
-    exe = settings.colab_executable
-    if os.path.isabs(exe):
-        return exe if os.access(exe, os.X_OK) else None
-    found = shutil.which(exe)
-    return os.path.abspath(found) if found else None
+    ProxyCommand runs without the user's PATH (colab-cli-reference §5.2).
+    Resolved through backend/tools.py's registry (XDASH_FIXES_PLAN.md D3: an
+    explicit override, then the bin/ dir next to whichever Python is running
+    server.py, then PATH) instead of a bare PATH-only lookup."""
+    st = tools.status("colab")
+    if not st.exists or not st.executable:
+        return None
+    return os.path.abspath(st.path)
 
 
 def colab_available() -> bool:
@@ -287,8 +289,8 @@ def colab_argv(account_name: str, args: List[str]) -> List[str]:
     exe = colab_path()
     if exe is None:
         raise ColabOpsError(
-            f"'{settings.colab_executable}' was not found on PATH. Set colab_executable in "
-            f"repos/{settings.profile_name}.yaml to wherever it's installed."
+            f"'{tools.path('colab')}' was not found. Set an override for 'colab' in "
+            f"Settings -> Tools, or make sure it's installed in the environment running server.py."
         )
     return [exe] + _global_args(account_name) + list(args)
 
@@ -297,7 +299,7 @@ def connect_command(account_name: str) -> str:
     """The one-time login for *account_name*, as a shell command a human
     runs: any authenticated command triggers the CLI's copy-paste OAuth flow
     and saves the token under the account's HOME."""
-    exe = colab_path() or settings.colab_executable
+    exe = colab_path() or tools.path("colab")
     argv = [exe] + _global_args(account_name) + ["sessions"]
     return "env HOME=%s PYTHONUSERBASE=%s %s" % (
         shlex.quote(str(account_home(account_name))), shlex.quote(_real_user_base()),
@@ -318,7 +320,7 @@ def test_config(gpu: str = "") -> Dict[str, Any]:
         except ColabOpsError as e:
             return {"ok": False, "detail": str(e)}
     if not colab_available():
-        return {"ok": False, "detail": f"'{settings.colab_executable}' was not found on PATH"}
+        return {"ok": False, "detail": f"'{tools.path('colab')}' was not found on PATH"}
     return {"ok": True, "detail": "CLI found on PATH. Save, then use Connect account to finish sign-in."}
 
 
@@ -335,8 +337,9 @@ def test_config(gpu: str = "") -> Dict[str, Any]:
 # procsession.start() below — everything upstream of it (the route, this
 # function's own argv-building) is inert until that call actually runs. No
 # test in this suite calls it with a real `colab` executable: they point
-# settings.colab_executable at a local fixture script that mimics the
-# prompt/response shape without contacting Google. ***
+# colab.colab_path (via monkeypatch, or tools.set_override("colab", ...)) at a
+# local fixture script that mimics the prompt/response shape without
+# contacting Google. ***
 def _connect_key(account_name: str) -> str:
     return f"colab-connect:{account_name}"
 

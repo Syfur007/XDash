@@ -140,7 +140,7 @@ def _stores():
         ("experiments", lambda: settings.experiments_store_file, experiments._load),
         ("scheduler", lambda: settings.scheduler_file, scheduler._load),
         ("terminals", lambda: settings.state_file, terminals._load),
-        ("monitors", lambda: settings.monitors_file, monitors._load),
+        ("monitors", lambda: monitors.MONITORS_FILE, monitors._load),
         ("run_notes", lambda: settings.run_notes_file, run_notes._load),
         ("notifications", lambda: settings.notifications_file, notifications._load_notifications),
         ("datasets", lambda: settings.datasets_file, datasets._load),

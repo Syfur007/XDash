@@ -22,24 +22,52 @@ this folder's own `requirements.txt`.
 
 ## Setup
 
+**Python >= 3.12** (XDASH_FIXES_PLAN.md D4 — `google-colab-cli` alone needs
+>= 3.12; `kaggle` 2.x needs >= 3.11, so 3.12 is the real floor for this
+`requirements.txt`).
+
+System packages, however you run XDash: **tmux**, **openssh-client** (`ssh`
++ `ssh-keygen`), **rsync**, **git**. Local/SSH experiments run inside a tmux
+session (Compute → Sessions); SSH hosts and a Colab VM are reached over
+ssh/rsync; `git` backs the code-provenance (`code-not-pushed`) check on
+every Kaggle dispatch. XDash resolves each of these — plus `kaggle`,
+`colab` and `tensorboard` — through **Settings → Tools**
+(`backend/tools.py`): an explicit override there wins, then the bin/
+directory next to whichever Python is running `server.py`, then `PATH`.
+Startup logs one line per missing/too-old *required* dependency (Settings →
+Tools shows the same thing, with a Test button per tool).
+
+### venv
+
 ```bash
-conda create -n xdash python=3.11   # or reuse an existing 3.8+ env
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python server.py
+```
+
+### conda
+
+```bash
+conda create -n xdash python=3.12
 conda activate xdash
 pip install -r requirements.txt
 python server.py
 ```
 
-Open **http://localhost:6070**.
+### Docker
 
-Requires **tmux** on your system (`sudo apt install tmux` / `brew install
-tmux`) for local/SSH runs — every local or SSH experiment runs inside a tmux
-session (see Compute → Sessions below). If you want live TensorBoard
-embedding or training-curve charts in Study Compare, make sure `tensorboard`
-is installed (it's in `requirements.txt` already).
+No Dockerfile is shipped (a plain `python:3.12-slim` base is enough — bring
+your own). Install the system packages above (Debian/Ubuntu base:
+`apt-get install -y tmux openssh-client rsync git`), `pip install -r
+requirements.txt`, then `python server.py`. Mount a volume for `data/` (set
+`XDASH_DATA_DIR` to it) so accounts, hosts and the tool-path overrides above
+survive a container rebuild.
+
+Open **http://localhost:6070** (whichever way you started it).
 
 The backend is plain **Flask**, kept to a small, stable dependency chain —
-this also runs in older environments (e.g. a Python 3.8 conda env) without
-fighting pydantic/dependency version mismatches.
+no pydantic version-matching to fight.
 
 ### Running the tests
 

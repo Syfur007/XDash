@@ -273,6 +273,23 @@ def test_run_now_never_queues_silently(client, use_runners):
     assert out["skipped"][0]["code"] == "runtime-missing"
 
 
+def test_create_then_run_now_reports_the_skip_shape(client, use_runners):
+    """XDASH_FIXES_PLAN.md F0's own "Tests" bullet: the skip shape
+    (id/reason/runtimes[]/can_queue) POST /api/experiments' `then` produces
+    is exactly what apply_action()'s run_now already produces directly
+    (test_run_now_never_queues_silently, above) — create_experiments just
+    hands the touched ids to the same apply_action() call, unchanged."""
+    use_runners(FakeRunner("fake:busy", accept=False))
+    out = _post(client, configs=["experiment/demo.yaml"], seeds=[1], then="run_now")
+    assert out["created"] and out["then"]["ok"] == []
+    skip = out["then"]["skipped"][0]
+    assert skip["id"] == out["created"][0]
+    assert skip["can_queue"] is True
+    assert skip["runtimes"] == [{"runtime": "fake:busy", "code": "pool-busy", "detail": "fake says no"}]
+    # A skipped run_now never dispatches — the experiment stays a draft.
+    assert _statuses(client)[out["created"][0]] == "draft"
+
+
 def test_run_now_goes_ahead_of_the_queue(client, use_runners, monkeypatch):
     runner = FakeRunner(limit=1)
     use_runners(runner)
@@ -347,6 +364,70 @@ def test_priority_orders_the_queue(client, use_runners):
         _finish_all(runner)
     # manual first; among manual: study priority, then experiment priority.
     assert order == [top, mid, low, auto]
+
+
+# ----------------------------------------------------------------- per-entry runtime (XDASH_FIXES_PLAN.md F4.3 —
+# the Composer's per-row Runtime picker)
+def test_per_entry_runtime_overrides_the_request_level_one(client, use_runners):
+    free = FakeRunner("fake:free")
+    full = FakeRunner("fake:full", accept=False)
+    use_runners(free, full)
+    out = _post(
+        client,
+        configs=[{"path": "experiment/demo.yaml", "seeds": [1], "runtime": {"mode": "pinned", "slot": "fake:full"}}],
+        runtime={"mode": "pinned", "slot": "fake:free"},
+    )
+    eid = out["created"][0]
+    assert _ok(client.get("/api/experiments/%s" % eid))["runtime"] == {"mode": "pinned", "slot": "fake:full"}
+    # No entry-level runtime on this second one: falls back to the
+    # request-level policy, unchanged from before F4.
+    other = _post(
+        client, configs=[{"path": "experiment/other.yaml", "seeds": [1]}], runtime={"mode": "pinned", "slot": "fake:free"},
+    )["created"][0]
+    assert _ok(client.get("/api/experiments/%s" % other))["runtime"] == {"mode": "pinned", "slot": "fake:free"}
+
+
+def test_a_bad_per_entry_runtime_fails_the_whole_request_and_stores_nothing(use_runners):
+    use_runners(FakeRunner())
+    with pytest.raises(experiments.ExperimentError):
+        experiments.create_experiments([
+            {"path": "experiment/demo.yaml", "seeds": [1], "runtime": {"mode": "bogus"}},
+        ])
+    assert experiments.list_experiments() == []
+
+
+def test_matched_row_runtime_change_applies_set_runtime_and_skips_in_flight(client, use_runners):
+    free = FakeRunner("fake:free", limit=10)
+    full = FakeRunner("fake:full", limit=10)
+    use_runners(free, full)
+    eid = _post(client, configs=["experiment/demo.yaml"], seeds=[1])["created"][0]
+    # Re-posting the same (config, seed) row with a per-entry runtime pin —
+    # the experiment already exists, so this applies like set_runtime.
+    out = _post(
+        client,
+        configs=[{"path": "experiment/demo.yaml", "seeds": [1], "runtime": {"mode": "pinned", "slot": "fake:full"}}],
+    )
+    assert out["matched"] == [eid] and out["created"] == []
+    assert out["runtime_changes"] == {"ok": [eid], "skipped": []}
+    assert _ok(client.get("/api/experiments/%s" % eid))["runtime"] == {"mode": "pinned", "slot": "fake:full"}
+    # Re-posting with the same (already-applied) runtime is a silent no-op —
+    # nothing to report.
+    again = _post(
+        client,
+        configs=[{"path": "experiment/demo.yaml", "seeds": [1], "runtime": {"mode": "pinned", "slot": "fake:full"}}],
+    )
+    assert again["runtime_changes"] == {"ok": [], "skipped": []}
+
+    # Now it's in flight — the same kind of re-post is refused, not applied.
+    _act(client, "queue", ids=[eid])
+    assert _statuses(client)[eid] == "running"
+    out2 = _post(
+        client,
+        configs=[{"path": "experiment/demo.yaml", "seeds": [1], "runtime": {"mode": "pinned", "slot": "fake:free"}}],
+    )
+    assert out2["matched"] == [eid]
+    assert out2["runtime_changes"] == {"ok": [], "skipped": [{"id": eid, "reason": "can't change runtime while running"}]}
+    assert _ok(client.get("/api/experiments/%s" % eid))["runtime"] == {"mode": "pinned", "slot": "fake:full"}
 
 
 # ----------------------------------------------------------------- scopes + preflight

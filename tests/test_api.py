@@ -79,6 +79,50 @@ def test_pulse_includes_the_unified_runtimes_list(client, use_runners):
     assert any(row["id"] == "ssh:box" for row in body["runtimes"])
 
 
+def test_patch_host_route_merges_and_post_on_an_existing_id_is_409(client):
+    """XDASH_FIXES_PLAN.md F1.3: POST stays create-only; PATCH is the only
+    way to edit, and it merges rather than replaces — the actual fix for
+    issue 6 (a Settings Save silently dropping `accelerator`)."""
+    from backend import hosts
+    hosts.upsert_host({
+        "id": "editme", "kind": "ssh", "label": "Edit me",
+        "ssh": {"host": "editme.example"},
+        "accelerator": {"name": "T4", "vram_gb": 15.0},
+    })
+
+    r = client.post("/api/hosts", json={"id": "editme", "kind": "ssh", "label": "Overwritten", "ssh": {"host": "x"}})
+    assert r.status_code == 409
+
+    r = client.patch("/api/hosts/editme", json={"max_concurrent": 3})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["max_concurrent"] == 3
+    assert body["accelerator"] == {"name": "T4", "vram_gb": 15.0}
+    assert body["ssh"]["host"] == "editme.example"  # untouched by a patch that never mentioned it
+
+    r = client.patch("/api/hosts/does-not-exist", json={"max_concurrent": 1})
+    assert r.status_code == 404
+
+
+def test_verify_env_route_forces_a_fresh_check(client, monkeypatch):
+    from backend import envcheck, hosts
+    hosts.upsert_host({"id": "vbox", "kind": "ssh", "ssh": {"host": "vbox.example"},
+                        "repos": {"fake": {"repo_root": "/remote/repo"}}})
+    calls = []
+
+    def fake_verify(host, force=False):
+        calls.append(force)
+        return {"ok": True, "checked_at": "now", "detail": None}
+
+    monkeypatch.setattr(envcheck, "verify_environment", fake_verify)
+    r = client.post("/api/hosts/vbox/verify-env")
+    assert r.status_code == 200 and r.get_json()["ok"] is True
+    assert calls == [True]  # the button always forces a fresh run, never a cached answer
+
+    r = client.post("/api/hosts/does-not-exist/verify-env")
+    assert r.status_code == 404
+
+
 def test_dataset_registry_routes(client):
     r = client.get("/api/datasets")
     assert r.status_code == 200

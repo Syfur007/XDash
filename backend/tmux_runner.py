@@ -18,11 +18,11 @@ been taught about hosts keeps working unchanged.
 from __future__ import annotations
 
 import shlex
-import shutil
 import subprocess
 from typing import List, Optional
 
 from . import hosts
+from . import tools
 from . import transport as transport_mod
 
 DONE_MARKER = "__EXPDASH_DONE__"
@@ -33,13 +33,26 @@ class TmuxError(Exception):
 
 
 def tmux_available(host_id: Optional[str] = None) -> bool:
-    """Is tmux usable on *host_id*? Local answers from PATH directly (cheap,
-    no subprocess); a remote has to be asked, and an unreachable host is
-    simply 'no tmux here' — every caller already degrades gracefully on that."""
+    """Is tmux usable on *host_id*? Local answers from the tools registry
+    directly (cheap, no subprocess — XDASH_FIXES_PLAN.md F2's override/
+    sibling-of-python/PATH resolution, not a bare PATH-only check); a remote
+    has to be asked (tmux there runs on ITS OWN PATH, never resolved against
+    this machine's env), and an unreachable host is simply 'no tmux here' —
+    every caller already degrades gracefully on that."""
     host = hosts.get_host(host_id)
     if host.is_local:
-        return shutil.which("tmux") is not None
+        return tools.is_available("tmux")
     return _run(["-V"], host_id=host.id).returncode == 0
+
+
+def _tmux_exe(host: "hosts._Host") -> str:
+    """Only the *local* half of a tmux call resolves through
+    backend/tools.py — a remote host's own `tmux` runs on ITS OWN PATH once
+    the argv crosses ssh (SshTransport.argv() wraps this same list into a
+    remote shell command), so resolving it against this machine's env would
+    be wrong. Factored out (XDASH_FIXES_PLAN.md F2) so it's testable without
+    going through _run() itself, which the test harness always fakes."""
+    return tools.path("tmux") if host.is_local else "tmux"
 
 
 def _run(args: List[str], host_id: Optional[str] = None) -> subprocess.CompletedProcess:
@@ -54,7 +67,8 @@ def _run(args: List[str], host_id: Optional[str] = None) -> subprocess.Completed
     instead of a raw 500 on first page load.
     """
     try:
-        return transport_mod.for_host(host_id).run(["tmux"] + args)
+        host = hosts.get_host(host_id)
+        return transport_mod.for_host_record(host).run([_tmux_exe(host)] + args)
     except (transport_mod.TransportError, hosts.HostError) as e:
         return subprocess.CompletedProcess(args=["tmux"] + args, returncode=127, stdout="", stderr=str(e))
 

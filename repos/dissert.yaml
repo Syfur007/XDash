@@ -93,7 +93,6 @@ poll_interval_ms: 2000
 scheduler_max_concurrent_limit: 8
 scheduler_max_queue_size: 200
 
-kaggle_executable: "/home/syfur/miniconda3/envs/xdash/bin/kaggle"
 kaggle_push_concurrency: 3
 kaggle_default_budget_hours: 9.5
 kaggle_poll_interval_seconds: 180

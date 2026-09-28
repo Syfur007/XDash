@@ -211,6 +211,15 @@ class Settings:
             "eval": (commands_raw.get("eval") or "").strip() or _default_command_template("eval"),
             "budget": (commands_raw.get("budget") or "").strip() or "--max-hours {hours}",
             "resume": (commands_raw.get("resume") or "").strip() or "--resume",
+            # XDASH_FIXES_PLAN.md F1.5 — "Verify environment" (D6): a cheap,
+            # framework-agnostic liveness check ("does this interpreter, in
+            # this env, on this host, even import the training entrypoint?")
+            # run before dispatch trusts a host, instead of only finding out
+            # via a training crash (see backend/envcheck.py). {train_script}
+            # is this profile's own train_script (above), not a placeholder
+            # render_command() fills in — a profile that overrides
+            # commands.check may still reference it.
+            "check": (commands_raw.get("check") or "").strip() or "{python} %s --help" % self.train_script,
         }
         self.python_executable = self.commands["python"]
         self.env_activate_cmd = self.commands["env_activate"]
@@ -328,7 +337,12 @@ class Settings:
         self.scheduler_max_concurrent_limit = int(raw.get("scheduler_max_concurrent_limit", 8))
         self.scheduler_max_queue_size = int(raw.get("scheduler_max_queue_size", 200))
 
-        self.kaggle_executable = raw.get("kaggle_executable", "kaggle")
+        # kaggle_executable/colab_executable used to live here (a flat profile
+        # key) until XDASH_FIXES_PLAN.md D2/F2: which env XDash itself runs
+        # in is a deployment fact, not a repo fact, so the resolved path now
+        # comes from backend/tools.py's registry (data/tools.json) instead.
+        # backend/tools.migrate_from_profiles() moves an existing profile's
+        # key out (once, at server startup); nothing here reads it any more.
         self.kaggle_push_concurrency = max(1, int(raw.get("kaggle_push_concurrency", 3)))
         self.kaggle_default_budget_hours = float(raw.get("kaggle_default_budget_hours", 9.5))
         self.kaggle_setup_reserve_hours = float(raw.get("kaggle_setup_reserve_hours", 0.75))
@@ -358,7 +372,6 @@ class Settings:
         # not-yet-configured fallback. setup/teardown reserve mirror
         # Kaggle's own split (provisioning + rsync overhead on one side,
         # `colab stop` + result pull on the other).
-        self.colab_executable = raw.get("colab_executable", "colab")
         self.colab_default_session_limit_hours = float(raw.get("colab_default_session_limit_hours", 12.0))
         self.colab_setup_reserve_hours = float(raw.get("colab_setup_reserve_hours", 0.25))
         self.colab_teardown_reserve_hours = float(raw.get("colab_teardown_reserve_hours", 0.1))
@@ -426,6 +439,13 @@ class Settings:
         # session or a Kaggle staging dir never loses a run's output.
         self.attempt_logs_root = self.state_dir / "logs"
         self.state_file = self.state_dir / "terminals_state.json"
+        # Retired as the monitor catalog's store (XDASH_FIXES_PLAN.md F3 — it
+        # moved to the deployment-level monitors.MONITORS_FILE, a machine
+        # tool having nothing to do with which repo profile is active). Kept
+        # only so an old data/<profile>/monitors.json is still addressable
+        # by hand; backend/monitors.py's own migrate_from_profiles() reads
+        # this same path (built independently, not through this attribute)
+        # once at startup and nothing writes it again after that.
         self.monitors_file = self.state_dir / "monitors.json"
         self.scheduler_file = self.state_dir / "scheduler.json"
         self.run_notes_file = self.state_dir / "run_notes.json"

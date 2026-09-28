@@ -18,6 +18,20 @@
 // exposes `createPoller` as a bare top-level function, usable from any
 // later-loaded script or module.
 
+// XDASH_FIXES_PLAN.md F1.2 — one shared guard for a poller that re-renders a
+// form: skip the re-render while *containerId* holds focus (mid-keystroke —
+// e.g. the Experiment page Notes tab, the legacy Kaggle subtab's open
+// credential form) or while *dirtyFlagKey* (a `state.<key>` boolean, same
+// pattern as static/js/screens/settings_profile.js's own state.profileDirty)
+// is set. Both are optional; a caller that only cares about focus passes no
+// second argument. Returns true = "skip this render".
+function formPollGuard(containerId, dirtyFlagKey) {
+  const el = document.getElementById(containerId);
+  if (el && document.activeElement && el.contains(document.activeElement) && document.activeElement !== document.body) return true;
+  if (dirtyFlagKey && state[dirtyFlagKey]) return true;
+  return false;
+}
+
 function createPoller(fn, intervalMs, opts = {}) {
   const maxIntervalMs = opts.maxIntervalMs || intervalMs * 8;
   let timer = null;

@@ -40,6 +40,14 @@ state.composerOverlayRows = [{ key: "", value: "" }];
 state.composerPreflight = null;
 state.composerPreflightTimer = null;
 state.composerBusy = false;
+// XDASH_FIXES_PLAN.md F4.1/F4.2: per-row Runtime picks, keyed by the
+// preflight row's own experiment_id so they survive a re-preflight (e.g.
+// an overlay edit) for any row that still exists. Only holds an entry for
+// a row the user picked by hand; every other row falls back to the "Set
+// all rows to…" control (composerBulkRuntimeValue()) — see
+// composerRowRuntimeValue(). Cleared whenever that top control changes
+// ("applies to every row"), and reset on every openComposer().
+state.composerRowRuntime = new Map();
 
 state.compareLoaded = false;
 
@@ -305,6 +313,17 @@ function renderExperiments2Table() {
   document.dispatchEvent(new Event("xdash:rows-rendered")); // static/js/lib/shortcuts.js's j/k highlight survives this re-render
 }
 
+// XDASH_FIXES_PLAN.md F0.2 — the block code as a chip (with the detail as
+// its tooltip, for a quick hover) plus the action line underneath, instead
+// of a bare "⚠" whose only content was a title attribute nobody hovers on
+// a live table. Shared by the table's status cell and the Experiment page
+// Overview (renderXdetailOverview).
+function blockedDetailHtml(blocked) {
+  if (!blocked) return "";
+  return ` <span class="badge red" title="${escapeHtml(blocked.detail || "")}">${escapeHtml(blocked.code || "blocked")}</span>` +
+    (blocked.action ? `<div class="settings-profile-path" style="font-family:var(--mono); white-space:normal; margin-top:2px;">${escapeHtml(blocked.action)}</div>` : "");
+}
+
 function experiments2RowHtml(v) {
   const a = v.current_attempt || {};
   const seed = v.seed === null || v.seed === undefined ? "—" : escapeHtml(String(v.seed));
@@ -317,7 +336,7 @@ function experiments2RowHtml(v) {
     <td>${experimentLink(v.experiment_id, v.name || v.experiment_id)}</td>
     <td>${seed}</td>
     <td><select class="text-input" data-runtime-id="${escapeHtml(v.experiment_id)}" style="font-size:11px; padding:3px 5px;">${runtimeOptions}</select></td>
-    <td>${renderStatusBadge(v.status)}${a.blocked ? ` <span title="${escapeHtml(a.blocked.detail || "")}">⚠</span>` : ""}</td>
+    <td>${renderStatusBadge(v.status)}${blockedDetailHtml(a.blocked)}</td>
     <td>${escapeHtml(timeAgo(v.updated_at || a.ended_at || a.started_at || v.created_at))}</td>
     <td>${experiments2RowActionsHtml(v)}</td>
   </tr>`;
@@ -335,11 +354,90 @@ function experiments2RowActionsHtml(v) {
     <button class="btn btn-sm btn-danger" data-row-action="delete" data-id="${id}">Delete</button>`;
 }
 
+// ================================================================== F0.1: action results are never silently "ok"
+// `{action, ok: [...], skipped: [{id, reason, runtimes?, can_queue?}]}` —
+// backend/experiments.py's apply_action()/create_experiments() shape.
+// Before this, submitComposer/runExperiments2RowAction/…BulkAction/
+// runXdetailAction each toasted a flat "ok" regardless of `skipped`, so a
+// refused Kaggle dispatch (`code-not-pushed`) or a busy runtime looked
+// identical to a real success.
+// *collector*, when given, is an array reportActionResult appends this
+// call's own (tagged) skipped entries to instead of opening the "why not"
+// panel itself — XDASH_FIXES_PLAN.md F5's carry-over from F4.3: a Composer
+// submit whose response carries skips in *both* `runtime_changes` and
+// `then` used to call this twice, and the second openSkipReport() silently
+// overwrote the first panel (only one exists). submitComposer() now passes
+// one shared array to both calls and opens a single, merged panel itself
+// once both are done — every other caller (row/bulk/xdetail actions, which
+// only ever have one result to report) still omits *collector* and gets the
+// exact same single-source behavior as before.
+function reportActionResult(result, verb, collector) {
+  if (!result) return true;
+  const ok = result.ok || [];
+  const skipped = result.skipped || [];
+  if (ok.length) toast(`${verb}: ${ok.length} experiment${ok.length === 1 ? "" : "s"}`, "ok");
+  if (skipped.length) {
+    toast(`${skipped.length} couldn't ${verb} — see why`, "err");
+    const tagged = skipped.map((s) => ({ ...s, _verb: verb }));
+    if (collector) collector.push(...tagged);
+    else openSkipReport(verb, tagged);
+  }
+  return skipped.length === 0;
+}
+
+function skipReportEntryHtml(s) {
+  const runtimesHtml = (s.runtimes || []).map((r) => `
+    <div class="kaggle-history-row" style="align-items:flex-start;">
+      <span class="badge red">${escapeHtml(r.code || "blocked")}</span>
+      <span><strong>${escapeHtml(r.runtime || "")}</strong>${r.detail ? ` — ${escapeHtml(r.detail)}` : ""}
+      ${r.action ? `<div class="settings-profile-path" style="font-family:var(--mono);">${escapeHtml(r.action)}</div>` : ""}</span>
+    </div>`).join("");
+  // _verb (F5's merge fix) is only shown when a single combined panel is
+  // reporting more than one distinct action — see openSkipReport() below.
+  const verbTag = s._verb ? `<span class="badge slate">${escapeHtml(s._verb)}</span> ` : "";
+  return `<div class="lab-attention-row" style="flex-direction:column; align-items:stretch; gap:6px;">
+    <div>${verbTag}<strong>${experimentLink(s.id)}</strong> <span style="color:var(--text-muted);">${escapeHtml(s.reason || "")}</span></div>
+    ${runtimesHtml}
+    ${s.can_queue ? `<button class="btn btn-sm btn-ghost" data-skip-queue="${escapeHtml(s.id)}">Queue instead</button>` : ""}
+  </div>`;
+}
+
+function openSkipReport(verb, skipped) {
+  const body = document.getElementById("skip-report-body");
+  // A merged call (submitComposer's shared collector) tags each entry with
+  // its own source verb; the title stays specific when every entry agrees,
+  // and only goes generic when this panel is actually combining more than
+  // one kind of refusal in the same view.
+  const verbs = new Set(skipped.map((s) => s._verb || verb));
+  document.getElementById("skip-report-title").textContent =
+    verbs.size <= 1 ? `Why not ${[...verbs][0] || verb}?` : "Why not?";
+  body.innerHTML = skipped.map(skipReportEntryHtml).join("");
+  body.querySelectorAll("[data-skip-queue]").forEach((btn) => {
+    btn.addEventListener("click", () => queueInsteadFromSkipReport(btn.dataset.skipQueue));
+  });
+  document.getElementById("skip-report-backdrop").classList.remove("hidden");
+}
+
+function closeSkipReport() {
+  document.getElementById("skip-report-backdrop").classList.add("hidden");
+}
+
+async function queueInsteadFromSkipReport(id) {
+  try {
+    await api("/api/experiments/actions", { method: "POST", body: JSON.stringify({ action: "queue", ids: [id] }) });
+    toast(`Queued '${id}'`, "ok");
+    closeSkipReport();
+    if (state.xdetailId) refreshXdetail(); else refreshExperiments2AllData();
+  } catch (e) {
+    toast(`Couldn't queue: ${e.message}`, "err");
+  }
+}
+
 async function runExperiments2RowAction(action, id) {
   if (action === "delete") { openDeleteExperimentModal(id, () => refreshExperiments2AllData()); return; }
   try {
-    await api("/api/experiments/actions", { method: "POST", body: JSON.stringify({ action, ids: [id] }) });
-    toast(`${action.replace("_", " ")}: '${id}'`, "ok");
+    const result = await api("/api/experiments/actions", { method: "POST", body: JSON.stringify({ action, ids: [id] }) });
+    reportActionResult(result, action.replace("_", " "));
     refreshExperiments2AllData();
   } catch (e) {
     toast(`Couldn't ${action}: ${e.message}`, "err");
@@ -409,8 +507,8 @@ async function runExperiments2BulkAction(action) {
     return;
   }
   try {
-    await api("/api/experiments/actions", { method: "POST", body: JSON.stringify({ action, ids }) });
-    toast(`${action}: ${ids.length} experiment(s)`, "ok");
+    const result = await api("/api/experiments/actions", { method: "POST", body: JSON.stringify({ action, ids }) });
+    reportActionResult(result, action);
     refreshExperiments2AllData();
   } catch (e) {
     toast(`Couldn't ${action}: ${e.message}`, "err");
@@ -870,6 +968,7 @@ async function openComposer(prefill) {
   state.composerSelectedConfigs = new Set(prefill.configPaths || []);
   state.composerOverlayRows = [{ key: "", value: "" }];
   state.composerPreflight = null;
+  state.composerRowRuntime = new Map();
   document.getElementById("composer-config-filter").value = "";
   document.getElementById("composer-seeds").value = "42";
   document.getElementById("composer-group").value = "";
@@ -977,15 +1076,45 @@ function composerRuntime() {
   return { mode: "auto" };
 }
 
+// XDASH_FIXES_PLAN.md F4.2: the "Set all rows to…" control's value, in the
+// same "auto" | <runtime id> spelling every per-row select and
+// setExperimentRuntime() use — the default a row falls back to when it has
+// no override of its own in state.composerRowRuntime.
+function composerBulkRuntimeValue() {
+  const mode = document.getElementById("composer-runtime-mode").value;
+  return mode === "pinned" ? document.getElementById("composer-pin-select").value : "auto";
+}
+
+// F4.1: a row's own pick if the user set one by hand, else the bulk
+// control's current value — "per-row edits made after it win" (F4.2).
+function composerRowRuntimeValue(experimentId) {
+  return state.composerRowRuntime.has(experimentId) ? state.composerRowRuntime.get(experimentId) : composerBulkRuntimeValue();
+}
+
 function scheduleComposerPreflight() {
   if (state.composerPreflightTimer) clearTimeout(state.composerPreflightTimer);
   state.composerPreflightTimer = setTimeout(renderComposerPreflight, 350);
 }
 
+// F4.2: the "Set all rows to…" control changed — every row collapses onto
+// that value (clearing any per-row overrides made before this), then a
+// fresh preflight actually re-runs (the bug this fixes: today only the
+// mode select re-preflights, never the pin select, so picking a different
+// account left the table showing stale ✓/✗ and `best`/`reason` for the old
+// one).
+function composerBulkRuntimeChanged() {
+  state.composerRowRuntime.clear();
+  scheduleComposerPreflight();
+}
+
 async function renderComposerPreflight() {
   const el = document.getElementById("composer-preflight");
   const configs = Array.from(state.composerSelectedConfigs);
-  if (!configs.length) { el.innerHTML = `<span class="preflight-empty">Pick at least one config to see a preview.</span>`; return; }
+  if (!configs.length) {
+    el.innerHTML = `<span class="preflight-empty">Pick at least one config to see a preview.</span>`;
+    state.composerPreflight = null;
+    return;
+  }
   const seeds = composerSeeds();
   const overlay = composerOverlay();
   const runtime = composerRuntime();
@@ -1000,15 +1129,68 @@ async function renderComposerPreflight() {
     return;
   }
   state.composerPreflight = data;
+  // Rows this response no longer carries (a config/seed/overlay edit
+  // dropped or renamed them) leave nothing behind to key an override by.
+  const liveIds = new Set(data.rows.map((r) => r.experiment_id));
+  for (const id of Array.from(state.composerRowRuntime.keys())) if (!liveIds.has(id)) state.composerRowRuntime.delete(id);
+  renderComposerPreflightTable();
+}
+
+// F4.1: one option per runtime, ✓/✗ from the preflight response's own
+// `cells[runtime.id]` (block code inline, full detail on hover) — the same
+// matrix every row already got, so picking a different row option is free.
+function composerRuntimeOptionHtml(rt, cell, selectedValue) {
+  const ok = cell ? cell.ok : true;
+  const mark = ok ? "✓" : "✗";
+  const codeSuffix = ok ? "" : ` (${escapeHtml(cell.code || "blocked")})`;
+  const title = (cell && cell.detail) || "";
+  return `<option value="${escapeHtml(rt.id)}" title="${escapeHtml(title)}" ${selectedValue === rt.id ? "selected" : ""}>${mark} ${escapeHtml(rt.label)}${codeSuffix}</option>`;
+}
+
+// F4.1/F4.2: builds the preflight table (and its per-row Runtime selects)
+// from the cached state.composerPreflight — never an HTTP call by itself.
+// Called after a real preflight fetch, and again whenever a row's own
+// select changes (composerRowRuntimeValue() is all that changed).
+function renderComposerPreflightTable() {
+  const el = document.getElementById("composer-preflight");
+  const data = state.composerPreflight;
+  if (!data) return;
   el.innerHTML = `<table class="compare-table" style="width:100%;">
-    <thead><tr><th>id</th><th>exists</th><th>est.</th><th>best</th></tr></thead>
-    <tbody>${data.rows.map((r) => `<tr>
+    <thead><tr><th>id</th><th>exists</th><th>est.</th><th>Runtime</th></tr></thead>
+    <tbody>${data.rows.map((r) => {
+      const selected = composerRowRuntimeValue(r.experiment_id);
+      const autoLabel = r.best ? `Auto → ${escapeHtml(r.best)}` : `Auto → none${r.reason ? `: ${escapeHtml(r.reason)}` : ""}`;
+      const options = [`<option value="auto" ${selected === "auto" ? "selected" : ""}>${autoLabel}</option>`]
+        .concat((data.runtimes || []).map((rt) => composerRuntimeOptionHtml(rt, r.cells && r.cells[rt.id], selected)))
+        .join("");
+      return `<tr>
       <td style="font-family:var(--mono); font-size:11px;">${escapeHtml(r.experiment_id)}</td>
       <td>${r.exists ? `<span class="badge slate" title="Re-posting matches this existing experiment instead of creating a new one">matches ${escapeHtml(r.status || "")}</span>` : `<span class="badge emerald">new</span>`}</td>
       <td>${fmtNum(r.estimate && r.estimate.hours)}h</td>
-      <td>${r.best ? escapeHtml(r.best) : `<span title="${escapeHtml(r.reason || "")}">none</span>`}</td>
-    </tr>`).join("")}</tbody>
+      <td><select class="text-input" data-composer-row-runtime="${escapeHtml(r.experiment_id)}" style="font-size:11px; padding:3px 5px;">${options}</select></td>
+    </tr>`;
+    }).join("")}</tbody>
   </table>`;
+  el.querySelectorAll("[data-composer-row-runtime]").forEach((sel) => {
+    sel.addEventListener("change", () => state.composerRowRuntime.set(sel.dataset.composerRowRuntime, sel.value));
+  });
+}
+
+// F4.3: the experiment_id a preflight row (config_path, seed) resolved to
+// — how submitComposer() attaches each row's own Runtime pick to the
+// matching configs[] entry it's about to submit. null before a preflight
+// has ever run (e.g. the request never finished, or was never scheduled) —
+// callers fall back to the bulk value for that row.
+function composerRowExperimentId(configPath, seed) {
+  const rows = (state.composerPreflight && state.composerPreflight.rows) || [];
+  const row = rows.find((r) => r.config_path === configPath && String(r.seed ?? "") === String(seed ?? ""));
+  return row ? row.experiment_id : null;
+}
+
+// "auto" | <runtime id> (a per-row select's value, or composerBulkRuntimeValue())
+// -> the §6.3 policy shape POST /api/experiments' configs[].runtime expects.
+function composerRuntimeFromValue(value) {
+  return value === "auto" ? { mode: "auto" } : { mode: "pinned", slot: value };
 }
 
 async function submitComposer(then) {
@@ -1016,8 +1198,26 @@ async function submitComposer(then) {
   if (!configs.length) { toast("Pick at least one config", "err"); return; }
   if (state.composerBusy) return;
   state.composerBusy = true;
+  const seeds = composerSeeds();
+  // F4.3: always one configs[] entry per (config, seed) row — every row in
+  // the preflight table maps 1:1 to one entry here, so its own Runtime pick
+  // (composerRowRuntimeValue(), which already fell back to the bulk "Set
+  // all rows to…" value if the row was never touched by hand) travels with
+  // it as that entry's `runtime` override. Sent for every row, not only the
+  // ones that differ from the request-level default — simpler than tracking
+  // "did the user actually touch this one," and harmless: the backend only
+  // ever *acts* on a matched row's override when it differs from what that
+  // experiment already has stored (backend/experiments.py's create_experiments).
+  const entryConfigs = [];
+  for (const path of configs) {
+    for (const seed of seeds) {
+      const eid = composerRowExperimentId(path, seed);
+      const value = eid ? composerRowRuntimeValue(eid) : composerBulkRuntimeValue();
+      entryConfigs.push({ path, seeds: [seed], runtime: composerRuntimeFromValue(value) });
+    }
+  }
   const body = {
-    configs, seeds: composerSeeds(), overlay: composerOverlay(), runtime: composerRuntime(),
+    configs: entryConfigs, overlay: composerOverlay(), runtime: composerRuntime(),
     study_id: document.getElementById("composer-study-select").value || null,
     group: document.getElementById("composer-group").value.trim() || null,
   };
@@ -1025,8 +1225,36 @@ async function submitComposer(then) {
   try {
     const result = await api("/api/experiments", { method: "POST", body: JSON.stringify(body) });
     const n = (result.created || []).length, m = (result.matched || []).length;
-    toast(`${n} created${m ? `, ${m} matched existing` : ""}${then ? ` (${then.replace("_", " ")})` : ""}`, "ok");
-    closeComposer();
+    toast(`${n} created${m ? `, ${m} matched existing` : ""}`, "ok");
+    // F4.3: a matched row whose per-row Runtime pick differed from what
+    // that experiment already had applies set_runtime backend-side —
+    // reuses F0.1's exact {ok, skipped} shape, so the same
+    // reportActionResult/"why not" panel covers it (e.g. it was in flight
+    // and got refused instead).
+    //
+    // F5 carry-over fix: `result.runtime_changes` and `result.then` can
+    // both carry skips from the very same submit (a matched row that's
+    // simultaneously in flight *and* independently refused by Queue/Run
+    // now). Both calls share one collector array instead of each opening
+    // its own "why not" panel — the second no longer silently overwrites
+    // the first — and a single merged panel opens once, after both, only
+    // if either one actually found anything to report.
+    const skipReportEntries = [];
+    const runtimeOk = reportActionResult(result.runtime_changes, "update runtime", skipReportEntries);
+    // reportActionResult (F0.1) toasts result.then's own skipped entries;
+    // its return says whether every one of them actually dispatched/queued.
+    const allOk = then ? reportActionResult(result.then, then.replace("_", " "), skipReportEntries) : true;
+    if (skipReportEntries.length) openSkipReport(null, skipReportEntries);
+    if (then === "run_now" && !allOk) {
+      // Composer Run now with skips: stays open (the panel it just opened
+      // says why), and the skipped ones are drafts, not gone.
+      toast("Saved as drafts — see why not run now", "err");
+    } else if (!runtimeOk) {
+      // A matched row's runtime change was refused — stays open next to
+      // the merged "why" panel above.
+    } else {
+      closeComposer();
+    }
     refreshExperiments2AllData();
   } catch (e) {
     toast("Couldn't create experiments: " + e.message, "err");
@@ -1048,6 +1276,9 @@ function initExperiments2Buttons() {
   document.querySelectorAll("#experiments-subtabs .subtab-btn").forEach((btn) => {
     btn.addEventListener("click", () => experiments2SubtabClick(btn.dataset.subtab));
   });
+
+  document.getElementById("skip-report-close").addEventListener("click", closeSkipReport);
+  document.getElementById("skip-report-backdrop").addEventListener("click", (e) => { if (e.target.id === "skip-report-backdrop") closeSkipReport(); });
 
   document.getElementById("btn-new-study").addEventListener("click", () => openStudyEditModal(null));
   document.getElementById("btn-study-edit").addEventListener("click", () => openStudyEditModal(selectedStudy()));
@@ -1075,8 +1306,11 @@ function initExperiments2Buttons() {
   document.getElementById("btn-composer-add-overlay-row").addEventListener("click", () => { state.composerOverlayRows.push({ key: "", value: "" }); renderComposerOverlayRows(); });
   document.getElementById("composer-runtime-mode").addEventListener("change", (e) => {
     document.getElementById("composer-pin-field").classList.toggle("hidden", e.target.value !== "pinned");
-    scheduleComposerPreflight();
+    composerBulkRuntimeChanged();
   });
+  // F4.2 fix: changing the pin target itself used to never re-run preflight
+  // or re-apply to the rows — only the mode select had a listener at all.
+  document.getElementById("composer-pin-select").addEventListener("change", composerBulkRuntimeChanged);
   document.getElementById("composer-save-draft").addEventListener("click", () => submitComposer(null));
   document.getElementById("composer-queue").addEventListener("click", () => submitComposer("queue"));
   document.getElementById("composer-run-now").addEventListener("click", () => submitComposer("run_now"));
@@ -1194,8 +1428,8 @@ function renderXdetailHeader() {
 async function runXdetailAction(action, id) {
   if (action === "delete") { openDeleteExperimentModal(id, () => navigateToView("experiments")); return; }
   try {
-    await api("/api/experiments/actions", { method: "POST", body: JSON.stringify({ action, ids: [id] }) });
-    toast(`${action.replace("_", " ")}: '${id}'`, "ok");
+    const result = await api("/api/experiments/actions", { method: "POST", body: JSON.stringify({ action, ids: [id] }) });
+    reportActionResult(result, action.replace("_", " "));
     refreshXdetail();
   } catch (e) {
     toast(`Couldn't ${action}: ${e.message}`, "err");
@@ -1211,10 +1445,25 @@ function renderXdetailTab(tab) {
   else if (tab === "artifacts") loadXdetailArtifacts();
   else if (tab === "config") renderXdetailConfig(v);
   else if (tab === "history") renderXdetailHistory(v);
-  else if (tab === "notes") renderXdetailNotes(v);
+  else if (tab === "notes") {
+    // XDASH_FIXES_PLAN.md F1.2 — the 5s poller (refreshXdetail) calls this
+    // same renderXdetailTab() on every tick; without the guard it wiped
+    // whatever the user was mid-typing into the notes textarea (or the run
+    // tag/note fields) every 5s (§2/#6's "same bug class elsewhere").
+    if (!formPollGuard("xdetail-notes-panel")) renderXdetailNotes(v);
+  }
 }
 
 // ---------------------------------------------------------------- Overview
+// XDASH_FIXES_PLAN.md F0.2 — the Overview's own rendering of a.blocked (the
+// table's blockedDetailHtml above uses a hover title for the detail, fine
+// for a dense row; this page has the room to show it plainly instead).
+function blockedOverviewHtml(blocked) {
+  if (!blocked) return "—";
+  return `<span class="badge red">${escapeHtml(blocked.code || "blocked")}</span> ${escapeHtml(blocked.detail || "")}` +
+    (blocked.action ? `<div class="settings-profile-path" style="font-family:var(--mono); white-space:normal; margin-top:4px;">${escapeHtml(blocked.action)}</div>` : "");
+}
+
 function renderXdetailOverview(v) {
   const a = v.current_attempt || {};
   const code = a.code || {};
@@ -1235,8 +1484,9 @@ function renderXdetailOverview(v) {
     ["Code", code.commit ? `${String(code.commit).slice(0, 10)}${code.dirty ? " (dirty)" : ""}${code.pushed === false ? " (not pushed)" : ""}` : "—"],
     ["Run dir", run.collected_dir || run.run_dir || "—"],
   ];
-  document.getElementById("xdetail-overview-kv").innerHTML =
-    rows.map(([k, val]) => `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(String(val))}</td></tr>`).join("");
+  const html = rows.map(([k, val]) => `<tr><td>${escapeHtml(k)}</td><td>${escapeHtml(String(val))}</td></tr>`).join("")
+    + (a.blocked ? `<tr><td>Blocked</td><td>${blockedOverviewHtml(a.blocked)}</td></tr>` : "");
+  document.getElementById("xdetail-overview-kv").innerHTML = html;
 }
 
 // ---------------------------------------------------------------- Live

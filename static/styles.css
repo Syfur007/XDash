@@ -778,7 +778,7 @@ tr.kbd-focus td:first-child{ color: var(--amber); }
 .term-card-accent{ width:4px; flex-shrink:0; background: var(--slate); }
 .term-card-accent.running{ background: var(--amber); }
 .term-card-accent.completed{ background: var(--teal); }
-.term-card-accent.interrupted, .term-card-accent.failed, .term-card-accent.stopped{ background: var(--red); }
+.term-card-accent.interrupted, .term-card-accent.failed, .term-card-accent.stopped, .term-card-accent.lost{ background: var(--red); }
 .term-card-accent.unmanaged{ background: var(--slate); }
 .term-card-body{ flex:1; min-width:0; padding:11px 13px; }
 .term-card-title{
@@ -802,7 +802,7 @@ tr.kbd-focus td:first-child{ color: var(--amber); }
 }
 .term-card-status.running{ color: var(--amber); }
 .term-card-status.completed{ color: var(--teal); }
-.term-card-status.interrupted, .term-card-status.failed, .term-card-status.stopped{ color: var(--red); }
+.term-card-status.interrupted, .term-card-status.failed, .term-card-status.stopped, .term-card-status.lost{ color: var(--red); }
 .term-card-status.unmanaged{ color: var(--slate); }
 .term-card-metric{
   font-family: var(--mono); font-size:12px; font-weight:700; letter-spacing:0.2px;

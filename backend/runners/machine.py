@@ -28,20 +28,23 @@ exit code alone, so an SSH/Colab run was never collected at all.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import tempfile
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .. import datasets
+from .. import envcheck
 from .. import framework
 from .. import hosts
 from .. import results_ingest
 from .. import scheduler
 from .. import terminals
 from .. import tmux_runner as tmux
+from .. import tools
 from .. import transport as transport_mod
 from ..config import settings
 from ..store import atomic_write_text
@@ -57,6 +60,10 @@ _STATUS_MAP = {
     # a restart, only that it does (DASHBOARD_REDESIGN_PLAN.md §2.3).
     "stopped": "interrupted",
     "interrupted": "interrupted",
+    # A dead record reconciled once by terminals._reconcile_lost() (issue 9) —
+    # canonically the same "needs a restart, not currently running" bucket as
+    # interrupted; raw_status keeps "lost" so the UI can still say so.
+    "lost": "interrupted",
     "unmanaged": "unmanaged",
 }
 
@@ -113,9 +120,16 @@ def probe_accelerator(transport: "transport_mod.Transport", timeout: float = 15.
     §8.4's Compute Diagnostics "GPU probe", closing the gap Phase 2 left:
     only the local machine was ever probed). None on any failure (no GPU, no
     nvidia-smi, host unreachable) — a probe that can't tell must never be
-    reported as "no GPU", so callers keep whatever was declared before."""
+    reported as "no GPU", so callers keep whatever was declared before.
+
+    Only a *local* transport resolves nvidia-smi through backend/tools.py
+    (XDASH_FIXES_PLAN.md F2) — a remote host's own nvidia-smi runs on ITS OWN
+    PATH once the argv crosses ssh, exactly like tmux_runner._run()'s split."""
+    argv = list(NVIDIA_SMI_ARGV)
+    if isinstance(transport, transport_mod.LocalTransport):
+        argv[0] = tools.path("nvidia-smi")
     try:
-        proc = transport.run(NVIDIA_SMI_ARGV, timeout=timeout)
+        proc = transport.run(argv, timeout=timeout)
     except (transport_mod.TransportError, OSError):
         return None
     if proc.returncode != 0:
@@ -140,11 +154,46 @@ def _rel(path: Path) -> Path:
     return path.relative_to(settings.repo_root)
 
 
+def _experiment_id_for_session(session_name: str) -> Optional[str]:
+    """The Experiment id owning *session_name*'s tmux session, via the
+    scheduler item it was launched for — None for a session the dispatcher
+    never created (the Configs page's "Launch in terminal"/"Add to
+    schedule"). Deferred import: backend/experiments.py imports this module
+    through backend/runners/registry.py, so importing it back at module
+    load time would be circular (same pattern as scheduler.py's own
+    on_scheduler_item_finished callback)."""
+    try:
+        item = next((i for i in scheduler.items_by_id().values() if i.get("session_name") == session_name), None)
+    except Exception:
+        return None
+    if item is None:
+        return None
+    from .. import experiments
+    try:
+        return experiments.experiment_id_for_scheduler_item(item["id"])
+    except Exception:
+        return None
+
+
+def _session_label(term: Dict[str, Any]) -> str:
+    """XDASH_FIXES_PLAN.md F0.6 (issue 9) — an attempt-owned session is
+    labelled by its Experiment id, so N attempts of the same config never
+    render as N identical "running: <config name>" rows. A session the
+    dashboard launched but the dispatcher doesn't own (ad hoc) keeps the
+    config name, marked so it reads differently from a real experiment id.
+    A foreign (unmanaged) tmux session is neither — left exactly as before."""
+    if not term.get("managed", False):
+        return term["session_name"]
+    config_name = term.get("experiment_name") or term["session_name"]
+    experiment_id = _experiment_id_for_session(term["session_name"])
+    return experiment_id or ("%s (ad hoc)" % config_name)
+
+
 def _to_unit(runner_id: str, term: Dict[str, Any]) -> RunUnit:
     return RunUnit(
         unit_id=term["session_name"],
         runner_id=runner_id,
-        label=term.get("experiment_name") or term["session_name"],
+        label=_session_label(term),
         status=_STATUS_MAP.get(term["status"], "unknown"),
         raw_status=term["status"],
         config_path=term.get("config_path"),
@@ -163,6 +212,67 @@ def _to_unit(runner_id: str, term: Dict[str, Any]) -> RunUnit:
 
 # A scheduler item in one of these will never change again.
 _ITEM_TERMINAL = frozenset({"completed", "failed", "cancelled", "skipped"})
+
+# XDASH_FIXES_PLAN.md F0.4 — diagnose()'s trigger substrings, checked in
+# order against each stage's persisted console log. A marker seen before any
+# "epoch" line means the run never got going at all (a broken environment,
+# not a training-time crash), so env-broken is only awarded pre-epoch — see
+# _classify_failure(). Both of today's real failures (timm.layers,
+# "No module named 'dissert'") are import-time and match here.
+_ENV_BROKEN_MARKERS = (
+    "ModuleNotFoundError", "ImportError", "SyntaxError",
+    "conda: command not found", "EnvironmentNameNotFound", "can't open file",
+)
+_OOM_MARKER = "CUDA out of memory"
+_DATA_MISSING_MARKER = "FileNotFoundError"
+# Deviation from the plan's own wording (noted in XDASH_FIXES_PLAN.md's F0
+# build log): "under the dataset root" isn't checked — any FileNotFoundError
+# classifies as data-missing. Narrowing it to paths under the config's
+# dataset root would need the same dataset-binding lookup can_accept()
+# already does, which is more than this fixture-driven classifier needs.
+_EXCEPTION_LINE_MARKERS = _ENV_BROKEN_MARKERS + (_OOM_MARKER, _DATA_MISSING_MARKER)
+
+
+def _classify_failure(text: str) -> Tuple[str, bool]:
+    """(code, retry) from a stage's combined console log tail, per
+    XDASH_FIXES_PLAN.md F0.4's table. Unmatched text is the generic
+    `attempt-failed`, the only code that gets retried."""
+    if _OOM_MARKER in text:
+        return "oom", False
+    if _DATA_MISSING_MARKER in text:
+        return "data-missing", False
+    epoch_seen = False
+    for line in text.splitlines():
+        if not epoch_seen and any(marker in line for marker in _ENV_BROKEN_MARKERS):
+            return "env-broken", False
+        if re.search(r"\bepoch\b", line, re.IGNORECASE):
+            epoch_seen = True
+    return "attempt-failed", True
+
+
+def _last_exception_line(text: str) -> str:
+    """The last line worth quoting in `diagnose()`'s detail — the exception
+    message itself when one of the known markers is present, else just the
+    last line of output (still more useful than nothing for a generic
+    attempt-failed)."""
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    for line in reversed(lines):
+        if any(marker in line for marker in _EXCEPTION_LINE_MARKERS):
+            return line
+    return lines[-1] if lines else "(no output captured)"
+
+
+def _failing_stage_name(stages: List[Dict[str, Any]]) -> str:
+    """Which stage the classification's detail should be attributed to —
+    the one that actually failed, or (train failed -> eval never ran) the
+    first one not cleanly finished."""
+    for stage in stages:
+        if stage.get("status") == "failed":
+            return stage.get("name") or "run"
+    for stage in stages:
+        if stage.get("status") not in ("completed", "done"):
+            return stage.get("name") or "run"
+    return (stages[0].get("name") if stages else None) or "run"
 
 
 class MachineRunner(Runner):
@@ -208,14 +318,42 @@ class MachineRunner(Runner):
             return {**declared, "source": declared.get("source") or "host record"}
         return _probe_local_accelerator() if self.host.is_local else None
 
+    def _required_tools(self) -> Tuple[str, ...]:
+        """Which backend/tools.py entries this host needs *locally executed*
+        to operate at all (XDASH_FIXES_PLAN.md F2, "local <- tmux",
+        "SSH <- ssh/rsync"): the local machine needs tmux itself; a remote
+        host is reached over ssh/rsync (both run on this machine, never the
+        remote's own PATH), so it needs those two instead — tmux on the
+        remote side is a different, unresolved concern (see tmux_runner._run)."""
+        return ("tmux",) if self.host.is_local else ("ssh", "rsync")
+
     def capacity(self) -> CapacitySnapshot:
         used = sum(1 for u in self.list_units() if u.extra.get("managed") and u.status == "running")
         sched = scheduler.list_items()
+        # XDASH_FIXES_PLAN.md F1.5 — read-only: never triggers a check here,
+        # only reports whatever's already cached (or None, "not checked
+        # yet"). runtimes._health() is the only reader of these two keys.
+        env = envcheck.cached_result(self.host)
+        missing_tools = [t for t in self._required_tools() if not tools.status(t).ok]
         return CapacitySnapshot(
             unit="slots", used=used, limit=self.host.max_concurrent,
             extra={
                 "tmux_available": tmux.tmux_available(host_id=self.host.id),
                 "scheduler_paused": sched.get("paused", False),
+                # XDASH_FIXES_PLAN.md F0.3 — backend/runtimes.py's health check
+                # reads these two generically (no per-kind branch there beyond
+                # runner.kind): the same cached availability can_accept()
+                # already pays for (_cached_available, 30s TTL — no extra
+                # network round trip from /api/runtimes' 5s poll), and whether
+                # a non-local host even declares a repo_root for this profile.
+                "reachable": _cached_available(self.host.id, self._transport),
+                "repo_root_configured": self.host.is_local or self.host.declares_repo_root,
+                "env_check_failed": bool(env) and not env.get("ok"),
+                "env_check_detail": (env or {}).get("detail"),
+                # F2 — the *local* copy of whichever CLI this host needs to
+                # be driven at all (see _required_tools()'s own docstring).
+                "tools_ok": not missing_tools,
+                "tools_detail": ", ".join("%s missing/too old" % t for t in missing_tools) or None,
             },
         )
 
@@ -258,6 +396,13 @@ class MachineRunner(Runner):
             }
         if not _cached_available(self.host.id, self._transport):
             return {"code": "host-unreachable", "detail": f"Host '{self.host.id}' is not reachable"}
+        # XDASH_FIXES_PLAN.md F1.5/D6 — refuse up front on a *known* broken
+        # env instead of dispatching and failing (issue 11's U1/U3). See
+        # backend/envcheck.py's module docstring for the cold-cache/async
+        # trade-off: a cache miss doesn't block this tick.
+        env_block = envcheck.gate_for_dispatch(self.host)
+        if env_block is not None:
+            return env_block
         if not self.host.is_local:
             plan = datasets.plan_delivery_for_config(experiment["config_path"], self.id, self.kind)
             if plan.get("state") == "blocked":
@@ -431,6 +576,29 @@ class MachineRunner(Runner):
         if self._transport.exists(remote_root / ledger_rel, "d"):
             self._transport.pull(remote_root / ledger_rel, staging / ledger_rel)
         return str(staging)
+
+    def diagnose(self, attempt: Dict[str, Any], live: Dict[str, Any], log_texts: List[str]) -> Optional[Dict[str, Any]]:
+        """XDASH_FIXES_PLAN.md F0.4 — a specific code instead of the generic
+        `attempt-failed` for the two real crashes issue 11 turned up (a
+        stale conda env's timm build, a target env missing dissert
+        entirely): both are import-time failures, invisible from the exit
+        code alone. *log_texts* is already the persisted train/eval logs
+        (_collect_attempt runs before this — see _poll_and_resolve), so no
+        file access happens here."""
+        text = "\n".join(log_texts)
+        if not text.strip():
+            return None
+        code, retry = _classify_failure(text)
+        stage = _failing_stage_name(live.get("stages") or [])
+        item = (scheduler.items_by_id().get(
+            (attempt.get("unit_ref") or {}).get("%s_item_id" % stage)
+        ) or {})
+        env = self.host.env_activate_cmd or "no env_activate command configured"
+        return {
+            "code": code, "retry": retry,
+            "detail": "%s exited %s: %s" % (stage, item.get("return_code"), _last_exception_line(text)),
+            "action": "Fix '%s' on %s: %s" % (stage, self.host.label, env),
+        }
 
     def cancel(self, attempt: Dict[str, Any]) -> bool:
         unit_ref = attempt.get("unit_ref") or {}

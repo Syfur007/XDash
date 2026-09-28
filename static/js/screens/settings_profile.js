@@ -95,7 +95,7 @@ function renderProfileSectionNav() {
     <span class="dot"></span><span style="flex:1; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(label)}</span>
     ${hasRestart(key) ? `<span class="badge amber" title="Contains a restart-required key">⟳</span>` : ""}
   </div>`;
-  const rows = keys.map((k) => row(k, k)).join("") + row("alerts", "Alerts") + row("about", "About");
+  const rows = keys.map((k) => row(k, k)).join("") + row("tools", "Tools") + row("storage", "Storage") + row("alerts", "Alerts") + row("about", "About");
   nav.innerHTML = rows;
   nav.querySelectorAll("[data-profile-section]").forEach((el) => {
     el.addEventListener("click", () => trySwitchProfileSection(el.dataset.profileSection));
@@ -215,6 +215,201 @@ function renderProfileAboutSection(body) {
   `;
 }
 
+// ================================================================== tools (XDASH_FIXES_PLAN.md F2)
+// backend/tools.py's registry — a deployment-level settings screen, not a
+// profile one (kaggle_executable/colab_executable used to live in the
+// profile form above; D2 moved them here). No Save/Revert footer (like
+// Alerts/About): each row acts immediately (PUT to set/clear an override,
+// POST .../test to re-resolve and re-validate one tool).
+async function renderProfileToolsSection(body) {
+  body.innerHTML = `<div class="empty-state">Loading…</div>`;
+  let data;
+  try {
+    data = await api("/api/tools");
+  } catch (e) {
+    body.innerHTML = `<div class="empty-state">Couldn't load tools: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  if (state.profileActiveSection !== "tools") return;  // switched away while awaiting
+  state.toolsData = data.tools || {};
+  const rows = Object.entries(state.toolsData).map(([name, st]) => {
+    const badgeClass = st.ok ? "emerald" : (st.required ? "red" : "amber");
+    const badgeText = st.ok ? "ok" : (st.required ? "needs attention" : "not found (optional)");
+    const versionText = st.version ? (st.min_version ? `${st.version} (>= ${st.min_version})` : st.version) : "–";
+    const overrideValue = st.source === "override" ? st.path : "";
+    return `<tr data-tool-row="${escapeHtml(name)}">
+      <td>${escapeHtml(name)}<div class="settings-profile-path">${escapeHtml(st.used_for || "")}</div></td>
+      <td><span class="badge ${badgeClass}" title="${escapeHtml(st.error || "")}">${badgeText}</span></td>
+      <td><span class="settings-profile-path" title="${escapeHtml(st.path)}">${escapeHtml(st.path)}</span>
+        <span class="badge slate">${escapeHtml(st.source)}</span></td>
+      <td>${escapeHtml(versionText)}</td>
+      <td><input class="text-input" style="width:220px;" data-tool-override="${escapeHtml(name)}"
+            placeholder="auto-resolved" value="${escapeHtml(overrideValue)}" /></td>
+      <td style="white-space:nowrap;">
+        <button class="btn btn-sm btn-ghost" data-tool-save="${escapeHtml(name)}">Save</button>
+        <button class="btn btn-sm btn-ghost" data-tool-test="${escapeHtml(name)}">Test</button>
+      </td>
+    </tr>`;
+  }).join("");
+  body.innerHTML = `<table class="compare-table" style="width:100%;">
+    <thead><tr><th>Tool</th><th>Status</th><th>Resolved path</th><th>Version</th><th>Override</th><th></th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+  <div class="settings-profile-path" style="margin-top:10px;">
+    Resolution order: an explicit override above -> the bin/ directory next to whichever Python
+    is running server.py -> PATH. A missing or too-old required tool puts its dependent
+    runtimes into "needs attention" on the Lab/Compute tiles.
+  </div>`;
+  wireProfileToolsSection(body);
+}
+
+function wireProfileToolsSection(body) {
+  body.querySelectorAll("[data-tool-save]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const name = btn.dataset.toolSave;
+      const input = body.querySelector(`[data-tool-override="${name}"]`);
+      try {
+        await api(`/api/tools/${encodeURIComponent(name)}`, {
+          method: "PUT", body: JSON.stringify({ path: input.value.trim() || null }),
+        });
+        toast(`'${name}' override saved`, "ok");
+      } catch (e) {
+        toast(`Couldn't save '${name}': ${e.message}`, "err");
+      }
+      renderProfileToolsSection(body);
+    });
+  });
+  body.querySelectorAll("[data-tool-test]").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const name = btn.dataset.toolTest;
+      try {
+        const st = await api(`/api/tools/${encodeURIComponent(name)}/test`, { method: "POST" });
+        toast(st.ok ? `'${name}': ok (${st.path})` : `'${name}': ${st.error || "not found"}`, st.ok ? "ok" : "err");
+      } catch (e) {
+        toast(`Couldn't test '${name}': ${e.message}`, "err");
+      }
+      renderProfileToolsSection(body);
+    });
+  });
+}
+
+// ================================================================== storage (XDASH_FIXES_PLAN.md F5)
+// backend/housekeeping.py's inventory/clean — a deployment-level settings
+// screen, same "no Save/Revert footer, each control acts immediately" shape
+// as Tools above. Auto categories run unattended too (startup + daily); this
+// panel is the manual/inspectable side of the exact same categories.
+function fmtBytes(n) {
+  if (typeof n !== "number" || !isFinite(n)) return "–";
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+async function renderProfileStorageSection(body) {
+  body.innerHTML = `<div class="empty-state">Loading…</div>`;
+  let data;
+  try {
+    data = await api("/api/housekeeping");
+  } catch (e) {
+    body.innerHTML = `<div class="empty-state">Couldn't load storage inventory: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  if (state.profileActiveSection !== "storage") return;  // switched away while awaiting
+  state.housekeepingData = data;
+  const auto = new Set(data.auto_categories || []);
+  const settingsRow = data.settings || {};
+  const rows = Object.entries(data.categories || {}).map(([key, c]) => {
+    const errRow = c.error ? `<div class="settings-profile-path" style="color:var(--danger, #e66);">${escapeHtml(c.error)}</div>` : "";
+    return `<tr data-hk-row="${escapeHtml(key)}">
+      <td>${escapeHtml(c.label || key)}${auto.has(key) ? "" : ` <span class="badge slate" title="Only runs when you click Clean">manual</span>`}${errRow}</td>
+      <td>${c.total_count} item${c.total_count === 1 ? "" : "s"}<div class="settings-profile-path">${fmtBytes(c.total_bytes)}</div></td>
+      <td>${c.eligible_count} item${c.eligible_count === 1 ? "" : "s"}<div class="settings-profile-path">${fmtBytes(c.eligible_bytes)}</div></td>
+      <td style="white-space:nowrap;">
+        <button class="btn btn-sm btn-ghost" data-hk-preview="${escapeHtml(key)}">Preview</button>
+        <button class="btn btn-sm btn-ghost" data-hk-clean="${escapeHtml(key)}" ${c.eligible_count ? "" : "disabled"}>Clean</button>
+      </td>
+    </tr>`;
+  }).join("");
+  body.innerHTML = `
+    <table class="compare-table" style="width:100%;">
+      <thead><tr><th>Category</th><th>Total</th><th>Eligible now</th><th></th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    <h4 class="run-detail-section-title">Retention settings</h4>
+    <div class="field" style="max-width:320px;">
+      <label>Retention (days) — terminal records &amp; scheduler history</label>
+      <input class="text-input" id="hk-retention-days" type="number" min="0" step="1" value="${escapeHtml(settingsRow.retention_days ?? "")}" />
+    </div>
+    <div class="field" style="max-width:320px;">
+      <label>Thumbnail cache cap (MB)</label>
+      <input class="text-input" id="hk-thumbnail-cap-mb" type="number" min="0" step="1" value="${escapeHtml(settingsRow.thumbnail_cap_mb ?? "")}" />
+    </div>
+    <div class="field" style="max-width:320px;">
+      <label>Ad-hoc finished-session grace period (hours)</label>
+      <input class="text-input" id="hk-adhoc-grace-hours" type="number" min="0" step="1" value="${escapeHtml(settingsRow.adhoc_session_grace_hours ?? "")}" />
+    </div>
+    <button class="btn btn-sm" id="btn-hk-save-settings">Save retention settings</button>
+    <div id="hk-preview-body" class="settings-profile-path" style="margin-top:14px; white-space:pre-wrap;"></div>
+  `;
+  wireProfileStorageSection(body);
+}
+
+function wireProfileStorageSection(body) {
+  body.querySelectorAll("[data-hk-preview]").forEach((btn) => {
+    btn.addEventListener("click", () => previewHousekeepingCategory(btn.dataset.hkPreview));
+  });
+  body.querySelectorAll("[data-hk-clean]").forEach((btn) => {
+    btn.addEventListener("click", () => cleanHousekeepingCategory(btn.dataset.hkClean));
+  });
+  const saveBtn = document.getElementById("btn-hk-save-settings");
+  if (saveBtn) saveBtn.addEventListener("click", saveHousekeepingSettings);
+}
+
+async function previewHousekeepingCategory(key) {
+  const out = document.getElementById("hk-preview-body");
+  try {
+    const r = await api("/api/housekeeping/clean", {
+      method: "POST", body: JSON.stringify({ categories: [key], dry_run: true }),
+    });
+    const c = r.results[key] || {};
+    if (out) out.textContent = `${key}: would remove ${c.removed_count || 0} item(s), freeing ${fmtBytes(c.freed_bytes || 0)}.`;
+  } catch (e) {
+    toast(`Couldn't preview '${key}': ${e.message}`, "err");
+  }
+}
+
+async function cleanHousekeepingCategory(key) {
+  const label = (state.housekeepingData?.categories?.[key] || {}).label || key;
+  const ok = await showConfirm(`Clean '${label}'?`, "This permanently removes every currently-eligible item in this category. This can't be undone.");
+  if (!ok) return;
+  try {
+    const r = await api("/api/housekeeping/clean", {
+      method: "POST", body: JSON.stringify({ categories: [key], dry_run: false }),
+    });
+    const c = r.results[key] || {};
+    const errNote = (c.errors || []).length ? ` (${c.errors.length} item(s) failed — see server log)` : "";
+    toast(`'${label}': removed ${c.removed_count || 0} item(s), freed ${fmtBytes(c.freed_bytes || 0)}${errNote}`, "ok");
+  } catch (e) {
+    toast(`Couldn't clean '${key}': ${e.message}`, "err");
+  }
+  renderProfileStorageSection(document.getElementById("profile-section-body"));
+}
+
+async function saveHousekeepingSettings() {
+  const patch = {
+    retention_days: document.getElementById("hk-retention-days").value,
+    thumbnail_cap_mb: document.getElementById("hk-thumbnail-cap-mb").value,
+    adhoc_session_grace_hours: document.getElementById("hk-adhoc-grace-hours").value,
+  };
+  try {
+    await api("/api/housekeeping/settings", { method: "PUT", body: JSON.stringify(patch) });
+    toast("Retention settings saved", "ok");
+  } catch (e) {
+    toast("Couldn't save retention settings: " + e.message, "err");
+  }
+}
+
 function renderProfileSectionBody() {
   const body = document.getElementById("profile-section-body");
   if (!body || !state.profileDoc) return;
@@ -227,6 +422,10 @@ function renderProfileSectionBody() {
     document.getElementById("kaggle-notif-body")?.scrollIntoView({ behavior: "smooth", block: "center" });
   } else if (section === "about") {
     renderProfileAboutSection(body);
+  } else if (section === "tools") {
+    renderProfileToolsSection(body);
+  } else if (section === "storage") {
+    renderProfileStorageSection(body);
   } else {
     const value = (state.profileDoc.parsed || {})[section];
     if (value !== null && typeof value === "object" && !Array.isArray(value)) {
@@ -329,7 +528,7 @@ async function checkPathExists(el) {
 function updateProfileSaveButtonState() {
   const saveBtn = document.getElementById("btn-profile-form-save");
   const revertBtn = document.getElementById("btn-profile-form-revert");
-  const isFormSection = state.profileActiveSection !== "alerts" && state.profileActiveSection !== "about";
+  const isFormSection = !["alerts", "about", "tools", "storage"].includes(state.profileActiveSection);
   if (saveBtn) saveBtn.disabled = !isFormSection || !state.profileDirty;
   if (revertBtn) revertBtn.disabled = !isFormSection || !state.profileDirty;
 }
@@ -348,7 +547,7 @@ function updateProfileHeader() {
 async function saveProfileSection() {
   if (!state.profileDoc) return;
   const section = state.profileActiveSection;
-  if (section === "alerts" || section === "about") return;
+  if (section === "alerts" || section === "about" || section === "tools" || section === "storage") return;
   const body = document.getElementById("profile-section-body");
   const patch = {};
 

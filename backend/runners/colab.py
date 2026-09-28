@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional
 
 from .. import colab
 from .. import hosts
+from .. import tools
 from .. import transport as transport_mod
 from ..config import settings
 from .base import CapacitySnapshot, LaunchSpec, RunnerCapabilities, RunnerCapabilityError, RunUnit
@@ -147,9 +148,15 @@ class ColabRunner(MachineRunner):
 
     def capacity(self) -> CapacitySnapshot:
         live = bool(colab.colab_available() and colab.list_sessions(self.account_name))
+        cli_status = tools.status("colab")
         return CapacitySnapshot(
             unit="slots", used=(1 if self._busy() else 0), limit=1,
-            extra={"volatile": True, "provisioned": live},
+            extra={
+                "volatile": True, "provisioned": live,
+                # XDASH_FIXES_PLAN.md F2 — read by runtimes._health()'s new
+                # "colab" branch.
+                "cli_ok": cli_status.ok, "cli_detail": cli_status.error,
+            },
         )
 
     def accelerator(self) -> Optional[Dict[str, Any]]:
@@ -184,7 +191,7 @@ class ColabRunner(MachineRunner):
             return {"code": plan.get("code") or "dataset-unavailable", "detail": plan.get("detail", "")}
 
         if not colab.colab_available():
-            return {"code": "host-unreachable", "detail": f"'{settings.colab_executable}' is not on PATH"}
+            return {"code": "host-unreachable", "detail": f"'{tools.path('colab')}' is not on PATH"}
         if not colab.has_credentials(self.account_name, account):
             return {
                 "code": "colab-not-connected",

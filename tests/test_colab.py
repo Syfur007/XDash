@@ -235,3 +235,34 @@ def test_can_accept_explains_a_not_connected_account(account, monkeypatch):
     assert block["code"] == "colab-not-connected" and "HOME=" in block["detail"]
     _connect()
     assert runner.can_accept({"config_path": "experiment/demo.yaml"}, 1.0) is None
+
+
+# ----------------------------------------------------------------- XDASH_FIXES_PLAN.md F2 ("Colab <- colab" health)
+def test_colab_runtime_needs_attention_when_cli_is_missing(account, monkeypatch):
+    """A real health problem (CLI missing) outranks "unconfigured" (no VM
+    provisioned yet) — runtimes._state() checks health before the
+    `provisioned` gate for exactly this reason (XDASH_FIXES_PLAN.md F2):
+    otherwise a Colab account with no live VM would never surface a broken
+    CLI at all, since labRuntimeAttentionText() only fires for state
+    === "attention"."""
+    from backend import runtimes, tools
+    monkeypatch.setattr(tools, "status", lambda name, refresh=False: tools.ToolStatus(
+        name="colab", path="colab", source="not-found", exists=False, executable=False,
+        version=None, min_version=None, version_ok=None, required=True, error="not found on PATH",
+    ))
+    runner = colab_runner.ColabRunner("acct")
+    view = runtimes.runtime_view(runner)
+    assert view["state"] == "attention"
+    assert "Colab CLI" in view["health"]["error"]
+
+
+def test_colab_runtime_is_not_attention_once_cli_resolves(account, monkeypatch):
+    from backend import runtimes, tools
+    monkeypatch.setattr(tools, "status", lambda name, refresh=False: tools.ToolStatus(
+        name="colab", path="/opt/env/bin/colab", source="sibling", exists=True, executable=True,
+        version=None, min_version=None, version_ok=None, required=True, error=None,
+    ))
+    runner = colab_runner.ColabRunner("acct")
+    view = runtimes.runtime_view(runner)
+    assert view["health"]["error"] is None
+    assert view["state"] != "attention"

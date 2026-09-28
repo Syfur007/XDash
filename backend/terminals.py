@@ -175,6 +175,8 @@ def restart(session_name: str) -> Dict[str, Any]:
         record["created_at"] = _now()
         record["restart_count"] = record.get("restart_count", 0) + 1
         record["return_code"] = None
+        record.pop("status", None)  # clears a "lost" reconciliation (F0.6) — this is a fresh launch
+        record.pop("lost_at", None)
         _save(records)
     return _status_for(record)
 
@@ -190,6 +192,42 @@ def _is_managed(session_name: str) -> bool:
 
 def _record_for(session_name: str) -> Optional[Dict[str, Any]]:
     return next((r for r in _load() if r["session_name"] == session_name), None)
+
+
+def known_session_names() -> set:
+    """Every session_name currently recorded — backend/housekeeping.py's
+    orphan check for `data/<profile>/dashboard_logs/<session>.log` (F5): a
+    snapshot whose session isn't here belongs to a session already forgotten
+    by kill() (or by an Experiment's own cascade delete), or to a restart
+    that moved on to a fresh session name."""
+    return {r["session_name"] for r in _load()}
+
+
+def reap_finished_session(session_name: str) -> bool:
+    """XDASH_FIXES_PLAN.md F5 — kills the underlying tmux session for a
+    *finished* managed record (completed/failed/stopped — never running,
+    never lost, since a lost record's session is already gone) without
+    forgetting the record itself, unlike kill(): housekeeping's own
+    'terminal records' sweep decides separately, and later, whether the
+    record is old enough to prune. Persists the pane first (same
+    snapshot-before-kill as kill()), so nothing about a finished run's
+    output is lost by freeing its idle tmux shell. A no-op (returns False)
+    for an unmanaged/unknown session, one that isn't currently alive, or one
+    that's still running — never touches any of those."""
+    record = _record_for(session_name)
+    if record is None:
+        return False
+    host_id = _host_id_of(record)
+    if session_name not in tmux.list_sessions(host_id=host_id):
+        return False
+    status = _status_for(record)["status"]
+    if status not in ("completed", "failed", "stopped"):
+        return False
+    text = tmux.capture_pane(session_name, host_id=host_id)
+    if text:
+        _save_snapshot(session_name, text)
+    tmux.kill_session(session_name, host_id=host_id)
+    return True
 
 
 def stop(session_name: str) -> bool:
@@ -281,9 +319,37 @@ def _remember_return_code(session_name: str, code: int) -> None:
             _save(records)
 
 
+def _reconcile_lost(session_name: str) -> None:
+    """XDASH_FIXES_PLAN.md F0.6 (issue 9) — persists `status: "lost"` and
+    `lost_at` onto the stored record, once, the first time _status_for finds
+    a managed session with no live tmux pane, no remembered return_code and
+    (locally) no matching report: genuinely lost, not merely interrupted.
+    Three 2026-09 records were re-derived as "interrupted" on every single
+    poll forever; this makes that a one-time transition instead — see
+    _status_for's own check of `record.get("status") == "lost"` above."""
+    with _lock:
+        records = _load()
+        changed = False
+        for r in records:
+            if r["session_name"] == session_name and r.get("status") != "lost":
+                r["status"] = "lost"
+                r["lost_at"] = _now()
+                changed = True
+        if changed:
+            _save(records)
+
+
 def _status_for(record: Dict[str, Any], alive_sessions: Optional[set] = None) -> Dict[str, Any]:
     session_name = record["session_name"]
     host_id = _host_id_of(record)
+    if record.get("status") == "lost":
+        # Reconciled once already — never re-probed (F0.6). Only restart()
+        # (a fresh launch under the same session name) clears this.
+        return {
+            **record, "managed": True, "alive": False, "status": "lost",
+            "return_code": record.get("return_code"), "latest_metrics": None,
+            "restart_available": True,
+        }
     alive = session_name in (
         alive_sessions if alive_sessions is not None else set(tmux.list_sessions(host_id=host_id))
     )
@@ -311,12 +377,21 @@ def _status_for(record: Dict[str, Any], alive_sessions: Optional[set] = None) ->
             # Local only: reconciling after a dashboard restart, before this
             # module ever got to see the session alive and remember its code.
             # A remote host has no local report to read yet — see the
-            # docstring above — so it goes straight to "interrupted" instead.
+            # docstring above — so it's lost outright instead (below).
             report = reports.find_latest_report_for_experiment(record.get("experiment_name") or "")
-            status = "completed" if report else "interrupted"
-            restart_available = status == "interrupted"
+            if report:
+                status = "completed"
+                restart_available = False
+            else:
+                _reconcile_lost(session_name)
+                status = "lost"
+                restart_available = True
         else:
-            status = "interrupted"
+            # Genuinely gone (no return_code was ever remembered) — F0.6:
+            # persisted once so it stops being re-derived on every poll
+            # forever, which is what three 2026-09 records were doing.
+            _reconcile_lost(session_name)
+            status = "lost"
             restart_available = True
 
     return {

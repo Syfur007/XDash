@@ -247,15 +247,21 @@ function renderLabStudies(studies) {
 }
 
 // ---------------------------------------------------------------- runtimes
+// XDASH_FIXES_PLAN.md F0.3 — "attention" (real, cached health — see
+// backend/runtimes.py's _health()) reads the same as "offline"/
+// "unconfigured" here: all three mean "don't count on this runtime right
+// now," just for different reasons. What "needs attention: <reason>" adds
+// on top is r.health.error, which offline/unconfigured have no equivalent
+// of.
 function labRuntimeAccent(state_) {
   if (state_ === "busy" || state_ === "online") return "running";
-  if (state_ === "offline" || state_ === "unconfigured") return "failed";
+  if (state_ === "offline" || state_ === "unconfigured" || state_ === "attention") return "failed";
   return "completed";
 }
 
 function labRuntimeBadgeClass(state_) {
   if (state_ === "busy" || state_ === "online") return "amber";
-  if (state_ === "offline" || state_ === "unconfigured") return "red";
+  if (state_ === "offline" || state_ === "unconfigured" || state_ === "attention") return "red";
   return "slate";
 }
 
@@ -271,15 +277,24 @@ function labRuntimeBarsHtml(r) {
   return `<div class="concurrency-bar-track"><div class="concurrency-bar-fill" style="width:${capPct}%;"></div></div>${quotaHtml}`;
 }
 
+// XDASH_FIXES_PLAN.md F0.3 — "needs attention: <reason>", from the real
+// per-kind health check (backend/runtimes.py's _health()), not just the
+// bare state word "attention" would otherwise show on its own.
+function labRuntimeAttentionText(r) {
+  return r.state === "attention" && r.health && r.health.error ? `needs attention: ${r.health.error}` : "";
+}
+
 function labRuntimeTileHtml(r) {
   const acc = r.accelerator ? `${escapeHtml(r.accelerator.name)}${r.accelerator.vram_gb ? " " + r.accelerator.vram_gb + "G" : ""}` : "no accelerator info";
   const cap = r.capacity || {};
+  const attention = labRuntimeAttentionText(r);
   return `<div class="entity-card runtime-tile" data-lab-runtime="${escapeHtml(r.id)}">
     <div class="entity-card-accent ${labRuntimeAccent(r.state)}"></div>
     <div class="entity-card-body">
       <div class="entity-card-title">${escapeHtml(r.label)} <span class="mode-tag">${escapeHtml(r.kind)}</span></div>
       <div class="entity-card-sub">${escapeHtml(acc)} · ${escapeHtml(r.state)} · ${cap.used ?? 0}/${cap.limit ?? "∞"}</div>
       ${labRuntimeBarsHtml(r)}
+      ${attention ? `<div class="entity-card-sub" style="color:var(--red);">${escapeHtml(attention)}</div>` : ""}
       ${(r.running || []).length ? `<div class="entity-card-sub">running: ${r.running.map((x) => escapeHtml(x)).join(", ")}</div>` : ""}
     </div>
   </div>`;
@@ -287,10 +302,11 @@ function labRuntimeTileHtml(r) {
 
 function labRuntimeRowHtml(r) {
   const cap = r.capacity || {};
+  const attention = labRuntimeAttentionText(r);
   return `<div class="kaggle-history-row runtime-row" data-lab-runtime="${escapeHtml(r.id)}">
     <span class="badge ${labRuntimeBadgeClass(r.state)}">${escapeHtml(r.state)}</span>
     <strong>${escapeHtml(r.label)}</strong> <span class="mode-tag">${escapeHtml(r.kind)}</span>
-    — ${cap.used ?? 0}/${cap.limit ?? "∞"}${r.quota ? ` · ${fmtNum(r.quota.used)}/${fmtNum(r.quota.limit)} ${escapeHtml(r.quota.unit || "")}` : ""}
+    — ${cap.used ?? 0}/${cap.limit ?? "∞"}${r.quota ? ` · ${fmtNum(r.quota.used)}/${fmtNum(r.quota.limit)} ${escapeHtml(r.quota.unit || "")}` : ""}${attention ? ` · ${escapeHtml(attention)}` : ""}
   </div>`;
 }
 

@@ -22,6 +22,14 @@ CANONICAL_STATUSES = (
 # completed-history one.
 ACTIVE_STATUSES = frozenset({"pending", "running", "stopping", "interrupted"})
 
+# XDASH_FIXES_PLAN.md F0.6 (issue 9) — narrower than ACTIVE_STATUSES: a unit
+# actually occupying a slot right now, for runtimes._running_labels()'s
+# "running: …" line on a Lab tile. `interrupted` stays in ACTIVE_STATUSES
+# (attention/history views still want it) but drops out here — three dead
+# terminal records from before hosts/exit-code capture existed were counted
+# as "running" forever, since ACTIVE_STATUSES was the only set on offer.
+OCCUPYING_STATUSES = frozenset({"pending", "running", "stopping"})
+
 
 @dataclass
 class RunnerCapabilities:

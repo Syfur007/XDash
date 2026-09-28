@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
@@ -547,6 +548,22 @@ def delete_dataset(name: str) -> None:
         raise DatasetError("Unknown dataset %r" % name, status=404)
     del data[key]
     _save(data)
+    # XDASH_FIXES_PLAN.md F5's cascade: its cached thumbnails go with it —
+    # dataset_thumb_path() regenerates them on demand for a live dataset, so
+    # nothing is lost for one that still exists, and nothing should linger
+    # under data/<profile>/thumbs/ for one that no longer does.
+    thumbs_root = settings.state_dir / "thumbs"
+    thumb_dir = thumbs_root / key
+    if thumb_dir.is_dir() and thumbs_root.resolve() in thumb_dir.resolve().parents:
+        shutil.rmtree(thumb_dir, ignore_errors=True)
+
+
+def known_dataset_keys() -> Set[str]:
+    """Every dataset key currently registered — backend/housekeeping.py's
+    orphan check for `data/<profile>/thumbs/<key>/` (F5): a thumbs subdir
+    whose key isn't here belongs to a dataset deleted before this cascade
+    existed (delete_dataset() above now removes its own thumbs directly)."""
+    return {k for k in _load().keys() if k != _META_KEY}
 
 
 def link_fragment(name: str, fragment: str) -> Dict[str, Any]:
@@ -946,8 +963,12 @@ def _remote_fingerprint(transport: Transport, dir_path: str) -> Optional[Dict[st
 
 def _check_kaggle_access(slug: str, account_name: str) -> Dict[str, Any]:
     """`kaggle datasets files <slug> --page-size 1` as *account_name* (§5.1).
-    1.7.4.5's exit code for a 403/404 hasn't been verified (D1-live), so this
-    parses the text for the status regardless of exit code."""
+    Confirmed against the installed CLI 2.2.4's own source (kaggle/cli.py's
+    main(): any HTTPError other than 401 prints `str(e)` to stderr — e.g.
+    "404 Client Error: Not Found for url: ..." — and exits 1), so a 403/404
+    reliably shows up as both a non-zero exit *and* matching text; this
+    still parses the text regardless of exit code, since a 401 is the one
+    HTTPError that instead prints auth help text without "403"/"404" in it."""
     from . import kaggle as kaggle_backend
     try:
         proc = kaggle_backend._run_kaggle(["datasets", "files", slug, "--page-size", "1"], account_name, timeout=30)

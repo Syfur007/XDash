@@ -13,6 +13,7 @@ import time
 from typing import Optional
 
 from .config import settings
+from . import tools
 
 _lock = threading.Lock()
 _proc: Optional[subprocess.Popen] = None
@@ -35,7 +36,7 @@ def start() -> dict:
         try:
             _proc = subprocess.Popen(
                 [
-                    "tensorboard",
+                    tools.path("tensorboard"),
                     "--logdir", str(settings.runs_dir),
                     "--host", settings.tensorboard_host,
                     "--port", str(settings.tensorboard_port),
@@ -47,8 +48,8 @@ def start() -> dict:
         except FileNotFoundError:
             _proc = None
             raise TensorboardLaunchError(
-                "'tensorboard' executable not found. Install it with "
-                "`pip install tensorboard` in the environment running server.py."
+                "'tensorboard' executable not found. Install it with `pip install tensorboard` "
+                "in the environment running server.py, or set an override in Settings -> Tools."
             )
         time.sleep(1.5)  # give it a moment to bind before the frontend polls
         if _proc.poll() is not None:
